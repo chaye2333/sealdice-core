@@ -113,14 +113,13 @@ func officialQQCharacterAttributeLine(ctx *MsgContext) string {
 	return text
 }
 
-// officialQQCharacterStatusBar 生成完整的状态栏文本（属性 + 角色名，同一行）。
+// officialQQCharacterStatusBar 生成完整的状态栏文本（角色名 + 属性，同一行）。
 //
 // 输出形如：
 //
-//	$\scriptsize\textcolor{#E5484D}{\text{HP12/12 AC16}}$ 调查员甲
+//	$\scriptsize\textcolor{#E5484D}{\text{调查员甲 HP12/12 AC16}}$
 //
-// 属性部分是 QQ Markdown 的数学片段，客户端会渲染成小号红字；
-// 角色名放在片段之外，因此保持正常字号，并且与属性同行显示。
+// 角色名与属性都在同一个数学片段内，因此客户端会整体渲染成小号红字。
 func officialQQCharacterStatusBar(ctx *MsgContext) string {
 	if ctx == nil || ctx.Player == nil {
 		return ""
@@ -137,16 +136,17 @@ func officialQQCharacterStatusBar(ctx *MsgContext) string {
 		return ""
 	}
 
-	parts := make([]string, 0, 2)
+	// 角色名放在最前，便于一眼看到是谁在骰
+	parts := []string{officialQQEscapeMathText(name)}
 	if attrLine := officialQQCharacterAttributeLine(ctx); attrLine != "" {
-		parts = append(parts, fmt.Sprintf(
-			`$\scriptsize\textcolor{%s}{\text{%s}}$`,
-			officialQQCharacterStatusBarMarkdownColor,
-			officialQQEscapeMathText(attrLine),
-		))
+		parts = append(parts, officialQQEscapeMathText(attrLine))
 	}
-	parts = append(parts, name)
-	return strings.Join(parts, " ")
+
+	return fmt.Sprintf(
+		`$\scriptsize\textcolor{%s}{\text{%s}}$`,
+		officialQQCharacterStatusBarMarkdownColor,
+		strings.Join(parts, " "),
+	)
 }
 
 // withOfficialQQCharacterStatusBar 在掷骰 / 鉴定回复顶部加上虚拟角色状态栏。

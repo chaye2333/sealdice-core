@@ -104,22 +104,20 @@ func TestOfficialQQCharacterStatusBarRendersAttributes(t *testing.T) {
 	if !strings.Contains(bar, "调查员甲") {
 		t.Fatalf("expected character name, got %q", bar)
 	}
-	// 属性与角色名必须在同一行：数学片段之外紧跟一个空格和角色名，且整体不含换行
+	// 角色名与属性都必须在同一个数学片段内，这样才会整体渲染成小号红字
 	if strings.Contains(bar, "\n") {
 		t.Fatalf("expected a single-line status bar, got %q", bar)
 	}
-	attrSegment, name := "", ""
-	if idx := strings.LastIndex(bar, "$ "); idx >= 0 {
-		attrSegment, name = bar[:idx+1], bar[idx+2:]
+	if !strings.HasPrefix(bar, "$\\scriptsize\\textcolor{#E5484D}{\\text{") || !strings.HasSuffix(bar, "}}$") {
+		t.Fatalf("expected everything inside one small-red math segment, got %q", bar)
 	}
-	if attrSegment == "" {
-		t.Fatalf("expected the math segment to be followed by a space and the name, got %q", bar)
+	// 片段内不能有落在 \text{...} 之外的散落文本
+	inner := bar[strings.LastIndex(bar, `\text{`)+len(`\text{`) : strings.LastIndex(bar, "}}")]
+	if !strings.Contains(inner, "调查员甲") {
+		t.Fatalf("expected the character name inside the styled segment, got %q", bar)
 	}
-	if !strings.HasPrefix(attrSegment, "$\\scriptsize") || !strings.HasSuffix(attrSegment, "$") {
-		t.Fatalf("expected a well-formed math segment, got %q", attrSegment)
-	}
-	if name != "调查员甲" {
-		t.Fatalf("expected the character name right after the attributes on the same line, got %q", name)
+	if !strings.Contains(inner, "HP12/12") {
+		t.Fatalf("expected the attributes inside the styled segment, got %q", bar)
 	}
 	// 角色名只出现一次
 	if strings.Count(bar, "调查员甲") != 1 {
@@ -197,14 +195,18 @@ func TestOfficialQQCharacterStatusBarHiddenForNameOnlyTemplate(t *testing.T) {
 		t.Fatalf("expected no status bar when .sn is off, got %q", bar)
 	}
 
-	// 只设了名字，没有属性
+	// 只设了名字，没有属性：只有角色名，但仍然是小号红字
 	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW}"
 	bar := officialQQCharacterStatusBar(ctx)
-	if bar != "调查员甲" {
-		t.Fatalf("expected only the character name, got %q", bar)
+	if !strings.Contains(bar, "调查员甲") {
+		t.Fatalf("expected the character name, got %q", bar)
 	}
-	if strings.Contains(bar, `\textcolor`) {
-		t.Fatalf("expected no attribute math segment, got %q", bar)
+	if !strings.Contains(bar, `\scriptsize`) || !strings.Contains(bar, `\textcolor{#E5484D}`) {
+		t.Fatalf("expected the name to be styled small and red, got %q", bar)
+	}
+	inner := bar[strings.LastIndex(bar, `\text{`)+len(`\text{`) : strings.LastIndex(bar, "}}")]
+	if inner != "调查员甲" {
+		t.Fatalf("expected only the character name in the segment, got %q", inner)
 	}
 }
 
@@ -253,28 +255,22 @@ func TestOfficialQQStatusBarSurvivesSpecialCharactersInAttributes(t *testing.T) 
 	if strings.Count(bar, "{") != strings.Count(bar, "}") {
 		t.Fatalf("braces became unbalanced: %q", bar)
 	}
-	// 属性与名字之间用 "$ " 分隔；用最后一个匹配点，避免属性文本里出现 "$ " 造成误切
-	sep := strings.LastIndex(bar, "$ ")
-	if sep < 0 {
-		t.Fatalf("expected attributes and name on the same line, got %q", bar)
-	}
-	attrPart, name := bar[:sep+1], bar[sep+2:]
-	if !strings.HasPrefix(attrPart, "$\\scriptsize") || !strings.HasSuffix(attrPart, "$") {
+	if !strings.HasPrefix(bar, "$\\scriptsize\\textcolor{#E5484D}{\\text{") || !strings.HasSuffix(bar, "}}$") {
 		t.Fatalf("math segment is not well-formed: %q", bar)
 	}
-	// 只取出「属性文本」那一层（\text{...} 里面），模板自带的 \scriptsize、颜色代码不算
-	inner := attrPart[strings.LastIndex(attrPart, `\text{`)+len(`\text{`) : strings.LastIndex(attrPart, "}}")]
-	// \\ 是转义后的 LaTeX 命令，允许存在；其余半角符号会破坏片段，必须已被换成全角
+	// 只取出「文本内容」那一层（\text{...} 里面），模板自带的 \scriptsize、颜色代码不算
+	inner := bar[strings.LastIndex(bar, `\text{`)+len(`\text{`) : strings.LastIndex(bar, "}}")]
+	// 这些半角符号会破坏片段，必须已被换成全角
 	for _, token := range []string{"{c}", "_", "#", "%", "^", "&", `\b`} {
 		if strings.Contains(inner, token) {
-			t.Fatalf("attribute value still contains %q, which can break the math segment: %q", token, attrPart)
+			t.Fatalf("text still contains %q, which can break the math segment: %q", token, bar)
 		}
 	}
 	if !strings.Contains(inner, "＼") || !strings.Contains(inner, "｛") || !strings.Contains(inner, "｝") {
-		t.Fatalf("expected full-width escapes in the attribute value, got %q", inner)
+		t.Fatalf("expected full-width escapes in the text, got %q", inner)
 	}
-	if name != "调查员甲" {
-		t.Fatalf("expected the character name after the attributes, got %q", name)
+	if !strings.Contains(inner, "调查员甲") {
+		t.Fatalf("expected the character name inside the segment, got %q", inner)
 	}
 }
 
@@ -388,10 +384,10 @@ func TestOfficialQQRollReplyCarriesStatusBar(t *testing.T) {
 	if !got {
 		t.Fatal("timeout: expected a reply to '.r 1d6'")
 	}
-	if !strings.Contains(reply, `\textcolor{#E5484D}{\text{HP12}}`) {
+	if !strings.Contains(reply, `\textcolor{#E5484D}{\text{调查员甲 HP12}}`) {
 		t.Fatalf("expected the virtual status bar on top of the roll reply, got %q", reply)
 	}
-	// 状态栏必须在最顶部
+	// 状态栏必须在最顶部，且整体是单个数学片段
 	if !strings.HasPrefix(reply, "$\\scriptsize") {
 		t.Fatalf("expected the status bar to be the first line, got %q", reply)
 	}
