@@ -52,9 +52,10 @@ var DefaultConfig = Config{
 
 		OfficialQQMigrationEnable: false,
 
-		IdentityBindEnable:        false,
-		IdentityBindQuestionCount: 1,
-		IdentityBindCooldownSec:   60,
+		IdentityBindEnable:          false,
+		IdentityBindQuestionCount:   1,
+		IdentityBindCooldownSec:     60,
+		IdentityBindFailCooldownSec: 12 * 3600, // 答错锁 12 小时
 	},
 	RateLimitConfig{
 		RateLimitEnabled:         false,

@@ -91,11 +91,25 @@ type identityBindStore struct {
 	lastErr error
 }
 
+// identityBindQuestionKind 题目类型。
+type identityBindQuestionKind int
+
+const (
+	// identityBindQuestionChoice 选择题：给出若干选项，回复序号。
+	identityBindQuestionChoice identityBindQuestionKind = iota
+	// identityBindQuestionText 填空题：直接输入名称，避免用假的干扰项把答案暴露出来。
+	identityBindQuestionText
+)
+
 // identityBindQuestion 一道验证题。选项在生成时已打乱。
 type identityBindQuestion struct {
+	Kind identityBindQuestionKind
+	// Kind == choice 时有效
 	Prompt  string
 	Options []string
 	Answer  int
+	// 所有可接受的答案（用于填空，以及「本人任意一张卡名都算对」的情况）
+	Answers []string
 }
 
 // identityBindSession 一次等待作答的绑定会话。
@@ -179,6 +193,71 @@ func identityBindCooldown(d *Dice) time.Duration {
 		sec = identityBindMaxCooldownSec
 	}
 	return time.Duration(sec) * time.Second
+}
+
+// identityBindFailCooldown 取「答错后的锁定时长」并收敛到合法范围。
+func identityBindFailCooldown(d *Dice) time.Duration {
+	if d == nil {
+		return 0
+	}
+	sec := d.Config.IdentityBindFailCooldownSec
+	if sec <= 0 {
+		return 0
+	}
+	if sec > identityBindMaxCooldownSec {
+		sec = identityBindMaxCooldownSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// identityBindFailKey 答错锁定使用单独的键，避免和常规冷却互相覆盖。
+func identityBindFailKey(epID, userID string, action identityBindAction) string {
+	return identityBindSessionKey(epID, userID, action) + "|failed"
+}
+
+// identityBindFailCooldownRemaining 返回答错锁定还剩多久；未被锁定返回 0。
+func identityBindFailCooldownRemaining(d *Dice, epID, userID string, action identityBindAction) time.Duration {
+	cooldown := identityBindFailCooldown(d)
+	if cooldown <= 0 {
+		return 0
+	}
+	value, ok := globalIdentityBindLastAttempt.Load(identityBindFailKey(epID, userID, action))
+	if !ok || value == nil {
+		return 0
+	}
+	elapsed := time.Since(time.Unix(value.At, 0))
+	if elapsed >= cooldown {
+		return 0
+	}
+	return cooldown - elapsed
+}
+
+// identityBindMarkFailed 记录一次答错，进入锁定。
+func identityBindMarkFailed(epID, userID string, action identityBindAction) {
+	globalIdentityBindLastAttempt.Store(
+		identityBindFailKey(epID, userID, action),
+		&identityBindLastAttempt{At: time.Now().Unix()},
+	)
+}
+
+// identityBindFormatDuration 把剩余时长格式化成「12 小时 3 分」这样的可读文本。
+func identityBindFormatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	total := int64(d.Seconds())
+	hours := total / 3600
+	minutes := (total % 3600) / 60
+	switch {
+	case hours > 0 && minutes > 0:
+		return fmt.Sprintf("%d 小时 %d 分", hours, minutes)
+	case hours > 0:
+		return fmt.Sprintf("%d 小时", hours)
+	case minutes > 0:
+		return fmt.Sprintf("%d 分", minutes)
+	default:
+		return fmt.Sprintf("%d 秒", total)
+	}
 }
 
 // ---------- 身份字符串处理 ----------
@@ -549,18 +628,17 @@ func identityBindClearSession(key string) {
 // identityBindCooldownRemaining 返回还需要等待多久才能再次发起绑定。
 func identityBindCooldownRemaining(d *Dice, epID, userID string, action identityBindAction) time.Duration {
 	cooldown := identityBindCooldown(d)
-	if cooldown <= 0 {
-		return 0
+	if cooldown > 0 {
+		if value, ok := globalIdentityBindLastAttempt.Load(identityBindSessionKey(epID, userID, action)); ok && value != nil {
+			elapsed := time.Since(time.Unix(value.At, 0))
+			if elapsed < cooldown {
+				return cooldown - elapsed
+			}
+		}
 	}
-	value, ok := globalIdentityBindLastAttempt.Load(identityBindSessionKey(epID, userID, action))
-	if !ok || value == nil {
-		return 0
-	}
-	elapsed := time.Since(time.Unix(value.At, 0))
-	if elapsed >= cooldown {
-		return 0
-	}
-	return cooldown - elapsed
+
+	// 答错锁定优先返回（通常远长于常规冷却）
+	return identityBindFailCooldownRemaining(d, epID, userID, action)
 }
 
 func identityBindMarkAttempt(epID, userID string, action identityBindAction) {
@@ -622,12 +700,31 @@ func identityBindBuildQuestions(
 			}
 		}
 		questions = append(questions, identityBindQuestion{
+			Kind:    identityBindQuestionChoice,
 			Prompt:  fmt.Sprintf("%s（选项：%s）", prefix, strings.Join(options, " / ")),
 			Options: options,
 			Answer:  answerIndex,
+			// 所有候选名都算对：比如玩家有多张卡，问其中一张时选另一张也算他知道自己的卡
+			Answers: names,
 		})
 	}
 	return questions, len(questions) > 0
+}
+
+// identityBindBuildTextQuestion 生成「填空」题：直接把名字列出来让玩家回答。
+//
+// 日志名这类信息如果用选择项，干扰项要么是假的（一眼看穿）、要么来自别人的群
+// （泄露信息），所以改为填空——玩家必须真的知道旧群里有哪些日志名。
+func identityBindBuildTextQuestion(prefix string, candidates []string) (identityBindQuestion, bool) {
+	names := shuffleStrings(dedupeNonEmpty(candidates))
+	if len(names) == 0 {
+		return identityBindQuestion{}, false
+	}
+	return identityBindQuestion{
+		Kind:    identityBindQuestionText,
+		Prompt:  fmt.Sprintf("%s（本群共有 %d 个日志：%s；回复其中一个即可）", prefix, len(names), strings.Join(names, " / ")),
+		Answers: names,
+	}, true
 }
 
 func dedupeNonEmpty(items []string) []string {
@@ -707,36 +804,27 @@ func identityBindLogNames(d *Dice, oldGroupID string) ([]string, error) {
 	return dedupeNonEmpty(names), nil
 }
 
-// identityBindLogDecoyNames 生成日志题的干扰项。
-// 不去查询其它群的真实日志名：LogGetList 需要具体群号，全表扫描代价过高。
-// 这里使用带明确标记的虚构名字，既不会与真实日志名混淆，也不泄露其它群的信息。
-func identityBindLogDecoyNames(limit int) []string {
-	if limit <= 0 {
-		return nil
-	}
-	base := []string{
-		"第一话", "第二话", "第三话", "序章", "终章",
-		"团录", "记录", "主团日志", "支线", "番外",
-	}
-	result := make([]string, 0, limit)
-	for _, name := range base {
-		result = append(result, "[其它群] "+name)
-		if len(result) >= limit {
-			break
-		}
-	}
-	return result
-}
-
 // ---------- 会话输出 ----------
 
 func identityBindFormatQuestions(questions []identityBindQuestion) string {
+	hasText := false
+	for _, question := range questions {
+		if question.Kind == identityBindQuestionText {
+			hasText = true
+			break
+		}
+	}
+
 	lines := make([]string, 0, len(questions)+2)
-	lines = append(lines, "请按顺序回答下面的问题，把每题的选项序号连起来回复即可，例如 `1234`：")
+	if hasText {
+		lines = append(lines, "请按顺序回答下面的问题，直接回复答案文字即可：")
+	} else {
+		lines = append(lines, "请按顺序回答下面的问题，把每题的选项序号连起来回复即可，例如 `1234`：")
+	}
 	for i, question := range questions {
 		lines = append(lines, fmt.Sprintf("%d. %s", i+1, question.Prompt))
 	}
-	lines = append(lines, "回复 `.bind cancel` 可以取消本次绑定。")
+	lines = append(lines, "回复 `.bind cancel` 可以取消本次绑定；答错会被锁定，请勿尝试猜测。")
 	return strings.Join(lines, "\n")
 }
 
@@ -760,18 +848,79 @@ func identityBindParseAnswers(text string, questionCount int) ([]int, bool) {
 	return digits, true
 }
 
-// identityBindCheckAnswers 校验答案，全部正确才算通过。
+// identityBindCheckAnswers 校验选择题答案，全部正确才算通过。
 func identityBindCheckAnswers(questions []identityBindQuestion, answers []int) bool {
 	if len(questions) != len(answers) {
 		return false
 	}
 	for i, question := range questions {
+		if question.Kind != identityBindQuestionChoice {
+			return false
+		}
 		// 选项序号从 1 开始
 		if answers[i]-1 != question.Answer {
 			return false
 		}
 	}
 	return true
+}
+
+// identityBindCheckTextAnswers 校验填空题答案（大小写不敏感，忽略首尾空白）。
+// 任意一个可接受答案命中即可。
+func identityBindCheckTextAnswers(questions []identityBindQuestion, answers []string) bool {
+	if len(questions) != len(answers) {
+		return false
+	}
+	for i, question := range questions {
+		if question.Kind != identityBindQuestionText {
+			return false
+		}
+		given := strings.TrimSpace(answers[i])
+		if given == "" {
+			return false
+		}
+		hit := false
+		for _, want := range question.Answers {
+			if strings.EqualFold(strings.TrimSpace(want), given) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return false
+		}
+	}
+	return true
+}
+
+// identityBindSplitTextAnswer 把用户回复拆成「每题的填空答案」。
+// 约定：单题用整段文本；多题用 " / " 或空格分隔。
+func identityBindSplitTextAnswer(raw string, questionCount int) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if questionCount <= 1 {
+		return []string{raw}
+	}
+	for _, sep := range []string{" / ", "/", "，", ","} {
+		if strings.Contains(raw, sep) {
+			parts := strings.Split(raw, sep)
+			result := make([]string, 0, len(parts))
+			for _, part := range parts {
+				if trimmed := strings.TrimSpace(part); trimmed != "" {
+					result = append(result, trimmed)
+				}
+			}
+			if len(result) == questionCount {
+				return result
+			}
+		}
+	}
+	if parts := strings.Fields(raw); len(parts) == questionCount {
+		return parts
+	}
+	return nil
 }
 
 // ---------- .bind 指令 ----------
@@ -1025,11 +1174,15 @@ func identityBindVerifyUserAnswers(ctx *MsgContext, msg *Message, sessionKey str
 
 	if !identityBindCheckAnswers(session.Questions, answers) {
 		identityBindClearSession(sessionKey)
-		identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionUser)
-		ReplyToSender(ctx, msg, "答案不正确，本次绑定未通过。可以稍后重新发送 `.bind <旧QQ号> <旧群号>` 再试一次。")
+		identityBindMarkFailed(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionUser)
+		lock := identityBindFailCooldown(d)
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"答案不正确，本次绑定未通过。为防止猜测，%s内不能再发起绑定。",
+			identityBindFormatDuration(lock)))
 		ctx.Notice(fmt.Sprintf(
-			"身份绑定验证失败: 群 <%s>(%s) 用户 <%s>(%s) 尝试绑定到 %s",
-			ctx.Group.GroupName, ctx.Group.GroupID, msg.Sender.Nickname, ctx.Player.UserID, session.Old.UserID,
+			"身份绑定验证失败: 群 <%s>(%s) 用户 <%s>(%s) 尝试绑定到 %s（已锁定 %s）",
+			ctx.Group.GroupName, ctx.Group.GroupID, msg.Sender.Nickname, ctx.Player.UserID,
+			session.Old.UserID, identityBindFormatDuration(lock),
 		), NoticeTypeGroup)
 		return solved
 	}
@@ -1325,13 +1478,13 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 			ReplyToSender(ctx, msg, identityBindFormatQuestions(session.Questions))
 			return solved
 		}
-		parsed, valid := identityBindParseAnswers(raw, len(session.Questions))
-		if !valid {
-			ReplyToSender(ctx, msg, fmt.Sprintf("答案格式不正确，请给出 %d 个选项序号，例如 `%s`。",
-				len(session.Questions), strings.Repeat("1", len(session.Questions))))
+		// 日志题是填空题：直接比对日志名
+		textAnswers := identityBindSplitTextAnswer(raw, len(session.Questions))
+		if textAnswers == nil {
+			ReplyToSender(ctx, msg, "请直接回复日志名（多题用 ` / ` 分隔）。")
 			return solved
 		}
-		return identityBindVerifyLogAnswers(ctx, msg, sessionKey, session, parsed)
+		return identityBindVerifyLogAnswers(ctx, msg, sessionKey, session, textAnswers)
 	}
 
 	// 解析旧群号：
@@ -1367,18 +1520,18 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		return solved
 	}
 	if len(names) == 0 {
-		identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, action)
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"旧群 %s 没有任何日志记录，无法出题验证。请确认旧群号正确，或该群此前确实记录过日志。", oldGroupID))
 		return solved
 	}
 
-	questions, ok := identityBindBuildQuestions("属于这个群的日志名是", names, identityBindLogDecoyNames(16), identityBindQuestionCount(d))
+	// 日志题用填空：不用假的干扰项，避免「[其它群]」这种一眼可辨的选项让题目失去意义
+	question, ok := identityBindBuildTextQuestion("这是你们团在旧群的日志名，请回复其中一个", names)
 	if !ok {
-		identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, action)
 		ReplyToSender(ctx, msg, "生成验证题目失败，请联系骰主处理。")
 		return solved
 	}
+	questions := []identityBindQuestion{question}
 
 	oldGroupName := ""
 	if group, exists := ctx.Session.ServiceAtNew.Load(oldGroupID); exists && group != nil {
@@ -1410,17 +1563,21 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 	return solved
 }
 
-func identityBindVerifyLogAnswers(ctx *MsgContext, msg *Message, sessionKey string, session *identityBindSession, answers []int) CmdExecuteResult {
+func identityBindVerifyLogAnswers(ctx *MsgContext, msg *Message, sessionKey string, session *identityBindSession, answers []string) CmdExecuteResult {
 	d := ctx.Dice
 	solved := CmdExecuteResult{Matched: true, Solved: true}
 
-	if !identityBindCheckAnswers(session.Questions, answers) {
+	if !identityBindCheckTextAnswers(session.Questions, answers) {
 		identityBindClearSession(sessionKey)
-		identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionGroup)
-		ReplyToSender(ctx, msg, "答案不正确，本次日志绑定未通过。")
+		identityBindMarkFailed(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionGroup)
+		lock := identityBindFailCooldown(d)
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"答案不正确，本次群绑定未通过。为防止猜测，%s内不能再发起绑定。",
+			identityBindFormatDuration(lock)))
 		ctx.Notice(fmt.Sprintf(
-			"日志绑定验证失败: 群 <%s>(%s) 用户 <%s>(%s) 尝试绑定到旧群 %s",
-			ctx.Group.GroupName, ctx.Group.GroupID, msg.Sender.Nickname, ctx.Player.UserID, session.Old.GroupID,
+			"群绑定验证失败: 群 <%s>(%s) 用户 <%s>(%s) 尝试绑定到旧群 %s（已锁定 %s）",
+			ctx.Group.GroupName, ctx.Group.GroupID, msg.Sender.Nickname, ctx.Player.UserID,
+			session.Old.GroupID, identityBindFormatDuration(lock),
 		), NoticeTypeGroup)
 		return solved
 	}
@@ -1440,7 +1597,7 @@ func identityBindVerifyLogAnswers(ctx *MsgContext, msg *Message, sessionKey stri
 	identityBindClearSession(sessionKey)
 
 	ReplyToSender(ctx, msg, fmt.Sprintf(
-		"日志绑定成功！当前群现在会读取旧群 %s 的日志记录。\n如需解除请发送 `.log unbind`。",
+		"日志绑定成功！当前群现在会读取旧群 %s 的日志记录。\n如需解除请发送 `.group unbind`。",
 		session.Old.GroupID,
 	))
 	ctx.Notice(fmt.Sprintf(

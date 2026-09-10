@@ -85,6 +85,14 @@ func (c *Config) FixIdentityBindConfig() {
 	if c.IdentityBindCooldownSec > identityBindMaxCooldownSec {
 		c.IdentityBindCooldownSec = identityBindMaxCooldownSec
 	}
+	// 答错锁定：默认 12 小时。老配置文件里该字段为 0，需要补成默认值，
+	// 否则等于「答错没有任何惩罚」，会被穷举爆破。
+	if c.IdentityBindFailCooldownSec <= 0 {
+		c.IdentityBindFailCooldownSec = DefaultConfig.IdentityBindFailCooldownSec
+	}
+	if c.IdentityBindFailCooldownSec > identityBindMaxCooldownSec {
+		c.IdentityBindFailCooldownSec = identityBindMaxCooldownSec
+	}
 }
 
 // migrateOld2Version1 旧格式设置项的迁移
@@ -204,6 +212,9 @@ type BaseConfig struct {
 	IdentityBindQuestionCount int64 `json:"identityBindQuestionCount" yaml:"identityBindQuestionCount"`
 	// IdentityBindCooldownSec 同一个用户两次发起绑定之间的最小间隔（秒）。
 	IdentityBindCooldownSec int64 `json:"identityBindCooldownSec" yaml:"identityBindCooldownSec"`
+	// IdentityBindFailCooldownSec 答案答错后的锁定时长（秒），默认 12 小时。
+	// 目的是防止用穷举的方式猜别人的角色卡名 / 日志名。
+	IdentityBindFailCooldownSec int64 `json:"identityBindFailCooldownSec" yaml:"identityBindFailCooldownSec"`
 }
 
 type RateLimitConfig struct {

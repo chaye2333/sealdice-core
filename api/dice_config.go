@@ -487,6 +487,17 @@ func DiceConfigSet(c echo.Context) error {
 			}
 		}
 	}
+
+	if val, ok := jsonMap["identityBindFailCooldownSec"]; ok {
+		switch v := val.(type) {
+		case float64:
+			config.IdentityBindFailCooldownSec = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				config.IdentityBindFailCooldownSec = parsed
+			}
+		}
+	}
 	config.FixIdentityBindConfig()
 
 	if val, ok := jsonMap["playerNameWrapEnable"]; ok {
