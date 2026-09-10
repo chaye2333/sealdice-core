@@ -1,0 +1,6 @@
+# pnpm 10+ 默认不执行依赖的构建脚本。
+# esbuild 与 @tailwindcss/oxide 都是原生模块，必须允许其安装脚本才能正常构建 WebUI。
+# 缺少这些授权时，pnpm install --frozen-lockfile 会以 ERR_PNPM_IGNORED_BUILDS 失败。
+allowBuilds:
+  '@tailwindcss/oxide': true
+  esbuild: true
