@@ -17,7 +17,9 @@ WORKDIR /src/ui
 RUN corepack enable
 
 # 先装依赖，利用 Docker 层缓存
-COPY ui/package.json ui/pnpm-lock.yaml ./
+# pnpm-workspace.yaml 里有 allowBuilds 授权（esbuild / @tailwindcss/oxide 是原生模块），
+# 少了它 pnpm install 会以 ERR_PNPM_IGNORED_BUILDS 失败。
+COPY ui/package.json ui/pnpm-lock.yaml ui/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY ui/ ./
