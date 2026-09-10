@@ -241,7 +241,46 @@ docker compose -f docker-compose.example.yml up -d
 * `latest` 只在默认分支上打；另外每个分支还会打一个同名 tag（如 `master`）。
 * GitHub 用户名有大写字母时，GHCR 地址要全小写。
 
-### 5.6 关于 WebUI 的 pnpm 依赖授权（踩过的坑）
+### 5.6 关于 WebUI：`ui/` 目录不是管理界面（重要）
+
+仓库根目录的 **`ui/` 不是海豹的管理界面**，它是海豹自带的一个 Vue 脚手架样例页
+（`HelloWorld.vue`、`TheWelcome.vue`、`counter.ts`），编译出来就是
+`You've successfully created a project with Vite + Vue 3` 那个欢迎页。
+
+真正的管理界面由 **`sealdice-ui`** 仓库产出，上游的约定是：
+
+```
+static/frontend/{index.html, favicon.svg, assets/...}   -> 被 static/static.go 的 go:embed 打进二进制
+```
+
+获取方式写在 README 里：
+
+```bash
+go generate ./...
+```
+
+它执行 `static/gen/download-fe.go`，从
+`https://github.com/sealdice/sealdice-ui/releases/download/pre-release/sealdice-ui.zip`
+下载官方前端产物并解压到 `static/frontend`。
+
+**本仓库的 Dockerfile 已经按这套机制处理**：在 Go 构建阶段执行
+`go generate ./static/...`，并断言 `index.html` 与 `assets/` 存在，
+下载失败就直接让构建失败——不会再出现「镜像能起来、但页面是脚手架欢迎页」这种情况。
+
+工作流里还有一个**烟雾测试**：启动容器抓首页，校验：
+
+* 不是占位页（`not bundled in this checkout`）；
+* 不是脚手架页（`Vite + Vue 3`）；
+* 首页引用的 `assets/index-*.js` 能真实访问。
+
+三者都通过才算构建成功。
+
+> 想改管理界面本身，要去 [sealdice-ui](https://github.com/sealdice/sealdice-ui) 仓库改，
+> 不是在 sealdice-core 的 `ui/` 里改。改完发布后重新构建本镜像即可生效。
+
+### 5.7 关于 pnpm 依赖授权（另一个踩过的坑）
+
+（如果以后你决定改成从 `ui/` 或 `sealdice-ui` 源码构建前端，会需要这段）
 
 `ui/pnpm-workspace.yaml` 里的 `allowBuilds` 是**必须的**：
 
@@ -253,8 +292,8 @@ allowBuilds:
 
 pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 和 `@tailwindcss/oxide` 都是原生模块，
 没有这一步 `pnpm install --frozen-lockfile` 会以 `ERR_PNPM_IGNORED_BUILDS` 失败，
-进而让整个镜像构建中断。Dockerfile 里必须把它和 `package.json`、`pnpm-lock.yaml`
-一起 COPY 进构建上下文，否则镜像内看不到这个授权文件。
+进而让整个镜像构建中断。如果用 Dockerfile 里的 `COPY` 只拷了 `package.json` 与
+`pnpm-lock.yaml`，镜像内是看不到这个授权文件的，必须把它一起 COPY 进构建上下文。
 
 ---
 
