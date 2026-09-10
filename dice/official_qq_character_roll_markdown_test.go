@@ -104,10 +104,22 @@ func TestOfficialQQCharacterStatusBarRendersAttributes(t *testing.T) {
 	if !strings.Contains(bar, "调查员甲") {
 		t.Fatalf("expected character name, got %q", bar)
 	}
-	// 角色名必须在数学片段之外，保持正常字号
-	lastLine := bar[strings.LastIndex(bar, "\n")+1:]
-	if lastLine != "调查员甲" {
-		t.Fatalf("expected character name on its own line outside the math segment, got %q", bar)
+	// 属性与角色名必须在同一行：数学片段之外紧跟一个空格和角色名，且整体不含换行
+	if strings.Contains(bar, "\n") {
+		t.Fatalf("expected a single-line status bar, got %q", bar)
+	}
+	attrSegment, name := "", ""
+	if idx := strings.LastIndex(bar, "$ "); idx >= 0 {
+		attrSegment, name = bar[:idx+1], bar[idx+2:]
+	}
+	if attrSegment == "" {
+		t.Fatalf("expected the math segment to be followed by a space and the name, got %q", bar)
+	}
+	if !strings.HasPrefix(attrSegment, "$\\scriptsize") || !strings.HasSuffix(attrSegment, "$") {
+		t.Fatalf("expected a well-formed math segment, got %q", attrSegment)
+	}
+	if name != "调查员甲" {
+		t.Fatalf("expected the character name right after the attributes on the same line, got %q", name)
 	}
 	// 角色名只出现一次
 	if strings.Count(bar, "调查员甲") != 1 {
@@ -234,20 +246,35 @@ func TestOfficialQQStatusBarSurvivesSpecialCharactersInAttributes(t *testing.T) 
 	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} N{备注}"
 
 	bar := officialQQCharacterStatusBar(ctx)
-	// 数学片段必须恰好闭合一次：$...$
+	// 数学片段内的 $ 已被转义成全角，所以整串里应该只剩一对定界符
 	if strings.Count(bar, "$") != 2 {
 		t.Fatalf("math segment was broken by special characters: %q", bar)
 	}
 	if strings.Count(bar, "{") != strings.Count(bar, "}") {
 		t.Fatalf("braces became unbalanced: %q", bar)
 	}
-	// 结尾必须是 $，且角色名仍在片段之外
-	firstLine, _, found := strings.Cut(bar, "\n")
-	if !found {
-		t.Fatalf("expected the status bar to contain a name line: %q", bar)
+	// 属性与名字之间用 "$ " 分隔；用最后一个匹配点，避免属性文本里出现 "$ " 造成误切
+	sep := strings.LastIndex(bar, "$ ")
+	if sep < 0 {
+		t.Fatalf("expected attributes and name on the same line, got %q", bar)
 	}
-	if !strings.HasSuffix(firstLine, "$") {
-		t.Fatalf("math segment does not close on the same line: %q", bar)
+	attrPart, name := bar[:sep+1], bar[sep+2:]
+	if !strings.HasPrefix(attrPart, "$\\scriptsize") || !strings.HasSuffix(attrPart, "$") {
+		t.Fatalf("math segment is not well-formed: %q", bar)
+	}
+	// 只取出「属性文本」那一层（\text{...} 里面），模板自带的 \scriptsize、颜色代码不算
+	inner := attrPart[strings.LastIndex(attrPart, `\text{`)+len(`\text{`) : strings.LastIndex(attrPart, "}}")]
+	// \\ 是转义后的 LaTeX 命令，允许存在；其余半角符号会破坏片段，必须已被换成全角
+	for _, token := range []string{"{c}", "_", "#", "%", "^", "&", `\b`} {
+		if strings.Contains(inner, token) {
+			t.Fatalf("attribute value still contains %q, which can break the math segment: %q", token, attrPart)
+		}
+	}
+	if !strings.Contains(inner, "＼") || !strings.Contains(inner, "｛") || !strings.Contains(inner, "｝") {
+		t.Fatalf("expected full-width escapes in the attribute value, got %q", inner)
+	}
+	if name != "调查员甲" {
+		t.Fatalf("expected the character name after the attributes, got %q", name)
 	}
 }
 
@@ -259,9 +286,9 @@ func TestOfficialQQStatusBarNewlinesDoNotBreakMathSegment(t *testing.T) {
 	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} {备注}"
 
 	bar := officialQQCharacterStatusBar(ctx)
-	// 状态栏只能是两行：属性行 + 角色名
-	if lines := strings.Split(bar, "\n"); len(lines) != 2 {
-		t.Fatalf("expected 2 lines, got %d: %q", len(lines), bar)
+	// 属性里的换行会被压成空格，状态栏整体必须仍是单行
+	if lines := strings.Split(bar, "\n"); len(lines) != 1 {
+		t.Fatalf("expected a single line, got %d: %q", len(lines), bar)
 	}
 }
 

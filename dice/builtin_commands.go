@@ -2748,6 +2748,18 @@ func (d *Dice) registerCoreCommands() {
 			return identityBindRunUnbind(ctx, msg, identityBindActionUser)
 		},
 	}
+
+	// 群绑定：把当前官方群绑定到迁移前的旧群，日志读取随之指向旧群。
+	// 与 .bind（个人身份绑定）互相独立，可以同时使用。
+	groupBindHelpText := identityBindLogHelp()
+	cmdGroupBind := &CmdItemInfo{
+		Name:      "groupbind",
+		ShortHelp: ".group bind <旧群号> // 把当前群绑定到旧群\n.group unbind // 解除群绑定",
+		Help:      "群绑定指令:\n" + groupBindHelpText,
+		Solve:     runIdentityBindGroupCommand,
+	}
+	d.CmdMap["group"] = cmdGroupBind
+	d.CmdMap["groupbind"] = cmdGroupBind
 }
 
 func getDefaultDicePoints(ctx *MsgContext) int64 {

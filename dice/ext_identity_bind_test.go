@@ -621,8 +621,155 @@ func TestIdentityBindLogCommandRejectsMissingOldGroup(t *testing.T) {
 	defer env.cleanup()
 
 	runIdentityBindLogCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, ".log bind <旧群号>") {
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, ".group bind <旧群号>") {
 		t.Fatalf("expected a usage reply, got %q", reply)
+	}
+}
+
+// ---------- .group 与 .bind 必须能同时使用 ----------
+
+func TestIdentityBindGroupCommandAndUserBindAreIndependent(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	// 旧身份既有角色卡（个人绑定要出题），旧群也有日志（群绑定要出题）
+	env.addOldCard(t, "调查员甲")
+	env.addOldLog(t, "第一话")
+
+	// 1) 先做个人身份绑定
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
+		t.Fatalf("expected a user-bind question prompt, got %q", reply)
+	}
+	userSessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
+	userSession, ok := identityBindLoadSession(userSessionKey)
+	if !ok {
+		t.Fatal("expected a pending user bind session")
+	}
+	before := env.recorder.messageCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(userSession.Questions[0].Answer + 1)}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "绑定成功") {
+		t.Fatalf("expected the user bind to succeed, got %q", reply)
+	}
+
+	// 2) 个人绑定已存在时，群绑定必须仍然可用（这是之前会互相阻断的地方）
+	groupSessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionGroup)
+	if _, exists := identityBindLoadSession(groupSessionKey); exists {
+		t.Fatal("group session should not exist yet")
+	}
+	before = env.recorder.messageCount()
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
+	groupPrompt := env.recorder.waitNextReply(t, before)
+	if !strings.Contains(groupPrompt, "共 1 题") {
+		t.Fatalf("expected a group-bind question prompt even though the user is already bound, got %q", groupPrompt)
+	}
+	groupSession, ok := identityBindLoadSession(groupSessionKey)
+	if !ok {
+		t.Fatal("expected a pending group bind session")
+	}
+	before = env.recorder.messageCount()
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", itoa(groupSession.Questions[0].Answer + 1)}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "日志绑定成功") {
+		t.Fatalf("expected the group bind to succeed, got %q", reply)
+	}
+
+	// 3) 两条绑定必须同时存在，且键互不覆盖
+	store := identityBindStoreOf(env.d)
+	userRecord, ok := store.get(env.d, identityBindUserKey(bindTestNewUserID))
+	if !ok {
+		t.Fatal("user binding disappeared after group bind")
+	}
+	if userRecord.Action != identityBindActionUser || userRecord.Old.UserID != bindTestOldUserID {
+		t.Fatalf("unexpected user binding record: %+v", userRecord)
+	}
+	groupRecord, ok := store.get(env.d, identityBindGroupKey(bindTestNewGroupID))
+	if !ok {
+		t.Fatal("group binding was not stored")
+	}
+	if groupRecord.Action != identityBindActionGroup || groupRecord.Old.GroupID != bindTestOldGroupID {
+		t.Fatalf("unexpected group binding record: %+v", groupRecord)
+	}
+	if userRecord.Key == groupRecord.Key {
+		t.Fatalf("user and group bindings must not share a store key: %q", userRecord.Key)
+	}
+}
+
+func TestIdentityBindGroupUnbindKeepsUserBind(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	store := identityBindStoreOf(env.d)
+
+	if err := store.put(env.d, &identityBindRecord{
+		Action: identityBindActionUser,
+		Key:    identityBindUserKey(bindTestNewUserID),
+		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
+		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
+	}); err != nil {
+		t.Fatalf("seed user bind: %v", err)
+	}
+	if err := store.put(env.d, &identityBindRecord{
+		Action: identityBindActionGroup,
+		Key:    identityBindGroupKey(bindTestNewGroupID),
+		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
+		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID},
+	}); err != nil {
+		t.Fatalf("seed group bind: %v", err)
+	}
+
+	// .group unbind 只应该删掉群绑定
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"unbind"}})
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "已解除") {
+		t.Fatalf("expected an unbind reply, got %q", reply)
+	}
+	if _, ok := store.get(env.d, identityBindGroupKey(bindTestNewGroupID)); ok {
+		t.Fatal("group binding should be gone")
+	}
+	if _, ok := store.get(env.d, identityBindUserKey(bindTestNewUserID)); !ok {
+		t.Fatal("user binding must survive .group unbind")
+	}
+}
+
+func TestIdentityBindGroupStatusShowsBinding(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	if err := identityBindStoreOf(env.d).put(env.d, &identityBindRecord{
+		Action: identityBindActionGroup,
+		Key:    identityBindGroupKey(bindTestNewGroupID),
+		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
+		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID, GroupName: "旧群"},
+	}); err != nil {
+		t.Fatalf("seed group bind: %v", err)
+	}
+
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"status"}})
+	reply := waitGroupMessage(t, env)
+	if !strings.Contains(reply, bindTestOldGroupID) || !strings.Contains(reply, "已绑定旧群") {
+		t.Fatalf("expected the group binding status, got %q", reply)
+	}
+}
+
+func TestIdentityBindLogAliasStillWorks(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	env.addOldLog(t, "第一话")
+
+	// 旧的 .log bind 写法必须继续可用
+	result, handled := runIdentityBindLogCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
+	if !handled || !result.Solved {
+		t.Fatalf("expected .log bind to keep working, got (%+v, %v)", result, handled)
+	}
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
+		t.Fatalf("expected a question prompt from the .log alias, got %q", reply)
+	}
+}
+
+func TestIdentityBindGroupHelpMentionsNewCommand(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"help"}})
+	reply := waitGroupMessage(t, env)
+	if !strings.Contains(reply, ".group bind") || !strings.Contains(reply, ".group unbind") {
+		t.Fatalf("expected help to document .group commands, got %q", reply)
 	}
 }
 
