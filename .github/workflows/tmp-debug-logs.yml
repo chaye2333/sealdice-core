@@ -47,3 +47,28 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build-only
           ls -la dist | head -20
+
+  reproduce-core-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Reproduce Dockerfile core stage exactly
+        run: |
+          set -x
+          rm -rf static/frontend && mkdir -p static/frontend
+          echo '<!doctype html><html><body>placeholder</body></html>' > static/frontend/index.html
+          export CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+          BUILD_META="+$(date -u +%Y%m%d)"
+          go build -trimpath \
+            -ldflags "-s -w -X 'sealdice-core/dice.VERSION_BUILD_METADATA=${BUILD_META}'" \
+            -o /tmp/sealdice-core . 2>&1 | tail -n 40
+          echo "build exit=$?"
+          ls -la /tmp/sealdice-core
+          /tmp/sealdice-core --version
+          echo "version exit=$?"
+
