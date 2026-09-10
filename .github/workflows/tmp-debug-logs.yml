@@ -1,6 +1,7 @@
 name: TMP Debug Fetch Logs
 
 on:
+  push:
   workflow_dispatch:
 
 permissions:
