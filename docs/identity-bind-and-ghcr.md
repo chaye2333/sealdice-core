@@ -214,6 +214,48 @@ docker run --rm ghcr.io/chaye2333/sealdice-core:latest --version
 
 输出的版本号里会带构建日期和短 hash（形如 `1.6.2-dev+20260910.abc1234`）。
 
+### 5.5 以后改代码怎么更新
+
+**你不需要在本地编译**，镜像由 GitHub 在云端构建：
+
+```bash
+# 在仓库目录里
+git add -A
+git commit -m "说明这次改了什么"
+git push origin master          # 你的默认分支是 master，不是 main
+```
+
+推送后 GitHub Actions 会依次：跑测试 → 编译 WebUI → 编译 Linux 核心 → 打包镜像 →
+推到 `ghcr.io/chaye2333/sealdice-core:latest`。然后服务器上：
+
+```bash
+docker pull ghcr.io/chaye2333/sealdice-core:latest
+docker compose -f docker-compose.example.yml up -d
+```
+
+几点提醒：
+
+* **默认分支是 `master`**。工作流同时监听 `master` 和 `main`，两个名字都能触发。
+* 工作流文件是 `.github/workflows/docker-ghcr.yml`，可以在仓库 **Actions** 标签页看进度。
+* 镜像构建前会先跑 `go test ./dice ./api`，**测试不过就不会推镜像**，避免把坏版本推上去。
+* `latest` 只在默认分支上打；另外每个分支还会打一个同名 tag（如 `master`）。
+* GitHub 用户名有大写字母时，GHCR 地址要全小写。
+
+### 5.6 关于 WebUI 的 pnpm 依赖授权（踩过的坑）
+
+`ui/pnpm-workspace.yaml` 里的 `allowBuilds` 是**必须的**：
+
+```yaml
+allowBuilds:
+  '@tailwindcss/oxide': true
+  esbuild: true
+```
+
+pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 和 `@tailwindcss/oxide` 都是原生模块，
+没有这一步 `pnpm install --frozen-lockfile` 会以 `ERR_PNPM_IGNORED_BUILDS` 失败，
+进而让整个镜像构建中断。Dockerfile 里必须把它和 `package.json`、`pnpm-lock.yaml`
+一起 COPY 进构建上下文，否则镜像内看不到这个授权文件。
+
 ---
 
 ## 六、上线验收清单
