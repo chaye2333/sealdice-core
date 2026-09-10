@@ -100,38 +100,52 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 烟雾测试：确认镜像里真的是海豹管理界面，而不是那个 Vue 脚手架样例页。
+      # 烟雾测试：确认镜像里真的是海豹管理界面，而不是占位页或 Vue 脚手架样例页。
       # 历史上这里踩过坑——曾经误用了仓库的 ui/ 目录，结果镜像里是 Vite 欢迎页。
+      #
+      # 判定依据：真正的构建产物一定会引用外链的哈希资源（assets/index-*.js），
+      # 而占位页 / 脚手架页都不满足，所以不看页面文案、只看资源引用，最不容易误判。
       - name: Smoke test the admin UI is bundled
         run: |
           set -e
           IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
           echo "verifying $IMAGE"
           docker run -d --name smktest -p 13211:3211 "$IMAGE"
+
           OK=""
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:13211/ -o /tmp/page.html; then OK=1; break; fi
             sleep 1
           done
+
           echo "--- container logs ---"
           docker logs smktest 2>&1 | head -30 || true
-          echo "--- fetched index.html (size: $(wc -c < /tmp/page.html 2>/dev/null || echo 0)) ---"
-          cat /tmp/page.html || true
+          echo "--- fetched index.html ---"
+          cat /tmp/page.html 2>/dev/null || true
           echo
-          if [ -z "$OK" ]; then
-            echo "::error::无法访问容器首页，UI 可能没启动"
+
+          fail() {
+            echo "::error::$1"
             docker rm -f smktest || true
             exit 1
+          }
+
+          [ -n "$OK" ] || fail "无法访问容器首页，UI 可能没启动"
+          grep -qi "not bundled in this checkout" /tmp/page.html && fail "镜像是用占位页编译的，前端没有打进去"
+          grep -qi "Vite + Vue 3\|You've successfully created" /tmp/page.html && fail "镜像里打包的是 Vue 脚手架样例页，不是海豹管理界面"
+
+          # 抽出首页引用的资源路径，确认它真实存在
+          ASSET=$(grep -oE '(src|href)="[^"]*assets/[^"]+"' /tmp/page.html | head -n1 | sed -E 's/.*="([^"]*)".*/\1/' || true)
+          if [ -z "$ASSET" ]; then
+            fail "首页没有引用构建后的 assets 资源，前端可能不是正式构建产物"
           fi
-          if grep -qi "UI Placeholder\|not bundled in this checkout" /tmp/page.html; then
-            echo "::error::镜像是用占位页编译的，前端没有打进去"
-            docker rm -f smktest || true
-            exit 1
-          fi
-          if grep -qi "Vite + Vue 3\|You've successfully created" /tmp/page.html; then
-            echo "::error::镜像里打包的是 Vue 脚手架样例页，不是海豹管理界面"
-            docker rm -f smktest || true
-            exit 1
-          fi
-          echo "OK: 管理界面已正确打包"
+          case "$ASSET" in
+            /*) URL="http://127.0.0.1:13211$ASSET" ;;
+            *)  URL="http://127.0.0.1:13211/$ASSET" ;;
+          esac
+          echo "checking asset: $URL"
+          curl -fsS "$URL" -o /tmp/asset.js || fail "首页引用的资源 $ASSET 无法访问"
+          echo "asset size: $(wc -c < /tmp/asset.js) bytes"
+
+          echo "OK: 管理界面已正确打包（资源 $ASSET 可用）"
           docker rm -f smktest
