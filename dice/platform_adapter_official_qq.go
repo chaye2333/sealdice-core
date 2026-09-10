@@ -1942,6 +1942,25 @@ func (pa *PlatformAdapterOfficialQQ) sendQQGuildDirectMsgRaw(ctx *MsgContext, ro
 	return res, err
 }
 
+// decodeOfficialQQFileInfo 把上传接口返回的 file_info 转成发送接口需要的字节。
+//
+// 两个上传接口返回的类型不同：
+//   - 群聊 dto.Media.FileInfo   是 string（base64 文本）
+//   - 单聊 dto.Message.FileInfo 是 []byte（同样是 base64 文本）
+//
+// 而 dto.MediaInfo.FileInfo 是 []byte，装的是**解码后的字节**；后续发送接口
+// 序列化时 Go 会对 []byte 再做一次 base64，二者叠加正好是接口期望的形态。
+// 曾经误按「官方文档说原样透传」去掉这一步，结果发送开始报
+// 40034032「请求参数file_info无效」，图片与语音全部发不出去。
+// 因此这里必须解码，解码失败时回退为原文以免丢失内容。
+func decodeOfficialQQFileInfo(fileInfo string) []byte {
+	decoded, err := base64.StdEncoding.DecodeString(fileInfo)
+	if err != nil {
+		return []byte(fileInfo)
+	}
+	return decoded
+}
+
 func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOpenID string, file *message.FileElement, fileType int) (*dto.MediaInfo, error) {
 	url, data, err := pa.prepareMediaMessage(file)
 	if err != nil {
@@ -1961,8 +1980,11 @@ func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOp
 	if err != nil {
 		return nil, err
 	}
+	// 与 uploadGroupMedia 保持一致：接口返回的 file_info 是 base64 文本，
+	// 先解码再交给后续发送接口；解不开时回退为原文。
+	// 单聊接口返回的是 []byte，转成 string 后按同一套逻辑处理。
 	return &dto.MediaInfo{
-		FileInfo: media.FileInfo,
+		FileInfo: decodeOfficialQQFileInfo(string(media.FileInfo)),
 	}, nil
 }
 
@@ -1985,14 +2007,8 @@ func (pa *PlatformAdapterOfficialQQ) uploadGroupMedia(qctx context.Context, grou
 	if err != nil {
 		return nil, err
 	}
-	// file_info 是「序列化后的二进制数据」，官方文档明确要求直接透传，不要解析。
-	// 这里绝不能做 base64 解码：它的值可能恰好落在合法 base64 字符集里
-	// （例如 "AE86C5D3F0E14B238C656C0F6DD1D0479C" 这种 32 位十六进制串），
-	// 解码会成功但把值改坏。
-	// 注意 dto.Media.FileInfo 是 string 而 dto.MediaInfo.FileInfo 是 []byte，
-	// 所以这里只需要按字节原样搬运，不做任何编解码。
 	return &dto.MediaInfo{
-		FileInfo: []byte(media.FileInfo),
+		FileInfo: decodeOfficialQQFileInfo(media.FileInfo),
 	}, nil
 }
 

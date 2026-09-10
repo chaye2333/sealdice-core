@@ -547,7 +547,7 @@ $\scriptsize\textcolor{#E5484D}{\text{调查员甲 SAN50 HP30/30 DEX60}}$
 
 ## 七点六、官方 QQ 富媒体（语音 / 文件）修复
 
-这一节修的是官方 QQ 适配器原有的三个问题，和插件（点歌卡片语音等）兼容性直接相关。
+这一节修的是官方 QQ 适配器的媒体发送问题，和插件（点歌卡片语音等）兼容性直接相关。
 
 ### 7.6.1 请求超时 3 秒 → 60 秒（最要紧的一个）
 
@@ -605,23 +605,48 @@ officialQQRequestTimeoutSec: 60
   `upload_prepare` 分片上传。
 * **频道（QQ-CH）场景不支持文件**，官方文档里就是 ❌，本补丁不动频道。
 
-### 7.6.3 修掉一个会悄悄改坏 file_info 的 base64 解码
+### 7.6.3 file_info 必须解码后再发（一次被回滚的"优化"）
+
+这块**踩过一次坑**，写下来免得以后有人再改错。
+
+上传接口返回的 `file_info`，**必须经过一次 base64 解码**再交给发送接口：
 
 ```go
-// 旧代码（定时炸弹）
 decodedFileInfo, decodeErr := base64.StdEncoding.DecodeString(media.FileInfo)
 if decodeErr != nil {
     decodedFileInfo = []byte(media.FileInfo)
 }
+return &dto.MediaInfo{FileInfo: decodedFileInfo}, nil
 ```
 
-`file_info` 是「序列化后的二进制数据」，官方文档要求**直接透传、不要解析**。
-它的值可能是 `AE86C5D3F0E14B238C656C0F6DD1D0479C` 这种 32 位十六进制串 ——
-**恰好是合法 base64**，`DecodeString` 会成功并把 32 字符解成 16 字节再发回去，
-值就被改坏了。现在改为按字节原样搬运，不做任何编解码。
+原因是类型叠加：
 
-> 这个 bug 在大多数随机 file_info 上「解不出来所以用原文」而侥幸没炸，
-> 但它是一个必然会踩到的定时炸弹。
+| 环节 | 字段类型 | 说明 |
+|---|---|---|
+| 上传接口返回 | `dto.Media.FileInfo` = `string` | 内容是 base64 文本 |
+| 适配器传出 | `dto.MediaInfo.FileInfo` = `[]byte` | 装的是**解码后的字节** |
+| 发送接口序列化 | Go 的 `encoding/json` | 对 `[]byte` 自动做一次 base64 |
+
+所以「先解码、再由 JSON 编码一次」正好还原成接口期望的形态。
+
+**曾经**有人（就是我）照着官方文档里「file_info 内部为序列化二进制，开发者无需解析，
+直接透传即可」的注释，把这步解码当成 bug 删掉了，结果发送立刻开始报：
+
+```
+code:400, {"message":"请求参数file_info无效","code":40034032}
+```
+
+图片和语音**全部发不出去**。已回滚，并加了测试锁定这个行为：
+
+* `TestOfficialQQUploadGroupMediaDecodesFileInfo`
+* `TestOfficialQQUploadC2CMediaDecodesFileInfo`
+* `TestOfficialQQUploadGroupMediaFallsBackWhenFileInfoNotBase64`
+
+**另外顺手修了一个真实的不一致**：单聊路径（`uploadC2CMedia`）上游**从来没有做过这步解码**，
+和群聊路径行为不同。现在两条路径统一走 `decodeOfficialQQFileInfo`。
+
+> 教训：官方文档的这句话描述的是「file_info 的语义」，但没描述 SDK 的字段类型；
+> 判断这类问题时，**能跑的实测行为优先于文档注释**。
 
 ---
 
@@ -654,7 +679,7 @@ if decodeErr != nil {
 | `dice/ext_log.go` | 抽出 `EvalPlayerGroupCardTemplate`；`.group bind` / `.log bind` 系列；读操作群回退 |
 | `dice/dice_attrs_manager.go` | `LoadByCtx` 支持绑定后的属性读取回退 |
 | `api/dice_config.go` | WebUI 保存绑定配置项与官方 QQ 请求超时 |
-| `dice/platform_adapter_official_qq.go` | 请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；修掉 file_info 的 base64 误解码 |
+| `dice/platform_adapter_official_qq.go` | 请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；统一 file_info 解码（单聊路径此前与群聊不一致） |
 
 新增测试：
 

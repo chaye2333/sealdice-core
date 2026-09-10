@@ -2,7 +2,9 @@
 package dice
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,33 +122,57 @@ func TestOfficialQQAdapterRequestTimeoutUsesConfig(t *testing.T) {
 	}
 }
 
-// ---------- ②-4 file_info 必须原样透传 ----------
+// ---------- ② file_info 必须解码后再传下去 ----------
 
-func TestOfficialQQUploadGroupMediaKeepsFileInfoVerbatim(t *testing.T) {
-	// 这串 32 位十六进制恰好是合法 base64：旧实现会把它解码成 16 字节二进制再发回去，
-	// 于是 file_info 被改坏。
-	const fileInfo = "AE86C5D3F0E14B238C656C0F6DD1D0479C"
+// TestOfficialQQUploadGroupMediaDecodesFileInfo 锁定一个容易误改的行为。
+//
+// 上传接口返回的 file_info 是 base64 文本，而 dto.MediaInfo.FileInfo 是 []byte；
+// 上游实现先 DecodeString 再交给后续发送接口，二者叠加正好是接口期望的形态。
+// 曾经按「官方文档说原样透传」把它去掉，结果发送时报
+// 40034032「请求参数file_info无效」，图片和语音全部发不出去。
+func TestOfficialQQUploadGroupMediaDecodesFileInfo(t *testing.T) {
+	raw := []byte{0x00, 0x01, 0xFF, 0x10, 0x7F, 0x80, 0xAB, 0xCD}
+	encoded := base64.StdEncoding.EncodeToString(raw)
 
-	stub := &officialQQStubAPI{lastFileInfo: fileInfo}
+	stub := &officialQQStubAPI{lastFileInfo: encoded}
 	pa := newOfficialQQMediaTestAdapter(t, stub)
 
-	file := &message.FileElement{URL: "https://example.com/a.txt"}
-	media, err := pa.uploadGroupMedia(context.Background(), "group-1", file, 4)
+	file := &message.FileElement{URL: "https://example.com/a.mp3"}
+	media, err := pa.uploadGroupMedia(context.Background(), "group-1", file, 3)
 	if err != nil {
 		t.Fatalf("uploadGroupMedia: %v", err)
 	}
-	if got := string(media.FileInfo); got != fileInfo {
-		t.Fatalf("file_info was modified: want %q, got %q", fileInfo, got)
+	if !bytes.Equal(media.FileInfo, raw) {
+		t.Fatalf("file_info should be base64-decoded before sending: want %v, got %v", raw, media.FileInfo)
 	}
-	// 同时确认传下去的 file_type 是文件类型 4
-	if len(stub.groupFileTypes) != 1 || stub.groupFileTypes[0] != 4 {
-		t.Fatalf("expected file_type=4 to be uploaded, got %v", stub.groupFileTypes)
+	// 同时确认传下去的 file_type 是语音类型 3
+	if len(stub.groupFileTypes) != 1 || stub.groupFileTypes[0] != 3 {
+		t.Fatalf("expected file_type=3 to be uploaded, got %v", stub.groupFileTypes)
 	}
 }
 
-func TestOfficialQQUploadC2CMediaKeepsFileInfoVerbatim(t *testing.T) {
-	const fileInfo = "DEADBEEF"
-	stub := &officialQQStubAPI{lastFileInfo: fileInfo}
+// TestOfficialQQUploadGroupMediaFallsBackWhenFileInfoNotBase64
+// 解不开时回退为原文，保证不会因为一次异常响应把内容丢掉。
+func TestOfficialQQUploadGroupMediaFallsBackWhenFileInfoNotBase64(t *testing.T) {
+	const notBase64 = "not-base64-@@@"
+	stub := &officialQQStubAPI{lastFileInfo: notBase64}
+	pa := newOfficialQQMediaTestAdapter(t, stub)
+
+	file := &message.FileElement{URL: "https://example.com/a.mp3"}
+	media, err := pa.uploadGroupMedia(context.Background(), "group-1", file, 3)
+	if err != nil {
+		t.Fatalf("uploadGroupMedia: %v", err)
+	}
+	if string(media.FileInfo) != notBase64 {
+		t.Fatalf("expected a fallback to the raw value, got %q", media.FileInfo)
+	}
+}
+
+func TestOfficialQQUploadC2CMediaDecodesFileInfo(t *testing.T) {
+	raw := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+
+	stub := &officialQQStubAPI{lastFileInfo: encoded}
 	pa := newOfficialQQMediaTestAdapter(t, stub)
 
 	file := &message.FileElement{URL: "https://example.com/a.txt"}
@@ -154,8 +180,8 @@ func TestOfficialQQUploadC2CMediaKeepsFileInfoVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("uploadC2CMedia: %v", err)
 	}
-	if got := string(media.FileInfo); got != fileInfo {
-		t.Fatalf("file_info was modified: want %q, got %q", fileInfo, got)
+	if !bytes.Equal(media.FileInfo, raw) {
+		t.Fatalf("file_info should be base64-decoded before sending: want %v, got %v", raw, media.FileInfo)
 	}
 	if len(stub.c2cFileTypes) != 1 || stub.c2cFileTypes[0] != 4 {
 		t.Fatalf("expected file_type=4 to be uploaded, got %v", stub.c2cFileTypes)
