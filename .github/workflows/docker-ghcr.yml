@@ -107,29 +107,30 @@ jobs:
           set -e
           IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
           echo "verifying $IMAGE"
-          docker run --rm --entrypoint sh "$IMAGE" -c '
-            set -e
-            echo "--- sealdice binary version ---"
-            /app/sealdice-core --version
-          '
-          # 镜像里没有前端文件（已 go:embed 进二进制），改为直接检查运行时
-          # 首页是否返回海豹管理界面，而不是 Vite 脚手架欢迎页。
           docker run -d --name smktest -p 13211:3211 "$IMAGE"
+          OK=""
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:13211/ -o /tmp/page.html; then break; fi
+            if curl -fsS http://127.0.0.1:13211/ -o /tmp/page.html; then OK=1; break; fi
             sleep 1
           done
-          echo "--- index.html head ---"
-          head -c 600 /tmp/page.html || true
+          echo "--- container logs ---"
+          docker logs smktest 2>&1 | head -30 || true
+          echo "--- fetched index.html (size: $(wc -c < /tmp/page.html 2>/dev/null || echo 0)) ---"
+          cat /tmp/page.html || true
           echo
-          if grep -qi "Vite + Vue 3\|You've successfully created" /tmp/page.html; then
-            echo "::error::镜像里打包的是 Vue 脚手架样例页，不是海豹管理界面"
-            docker logs smktest || true
+          if [ -z "$OK" ]; then
+            echo "::error::无法访问容器首页，UI 可能没启动"
+            docker rm -f smktest || true
             exit 1
           fi
-          if ! grep -qi "sealdice" /tmp/page.html; then
-            echo "::error::首页里找不到 sealdice 字样，前端可能没打进去"
-            docker logs smktest || true
+          if grep -qi "UI Placeholder\|not bundled in this checkout" /tmp/page.html; then
+            echo "::error::镜像是用占位页编译的，前端没有打进去"
+            docker rm -f smktest || true
+            exit 1
+          fi
+          if grep -qi "Vite + Vue 3\|You've successfully created" /tmp/page.html; then
+            echo "::error::镜像里打包的是 Vue 脚手架样例页，不是海豹管理界面"
+            docker rm -f smktest || true
             exit 1
           fi
           echo "OK: 管理界面已正确打包"

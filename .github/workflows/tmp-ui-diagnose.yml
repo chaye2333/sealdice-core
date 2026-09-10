@@ -1,0 +1,38 @@
+name: TMP UI Diagnose
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  diagnose-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull freshly built image
+        run: docker pull ghcr.io/chaye2333/sealdice-core:master
+
+      - name: Inspect embedded frontend
+        run: |
+          set -x
+          docker run --rm --entrypoint sh ghcr.io/chaye2333/sealdice-core:master -c '
+            echo "=== version ==="; /app/sealdice-core --version
+            echo "=== /app tree ==="; ls -la /app
+          '
+          echo "=== start server ==="
+          docker run -d --name diag -p 13211:3211 ghcr.io/chaye2333/sealdice-core:master
+          sleep 12
+          echo "=== container logs ==="
+          docker logs diag 2>&1 | head -40
+          echo "=== curl / ==="
+          curl -sS -D - http://127.0.0.1:13211/ -o /tmp/page.html || echo "curl FAILED"
+          echo "=== page size ==="; wc -c /tmp/page.html || true
+          echo "=== page content ==="; cat /tmp/page.html || true
+          echo "=== curl an asset dir listing attempt ==="
+          curl -sS -o /dev/null -w "assets-infer http=%{http_code}\n" http://127.0.0.1:13211/assets/ || true
+          echo "=== does binary contain placeholder text? ==="
+          docker exec diag sh -c "grep -c 'UI Placeholder' /app/sealdice-core || true"
+          docker rm -f diag || true
