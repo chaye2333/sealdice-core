@@ -547,7 +547,7 @@ func RegisterBuiltinExtDnd5e(self *Dice) {
 					// 是单轮检定，不需要组装成多轮的描述
 					text = textList[0]
 				}
-				text = withOfficialQQCharacterStatusBar(mctx, text)
+
 				// 赋值commandItems
 				commandInfo["items"] = commandItems
 				// 设置对应的Command

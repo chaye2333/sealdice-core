@@ -295,7 +295,7 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 
 				VarSetValueStr(mctx, "$t原因", reason)
 				VarSetValueStr(mctx, "$t结果文本", strings.Join(texts, "\n"))
-				text = withOfficialQQCharacterStatusBar(mctx, DiceFormatTmpl(mctx, "COC:检定_多轮"))
+				text = DiceFormatTmpl(mctx, "COC:检定_多轮")
 			} else {
 				ret := rollOne(false)
 				if ret != nil {
@@ -303,7 +303,7 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 				}
 				VarSetValueStr(mctx, "$t原因", reason)
 				VarSetValueStr(mctx, "$t结果文本", DiceFormatTmpl(mctx, "COC:检定_单项结果文本"))
-				text = withOfficialQQCharacterStatusBar(mctx, DiceFormatTmpl(mctx, "COC:检定"))
+				text = DiceFormatTmpl(mctx, "COC:检定")
 			}
 
 			isHide := cmdArgs.Command == "rah" || cmdArgs.Command == "rch"
@@ -1301,7 +1301,7 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 			}
 			ctx.CommandInfo = commandInfo
 
-			text := withOfficialQQCharacterStatusBar(mctx, DiceFormatTmpl(mctx, "COC:理智检定"))
+			text := DiceFormatTmpl(mctx, "COC:理智检定")
 			if kw := cmdArgs.GetKwarg("ci"); kw != nil {
 				info, err := json.Marshal(ctx.CommandInfo)
 				if err == nil {

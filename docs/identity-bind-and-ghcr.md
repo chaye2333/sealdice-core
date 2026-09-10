@@ -494,21 +494,34 @@ $\scriptsize\textcolor{#E5484D}{\text{调查员甲 SAN50 HP30/30 DEX60}}$
 如果关闭，官方 QQ 会按普通文本发送，用户会看到原始的 `$\scriptsize...$` 公式。
 （`identityBindEnable` 与这个状态栏是两套独立功能，互不影响。）
 
-### 生效范围
+### 生效范围与挂载机制
 
 状态栏**只在 QQ 官方机器人端点**渲染。OneBot（NapCat / go-cqhttp）、Telegram、Discord 等
 平台的回复格式**完全不变**——它们本来就能改群名片，不需要虚拟状态栏。
 
-具体挂载位置（只在这些"最终回复"上加，帮助文本和错误提示不受影响）：
+**挂载是统一做的，不是逐个规则系统去改**（这点经历过一次返工）：
 
-| 指令 | 位置 |
-|---|---|
-| `.r` / `.rd` / `.roll` 等 | `dice/builtin_commands.go` 的骰点收尾 |
-| `.rx` 相关 | 同上 |
-| `.drl` 骰池抽取 | `dice/ext_fun.go` |
-| `.ra` / `.rc` COC 检定 | `dice/ext_coc7.go` |
-| `.sc` 理智检定 | `dice/ext_coc7.go` |
-| `.rd` DND 检定 | `dice/ext_dnd5e.go` |
+1. `DiceFormatTmpl` 在渲染「最终回复」模板时，给 `ctx.OfficialQQStatusBarPending` 打标记。
+   目前被认定为最终回复的模板是：
+
+   | 模板键 | 对应指令 |
+   |---|---|
+   | `核心:骰点` / `核心:骰点_多轮` | `.r` `.rd` `.roll` `.rx` `.drl` 等 |
+   | `COC:检定` / `COC:检定_多轮` | `.ra` `.rc` `.rav` `.rcv` |
+   | `COC:理智检定` | `.sc` |
+
+2. 发送层 `replyGroupRawNoCheck` / `replyPersonRawNoCheck`（`dice/im_helpers.go`）
+   消费这个标记，在文本最顶部补上状态栏，然后清除标记。
+
+这样做的原因：规则系统在中文海豹里是**扩展**，可以自由增删。
+早期版本是逐个在 `ext_coc7.go` / `ext_dnd5e.go` / `builtin_commands.go` 里手工挂载，
+结果 **FU 等规则系统的检定就完全没有状态栏**。现在任何规则系统只要用上面这些核心
+模板渲染检定结果，就会自动带上状态栏，包括第三方 JS 扩展。
+
+> 如果你自己写的扩展用了**别的模板键**来做检定，把那个键加进
+> `dice/rollvm_migrate.go` 的 `officialQQFinalReplyTmplKeys` 即可。
+
+帮助文本、错误提示、`.pc` / `.st` 等回复不会带状态栏，因为它们不是上面这些模板。
 
 ### 常见问题
 

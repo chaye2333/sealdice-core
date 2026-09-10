@@ -367,6 +367,72 @@ func newOfficialQQRollEnv(t *testing.T, groupID, userID, template string, attrs 
 	return d, ep, cleanup
 }
 
+// ---------- 通用挂载：任何规则系统都应自动带状态栏 ----------
+
+// TestOfficialQQStatusBarAppliesToAnyRuleSystem 模拟 FU / SH 这类扩展的典型写法：
+// 自己渲染 "COC:检定" 模板，然后直接 ReplyToSender。
+// 状态栏必须在发送层统一补上，而不是靠每个规则自己挂载。
+func TestOfficialQQStatusBarAppliesToAnyRuleSystem(t *testing.T) {
+	ctx, cleanup := newOfficialQQBarTestCtx(t, "coc7", map[string]*ds.VMValue{
+		"血条": intVal(30),
+	})
+	defer cleanup()
+	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{血条}"
+
+	// 规则系统渲染最终模板
+	text := DiceFormatTmpl(ctx, "COC:检定")
+
+	// 发送层补齐状态栏
+	out := withOfficialQQCharacterStatusBar(ctx, text)
+	if !strings.Contains(out, `\scriptsize\textcolor{#E5484D}`) {
+		t.Fatalf("expected the status bar for a rule-system check reply, got %q", out)
+	}
+	if !strings.Contains(out, "调查员甲") || !strings.Contains(out, "HP30") {
+		t.Fatalf("expected name and attributes in the status bar, got %q", out)
+	}
+	// 状态栏必须在最顶部
+	if !strings.HasPrefix(out, "$\\scriptsize") {
+		t.Fatalf("expected the status bar on top, got %q", out)
+	}
+}
+
+// TestOfficialQQStatusBarNotAppliedToPlainReplies 普通回复（帮助 / 错误提示）不应带状态栏。
+func TestOfficialQQStatusBarNotAppliedToPlainReplies(t *testing.T) {
+	ctx, cleanup := newOfficialQQBarTestCtx(t, "coc7", map[string]*ds.VMValue{
+		"血条": intVal(30),
+	})
+	defer cleanup()
+	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{血条}"
+
+	text := DiceFormatTmpl(ctx, "核心:提示_私聊不可用")
+	out := withOfficialQQCharacterStatusBar(ctx, text)
+	if strings.Contains(out, `\scriptsize`) {
+		t.Fatalf("plain replies must not carry the status bar, got %q", out)
+	}
+	if out != text {
+		t.Fatalf("plain reply was modified: %q -> %q", text, out)
+	}
+}
+
+// TestOfficialQQStatusBarConsumedOnce 标记必须被消费，避免同一条回复加两次。
+func TestOfficialQQStatusBarConsumedOnce(t *testing.T) {
+	ctx, cleanup := newOfficialQQBarTestCtx(t, "coc7", map[string]*ds.VMValue{
+		"血条": intVal(30),
+	})
+	defer cleanup()
+	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{血条}"
+
+	DiceFormatTmpl(ctx, "核心:骰点")
+	first := withOfficialQQCharacterStatusBar(ctx, "1d20=7")
+	second := withOfficialQQCharacterStatusBar(ctx, "1d20=7")
+	if strings.Count(first, "\\scriptsize") != 1 {
+		t.Fatalf("expected exactly one status bar, got %q", first)
+	}
+	if strings.Contains(second, "\\scriptsize") {
+		t.Fatalf("the pending marker must be consumed, got %q", second)
+	}
+}
+
 func TestOfficialQQRollReplyCarriesStatusBar(t *testing.T) {
 	d, ep, cleanup := newOfficialQQRollEnv(t, "OpenQQ-Group:200-group", "OpenQQ:200-member",
 		"{$t玩家_RAW} HP{血条}",

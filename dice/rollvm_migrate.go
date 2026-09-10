@@ -334,6 +334,20 @@ func DiceFormat(ctx *MsgContext, s string) string {
 	}
 }
 
+// officialQQFinalReplyTmplKeys 这些模板会被各自规则系统（COC / DND / FU / 自定义扩展）
+// 用作「掷骰或鉴定的最终回复」。渲染到它们时打上标记，
+// 由发送层统一在顶部补上 QQ 官方机器人的虚拟角色状态栏。
+//
+// 之所以放在这里而不是逐个规则挂载：规则系统是扩展，可以自由增删，
+// 逐个挂载一定会漏（FU 等规则就漏过）。标记法对新规则系统自动生效。
+var officialQQFinalReplyTmplKeys = map[string]bool{
+	"核心:骰点":     true,
+	"核心:骰点_多轮":  true,
+	"COC:检定":    true,
+	"COC:检定_多轮": true,
+	"COC:理智检定":  true,
+}
+
 func DiceFormatTmpl(ctx *MsgContext, s string) string {
 	var text string
 	a := ctx.Dice.TextMap[s]
@@ -350,6 +364,13 @@ func DiceFormatTmpl(ctx *MsgContext, s string) string {
 					engineVersion = "v1"
 				}
 			}
+		}
+
+		// 渲染到「最终回复」模板时标记本次回复需要顶部状态栏。
+		// 这里直接赋值而不是「先清后设」：调用方常会嵌用地渲染中间文本
+		// （例如先渲染 $t结果文本 再渲染最终模板），最后落地的才是真正的最终回复。
+		if officialQQFinalReplyTmplKeys[s] {
+			ctx.OfficialQQStatusBarPending = true
 		}
 
 		if engineVersion == "v2" {

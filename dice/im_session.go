@@ -877,6 +877,11 @@ type MsgContext struct {
 	DelegateText    string      `jsbind:"delegateText"`  // 代骰附加文本
 	AliasPrefixText string      `json:"aliasPrefixText"` // 快捷指令回复前缀文本
 
+	// officialQQStatusBarPending 表示本次回复是「掷骰 / 鉴定」的最终结果，
+	// 需要在发送前于顶部补上 QQ 官方机器人的虚拟角色状态栏。
+	// 由 DiceFormatTmpl 在渲染最终模板时置位，发送层消费一次。
+	OfficialQQStatusBarPending bool `json:"-" yaml:"-"`
+
 	deckDepth           int                                         // 抽牌递归深度
 	DeckPools           map[*DeckInfo]map[string]*ShuffleRandomPool // 不放回抽取的缓存
 	diceExprOverwrite   string                                      // 默认骰表达式覆盖

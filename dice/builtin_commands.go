@@ -1701,14 +1701,14 @@ func (d *Dice) registerCoreCommands() {
 					texts = append(texts, DiceFormatTmpl(ctx, "核心:骰点_单项结果文本"))
 				}
 				VarSetValueStr(ctx, "$t结果文本", strings.Join(texts, "\n"))
-				text = withOfficialQQCharacterStatusBar(ctx, DiceFormatTmpl(ctx, "核心:骰点_多轮"))
+				text = DiceFormatTmpl(ctx, "核心:骰点_多轮")
 			} else {
 				ret := rollOne()
 				if ret != nil {
 					return *ret
 				}
 				VarSetValueStr(ctx, "$t结果文本", DiceFormatTmpl(ctx, "核心:骰点_单项结果文本"))
-				text = withOfficialQQCharacterStatusBar(ctx, DiceFormatTmpl(ctx, "核心:骰点"))
+				text = DiceFormatTmpl(ctx, "核心:骰点")
 			}
 
 			isHide := strings.Contains(cmdArgs.Command, "h")
@@ -1753,7 +1753,7 @@ func (d *Dice) registerCoreCommands() {
 						ctx.CommandHideFlag = ctx.Group.GroupID
 						prefix := DiceFormatTmpl(ctx, "核心:暗骰_私聊_前缀")
 						ReplyGroup(ctx, msg, DiceFormatTmpl(ctx, "核心:暗骰_群内"))
-						ReplyPerson(ctx, msg, withOfficialQQCharacterStatusBar(ctx, prefix+text))
+						ReplyPerson(ctx, msg, prefix+text)
 					}
 				} else {
 					ReplyToSender(ctx, msg, text)

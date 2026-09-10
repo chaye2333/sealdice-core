@@ -151,11 +151,24 @@ func officialQQCharacterStatusBar(ctx *MsgContext) string {
 
 // withOfficialQQCharacterStatusBar 在掷骰 / 鉴定回复顶部加上虚拟角色状态栏。
 //
-// 只处理「最终回复」文本，调用点限定在骰点与检定的收尾处，
-// 因此不会影响帮助文本、错误提示等其它回复。
+// 由发送层（ReplyToSender / ReplyGroup / ReplyPerson）统一调用，因此对所有规则系统
+// 生效，包括 FU、SH 以及第三方扩展。
+//
+// 是否需要加状态栏由 ctx.OfficialQQStatusBarPending 决定——它由 DiceFormatTmpl
+// 在渲染「最终回复」模板时置位，这样帮助文本、错误提示等不会被误加。
+// 无论是否真的加了，这里都会消费掉标记，避免同一条回复被处理两次。
 func withOfficialQQCharacterStatusBar(ctx *MsgContext, text string) string {
+	if ctx == nil {
+		return text
+	}
+	pending := ctx.OfficialQQStatusBarPending
+	ctx.OfficialQQStatusBarPending = false
+	if !pending || text == "" {
+		return text
+	}
+
 	bar := officialQQCharacterStatusBar(ctx)
-	if bar == "" || text == "" {
+	if bar == "" {
 		return text
 	}
 	// 状态栏已在顶部时不重复添加
