@@ -63,7 +63,13 @@ func ensureGroupLogState(ctx *MsgContext, group *GroupInfo) GroupLogState {
 	return getGroupLogState(group)
 }
 
-func SetPlayerGroupCardByTemplate(ctx *MsgContext, tmpl string) (string, error) {
+// EvalPlayerGroupCardTemplate 只计算 .sn 名片模板，不调用平台接口改名。
+// QQ 官方机器人无法修改群名片，需要把模板当作“虚拟角色状态栏”来读取，
+// 因此把纯计算部分抽出来复用。
+func EvalPlayerGroupCardTemplate(ctx *MsgContext, tmpl string) (string, error) {
+	if ctx == nil || ctx.Dice == nil {
+		return "", errors.New("上下文未初始化")
+	}
 	if ctx.SystemTemplate == nil {
 		ctx.SystemTemplate = ctx.Group.GetCharTemplate(ctx.Dice)
 	}
@@ -76,8 +82,15 @@ func SetPlayerGroupCardByTemplate(ctx *MsgContext, tmpl string) (string, error) 
 		ctx.Dice.Logger.Infof("SN指令模板错误: %v", v.vm.Error.Error())
 		return "", v.vm.Error
 	}
+	return v.ToString(), nil
+}
 
-	text := v.ToString()
+// SetPlayerGroupCardByTemplate 计算模板并调用平台接口修改群名片。
+func SetPlayerGroupCardByTemplate(ctx *MsgContext, tmpl string) (string, error) {
+	text, err := EvalPlayerGroupCardTemplate(ctx, tmpl)
+	if err != nil {
+		return "", err
+	}
 	if ctx.EndPoint.Platform == "QQ" && len(text) >= 60 { // Note(Xiangze-Li): 2023-08-09实测群名片长度限制为59个英文字符, 20个中文字符是可行的, 但分别判断过于繁琐
 		return text, ErrGroupCardOverlong
 	}
@@ -188,7 +201,10 @@ func RegisterBuiltinExtLog(self *Dice) {
 .log list <群号> // 查看指定群的日志列表(无法取得日志时，找骰主做这个操作)
 .log masterget <群号> <日志名> // 重新上传日志，并获取链接(无法取得日志时，找骰主做这个操作)
 .log export <日志名> // 直接取得日志txt(服务出问题或有其他需要时使用)
-.log export <日志名> <邮箱地址> // 通过邮件取得日志txt，多个邮箱用空格隔开`
+.log export <日志名> <邮箱地址> // 通过邮件取得日志txt，多个邮箱用空格隔开
+.log bind <旧群号> // 官方机器人：把当前群的日志读取指向迁移前的旧群
+.log unbind // 官方机器人：解除当前群的日志绑定
+.log bindstatus // 官方机器人：查看当前群的日志绑定`
 
 	// const txtLogTip = "若未出现线上日志地址，可换时间获取，或联系骰主在data/default/log-exports路径下取出日志\n文件名: 群号_日志名_随机数.zip\n注意此文件log end/get后才会生成"
 
@@ -199,7 +215,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 		Solve: func(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
 			group := ctx.Group
 			cmdArgs.ChopPrefixToArgsWith("on", "off", "del", "rm", "masterget",
-				"get", "end", "halt", "list", "new", "stat", "export")
+				"get", "end", "halt", "list", "new", "stat", "export", "bind", "unbind", "bindstatus")
 
 			groupNotActiveCheck := func() bool {
 				if !group.IsActive(ctx) {
@@ -217,6 +233,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 				lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, state.Name)
 				text := fmt.Sprintf("当前故事: %s\n当前状态: %s\n已记录文本%d条", state.Name, onText, lines)
+				text += identityBindStatusSuffix(ctx)
 				ReplyToSender(ctx, msg, text)
 				return CmdExecuteResult{Matched: true, Solved: true}
 			}
@@ -279,6 +296,11 @@ func RegisterBuiltinExtLog(self *Dice) {
 					}
 					ReplyToSenderRaw(ctx, msg, tmpl, "skip")
 				}
+			}
+
+			// QQ 官方机器人的日志绑定：.log bind / .log unbind / .log bindstatus
+			if result, handled := runIdentityBindLogCommand(ctx, msg, cmdArgs); handled {
+				return result
 			}
 
 			if cmdArgs.IsArgEqual(1, "on") { //nolint:nestif
@@ -407,7 +429,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
 
-				getAndUpload(group.GroupID, logName)
+				getAndUpload(identityBindLogReadGroupID(ctx, group.GroupID), logName)
 				return CmdExecuteResult{Matched: true, Solved: true}
 			} else if cmdArgs.IsArgEqual(1, "end") {
 				state := getGroupLogState(group)
@@ -457,6 +479,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 				if groupID == "" {
 					groupID = ctx.Group.GroupID
 				}
+				// QQ 官方机器人做过日志绑定时，列出的是旧群的日志
+				groupID = identityBindLogReadGroupID(ctx, groupID)
 
 				var text strings.Builder
 				text.WriteString(DiceFormatTmpl(ctx, "日志:记录_列出_导入语"))
@@ -518,14 +542,16 @@ func RegisterBuiltinExtLog(self *Dice) {
 			} else if cmdArgs.IsArgEqual(1, "stat") {
 				// group := ctx.Group
 				_, name := getLogName(ctx, msg, cmdArgs, 2)
+				// QQ 官方机器人做过日志绑定时，统计的是旧群的日志
+				statGroupID := identityBindLogReadGroupID(ctx, group.GroupID)
 				if name != "" {
 					var ok bool
-					name, ok = resolveLogNameWithReply(group.GroupID, name)
+					name, ok = resolveLogNameWithReply(statGroupID, name)
 					if !ok {
 						return CmdExecuteResult{Matched: true, Solved: true}
 					}
 				}
-				items, err := service.LogGetCommandInfoStrList(ctx.Dice.DBOperator, group.GroupID, name)
+				items, err := service.LogGetCommandInfoStrList(ctx.Dice.DBOperator, statGroupID, name)
 				if err == nil && len(items) > 0 {
 					// showDetail := cmdArgs.GetKwarg("detail")
 					// var showDetail *Kwarg
@@ -540,12 +566,16 @@ func RegisterBuiltinExtLog(self *Dice) {
 						}
 					} else */{
 						isShowAll := showAll != nil
-						text := LogRollBriefByPCV2(ctx, items, isShowAll, ctx.Player.Name)
+						statPlayerName := ctx.Player.Name
+						if boundPlayer := identityBindReadPlayer(ctx); boundPlayer != nil && boundPlayer.Name != "" {
+							statPlayerName = boundPlayer.Name
+						}
+						text := LogRollBriefByPCV2(ctx, items, isShowAll, statPlayerName)
 						if text == "" {
 							if isShowAll {
 								ReplyToSender(ctx, msg, fmt.Sprintf("没有找到故事“%s”的检定记录", name))
 							} else {
-								ReplyToSender(ctx, msg, fmt.Sprintf("没有找到角色<%s>的任何记录\n若需查看全团，请在指令后加 --all", ctx.Player.Name))
+								ReplyToSender(ctx, msg, fmt.Sprintf("没有找到角色<%s>的任何记录\n若需查看全团，请在指令后加 --all", statPlayerName))
 							}
 						} else {
 							if !isShowAll {
@@ -574,7 +604,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
 				var ok bool
-				logName, ok = resolveLogNameWithReply(group.GroupID, logName)
+				logName, ok = resolveLogNameWithReply(identityBindLogReadGroupID(ctx, group.GroupID), logName)
 				if !ok {
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
@@ -584,7 +614,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				VarSetValueStr(ctx, "$t日期", now.ToShortDateString())
 				VarSetValueStr(ctx, "$t时间", now.ToShortTimeString())
 				logFileNamePrefix := DiceFormatTmpl(ctx, "日志:记录_导出_文件名前缀")
-				logFile, notice, err := GetLogTxt(ctx, group.GroupID, logName, logFileNamePrefix)
+				logFile, notice, err := GetLogTxt(ctx, identityBindLogReadGroupID(ctx, group.GroupID), logName, logFileNamePrefix)
 				if err != nil {
 					reply := err.Error()
 					if strings.Contains(reply, "此log不存在") || strings.Contains(reply, "名字是否正确") {
@@ -658,9 +688,11 @@ func RegisterBuiltinExtLog(self *Dice) {
 			switch strings.ToLower(val) {
 			case "log":
 				group := ctx.Group
+				// QQ 官方机器人做过日志绑定时，统计的是旧群的日志
+				statGroupID := identityBindLogReadGroupID(ctx, group.GroupID)
 				_, name := getLogName(ctx, msg, cmdArgs, 2)
 				if name != "" {
-					resolved, err := resolveLogNameForGroup(ctx.Dice.DBOperator, group.GroupID, name)
+					resolved, err := resolveLogNameForGroup(ctx.Dice.DBOperator, statGroupID, name)
 					if err != nil {
 						ReplyToSender(ctx, msg, "获取记录出错: "+err.Error())
 						return CmdExecuteResult{Matched: true, Solved: true}

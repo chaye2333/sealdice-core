@@ -283,6 +283,9 @@ type Dice struct {
 
 	/* 保存优化 */
 	DirtyGroups *SyncMap[string, int64] `json:"-" yaml:"-"` // 脏群组列表：groupID -> UpdatedAtTime
+
+	/* 身份与日志绑定 */
+	IdentityBindStore *identityBindStore `json:"-" yaml:"-"` // QQ官方机器人身份绑定关系
 }
 
 var globalRandSource = randcore.NewGlobalOwner(logger.M())
@@ -343,6 +346,8 @@ func (d *Dice) Init(operator engine.DatabaseOperator, uiWriter *logger.UIWriter)
 	if err != nil {
 		loggerInstance.Error("Failed to load plugin configs: ", err)
 	}
+
+	d.IdentityBindStore = &identityBindStore{}
 
 	d.registerCoreCommands()
 	d.RegisterBuiltinExt()

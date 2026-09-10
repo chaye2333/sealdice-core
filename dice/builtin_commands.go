@@ -1701,14 +1701,14 @@ func (d *Dice) registerCoreCommands() {
 					texts = append(texts, DiceFormatTmpl(ctx, "核心:骰点_单项结果文本"))
 				}
 				VarSetValueStr(ctx, "$t结果文本", strings.Join(texts, "\n"))
-				text = DiceFormatTmpl(ctx, "核心:骰点_多轮")
+				text = withOfficialQQCharacterStatusBar(ctx, DiceFormatTmpl(ctx, "核心:骰点_多轮"))
 			} else {
 				ret := rollOne()
 				if ret != nil {
 					return *ret
 				}
 				VarSetValueStr(ctx, "$t结果文本", DiceFormatTmpl(ctx, "核心:骰点_单项结果文本"))
-				text = DiceFormatTmpl(ctx, "核心:骰点")
+				text = withOfficialQQCharacterStatusBar(ctx, DiceFormatTmpl(ctx, "核心:骰点"))
 			}
 
 			isHide := strings.Contains(cmdArgs.Command, "h")
@@ -1753,7 +1753,7 @@ func (d *Dice) registerCoreCommands() {
 						ctx.CommandHideFlag = ctx.Group.GroupID
 						prefix := DiceFormatTmpl(ctx, "核心:暗骰_私聊_前缀")
 						ReplyGroup(ctx, msg, DiceFormatTmpl(ctx, "核心:暗骰_群内"))
-						ReplyPerson(ctx, msg, prefix+text)
+						ReplyPerson(ctx, msg, withOfficialQQCharacterStatusBar(ctx, prefix+text))
 					}
 				} else {
 					ReplyToSender(ctx, msg, text)
@@ -2731,6 +2731,23 @@ func (d *Dice) registerCoreCommands() {
 		},
 	}
 	d.CmdMap["reply"] = cmdReply
+
+	identityBindHelpText := identityBindUserHelp()
+	cmdBind := &CmdItemInfo{
+		Name:      "bind",
+		ShortHelp: ".bind <旧QQ号> <旧群号> // 把官方机器人身份绑定到迁移前的 QQ 号\n.unbind // 解除绑定",
+		Help:      "身份绑定指令:\n" + identityBindHelpText,
+		Solve:     runIdentityBindCommand,
+	}
+	d.CmdMap["bind"] = cmdBind
+	d.CmdMap["unbind"] = &CmdItemInfo{
+		Name:      "unbind",
+		ShortHelp: ".unbind // 解除自己的身份绑定",
+		Help:      "解除身份绑定:\n" + identityBindHelpText,
+		Solve: func(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
+			return identityBindRunUnbind(ctx, msg, identityBindActionUser)
+		},
+	}
 }
 
 func getDefaultDicePoints(ctx *MsgContext) int64 {

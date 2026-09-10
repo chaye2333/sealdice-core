@@ -1182,7 +1182,7 @@ func RegisterBuiltinExtFun(self *Dice) {
 			}
 			VarSetValueInt64(ctx, "$t次数", int64(t))
 			VarSetValueStr(ctx, "$t结果文本", strings.Join(results, "\n"))
-			reply := DiceFormatTmpl(ctx, "核心:骰点_多轮")
+			reply := withOfficialQQCharacterStatusBar(ctx, DiceFormatTmpl(ctx, "核心:骰点_多轮"))
 			ReplyToSender(ctx, msg, reply)
 			return CmdExecuteResult{
 				Matched: true,
@@ -1291,7 +1291,7 @@ func RegisterBuiltinExtFun(self *Dice) {
 					reply += "\n骰池已经抽空，现在关闭。"
 					tryLoad = singleRoulette{}
 				}
-				ReplyToSender(ctx, msg, reply)
+				ReplyToSender(ctx, msg, withOfficialQQCharacterStatusBar(ctx, reply))
 			case "drlh":
 				announce := msg.Sender.Nickname + "进行了抽取。"
 				reply += fmt.Sprintf("\n来自群%s(%s)",
@@ -1301,7 +1301,7 @@ func RegisterBuiltinExtFun(self *Dice) {
 					tryLoad = singleRoulette{}
 				}
 				ReplyGroup(ctx, msg, announce)
-				ReplyPerson(ctx, msg, reply)
+				ReplyPerson(ctx, msg, withOfficialQQCharacterStatusBar(ctx, reply))
 			}
 			rouletteMap.Store(ctx.Group.GroupID, tryLoad)
 			return CmdExecuteResult{

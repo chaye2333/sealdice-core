@@ -66,7 +66,25 @@ func (c *Config) LoadYamlConfig(data []byte) error {
 		return err
 	}
 	c.migrateOld2Version1()
+	c.FixIdentityBindConfig()
 	return nil
+}
+
+// FixIdentityBindConfig 把身份绑定相关配置收敛到合理范围。
+// 老配置文件里这几个字段为 0（缺省），需要补成默认值，避免出现“题目数量 0 题”这类无效状态。
+func (c *Config) FixIdentityBindConfig() {
+	if c.IdentityBindQuestionCount <= 0 {
+		c.IdentityBindQuestionCount = DefaultConfig.IdentityBindQuestionCount
+	}
+	if c.IdentityBindQuestionCount > identityBindMaxQuestionCount {
+		c.IdentityBindQuestionCount = identityBindMaxQuestionCount
+	}
+	if c.IdentityBindCooldownSec < 0 {
+		c.IdentityBindCooldownSec = 0
+	}
+	if c.IdentityBindCooldownSec > identityBindMaxCooldownSec {
+		c.IdentityBindCooldownSec = identityBindMaxCooldownSec
+	}
 }
 
 // migrateOld2Version1 旧格式设置项的迁移
@@ -178,6 +196,14 @@ type BaseConfig struct {
 	DataDir string `yaml:"dataDir"` // 数据路径，为./data/{name}，例如data/default
 
 	OfficialQQMigrationEnable bool `json:"officialQQEnableIdentityMigration" yaml:"officialQQEnableIdentityMigration"` // 启动 QQ 官方旧身份数据迁移
+
+	// IdentityBindEnable 是否允许用户使用 .bind 系列指令，把 QQ 官方机器人的身份
+	// 绑定回迁移前的旧账号（例如 NapCat 时代的 QQ:12345）。
+	IdentityBindEnable bool `json:"identityBindEnable" yaml:"identityBindEnable"`
+	// IdentityBindQuestionCount 身份验证需要答对的题目数量。
+	IdentityBindQuestionCount int64 `json:"identityBindQuestionCount" yaml:"identityBindQuestionCount"`
+	// IdentityBindCooldownSec 同一个用户两次发起绑定之间的最小间隔（秒）。
+	IdentityBindCooldownSec int64 `json:"identityBindCooldownSec" yaml:"identityBindCooldownSec"`
 }
 
 type RateLimitConfig struct {

@@ -37,6 +37,11 @@ func (am *AttrsManager) LoadByCtx(ctx *MsgContext) (*AttributesItem, error) {
 	if ctx.IsCompatibilityTest {
 		return am.LoadByIdDirect(ctx.Group.GroupID, ctx.Player.UserID)
 	}
+	// QQ 官方机器人做过身份绑定时，读取旧身份在旧群里的角色卡。
+	// 这里只影响「读取」，写入仍然落在当前真实身份上。
+	if groupID, userID, bound := identityBindAttrTarget(ctx); bound {
+		return am.Load(groupID, userID)
+	}
 	return am.Load(ctx.Group.GroupID, ctx.Player.UserID)
 }
 

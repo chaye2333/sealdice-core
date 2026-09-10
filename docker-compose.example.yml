@@ -1,0 +1,18 @@
+services:
+  sealdice:
+    # 换成你自己的镜像地址（构建工作流跑完后在 GitHub Packages 页面可以看到）
+    # 如果你用的是组织仓库，用户名部分就是组织名
+    image: ghcr.io/chaye2333/sealdice-core:latest
+    container_name: sealdice-core
+    restart: unless-stopped
+    ports:
+      # 左边是服务器端口，右边必须和容器内一致
+      - "3211:3211"
+    volumes:
+      # 数据（数据库、serve.yaml、日志、extra）都在这里，升级镜像不会丢
+      - ./data:/app/data
+      - ./extra:/app/extra
+    environment:
+      - TZ=Asia/Shanghai
+    # 想让容器里也是 root 的话（不推荐）可以打开下面这行
+    # user: "0:0"

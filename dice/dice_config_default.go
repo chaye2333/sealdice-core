@@ -51,6 +51,10 @@ var DefaultConfig = Config{
 		DataDir:                  "data/default",
 
 		OfficialQQMigrationEnable: false,
+
+		IdentityBindEnable:        false,
+		IdentityBindQuestionCount: 1,
+		IdentityBindCooldownSec:   60,
 	},
 	RateLimitConfig{
 		RateLimitEnabled:         false,

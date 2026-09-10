@@ -1,0 +1,27 @@
+# 构建镜像时不需要打进上下文的内容
+.git
+.github
+.idea
+.vscode
+
+# 本地数据与产物绝不能进镜像
+data
+extra
+logs
+log-exports
+*.log
+sealdice-core
+sealdice-core.exe
+sealdice-core.zip
+
+# 前端依赖与产物（镜像内会重新构建）
+ui/node_modules
+ui/dist
+
+# 子模块目录（当前为空占位）
+sealdice-builtins
+sealdice-ui
+
+# 文档与测试数据
+docs
+*.md

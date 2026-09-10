@@ -462,6 +462,33 @@ func DiceConfigSet(c echo.Context) error {
 		config.OfficialQQMigrationEnable = val.(bool)
 	}
 
+	if val, ok := jsonMap["identityBindEnable"]; ok {
+		config.IdentityBindEnable = val.(bool)
+	}
+
+	if val, ok := jsonMap["identityBindQuestionCount"]; ok {
+		switch v := val.(type) {
+		case float64:
+			config.IdentityBindQuestionCount = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				config.IdentityBindQuestionCount = parsed
+			}
+		}
+	}
+
+	if val, ok := jsonMap["identityBindCooldownSec"]; ok {
+		switch v := val.(type) {
+		case float64:
+			config.IdentityBindCooldownSec = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				config.IdentityBindCooldownSec = parsed
+			}
+		}
+	}
+	config.FixIdentityBindConfig()
+
 	if val, ok := jsonMap["playerNameWrapEnable"]; ok {
 		config.PlayerNameWrapEnable = val.(bool)
 	}
