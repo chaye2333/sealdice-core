@@ -469,6 +469,10 @@ func DiceConfigSet(c echo.Context) error {
 		}
 	}
 
+	if val, ok := jsonMap["officialQQChunkedUploadEnable"]; ok {
+		config.OfficialQQChunkedUploadEnable = val.(bool)
+	}
+
 	if val, ok := jsonMap["officialQQEnableIdentityMigration"]; ok {
 		config.OfficialQQMigrationEnable = val.(bool)
 	}

@@ -118,6 +118,9 @@ type PlatformAdapterOfficialQQ struct {
 	CancelFunc     context.CancelFunc   `json:"-" yaml:"-"`
 	tokenSource    oauth2.TokenSource   `json:"-" yaml:"-"`
 	botID          string               `json:"-" yaml:"-"`
+	// apiDomainOverride 仅用于测试：覆盖 OpenAPI 域名（分片上传的请求由适配器自己发，
+	// 需要一个可注入的域名才能用本地 httptest 服务器端到端验证）。生产环境留空。
+	apiDomainOverride string `json:"-" yaml:"-"`
 
 	// Webhook服务
 	webhookServer *http.Server `json:"-" yaml:"-"`
@@ -1962,6 +1965,11 @@ func decodeOfficialQQFileInfo(fileInfo string) []byte {
 }
 
 func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOpenID string, file *message.FileElement, fileType int) (*dto.MediaInfo, error) {
+	// 与群聊保持一致：本地文件 + 开关打开时走分片上传，以保留文件名。
+	if pa.officialQQShouldUseChunkedUpload(file) {
+		return pa.uploadC2CMediaChunked(qctx, userOpenID, file, fileType)
+	}
+
 	url, data, err := pa.prepareMediaMessage(file)
 	if err != nil {
 		return nil, err
@@ -1989,6 +1997,13 @@ func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOp
 }
 
 func (pa *PlatformAdapterOfficialQQ) uploadGroupMedia(qctx context.Context, groupID string, file *message.FileElement, fileType int) (*dto.MediaInfo, error) {
+	// 本地文件 + 开关打开时走分片上传：这是唯一能保留文件名的路径
+	// （file_data/base64 方式腾讯不支持自定义文件名，客户端会显示"未命名"）。
+	// 其余情况（远程 URL、语音/图片依赖的 base64 路径、开关关闭）完全走原逻辑。
+	if pa.officialQQShouldUseChunkedUpload(file) {
+		return pa.uploadGroupMediaChunked(qctx, groupID, file, fileType)
+	}
+
 	url, data, err := pa.prepareMediaMessage(file)
 	if err != nil {
 		return nil, err
@@ -2841,6 +2856,10 @@ type C2CRichMediaMessage struct {
 	URL        string `json:"url,omitempty"`
 	SrvSendMsg bool   `json:"srv_send_msg"`
 	FileData   []byte `json:"file_data,omitempty"`
+	// FileName 文件名。分片上传合并时由本字段指定（file_data 方式腾讯不支持自定义文件名）。
+	FileName string `json:"file_name,omitempty"`
+	// UploadID 分片上传任务 ID，来自 upload_prepare。传入后走分片合并路径，url 可为空。
+	UploadID string `json:"upload_id,omitempty"`
 }
 
 func (msg *C2CRichMediaMessage) GetEventID() string {

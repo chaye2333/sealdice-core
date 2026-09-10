@@ -648,6 +648,53 @@ code:400, {"message":"请求参数file_info无效","code":40034032}
 > 教训：官方文档的这句话描述的是「file_info 的语义」，但没描述 SDK 的字段类型；
 > 判断这类问题时，**能跑的实测行为优先于文档注释**。
 
+### 7.6.4 文件名显示「未命名」→ 分片上传（可选）
+
+**现象**：文件能发出去，但客户端收到的文件叫「未命名」。
+
+**根因**：腾讯的上传接口有几种方式，能力不同——
+
+| 方式 | 请求体字段 | 能否自定义文件名 |
+|---|---|---|
+| URL 上传 | `url` | ✅ 平台用 URL 路径末段当文件名 |
+| `file_data`(base64) | `file_data` | ❌ **接口没有文件名字段** |
+| 分片上传 | `upload_id` + `file_name` | ✅ 合并时可以指定 |
+
+本地文件走的是 `file_data`，所以名字必然由腾讯生成。这是**接口能力差异**，不是实现 bug。
+
+**解法**：分片上传（官方文档推荐的"大文件或本地文件"方案），四步：
+
+```
+① POST /v2/{groups|users}/{id}/upload_prepare
+     { file_type, file_size, file_name, md5, sha1, md5_10m }
+     → upload_id + block_size + parts[]（index + presigned_url）
+② PUT  <presigned_url>                逐片上传分片数据（裸 PUT，不要带 Authorization）
+③ POST /v2/{groups|users}/{id}/upload_part_finish
+     { upload_id, part_index, block_size, md5 }
+④ POST /v2/{groups|users}/{id}/files
+     { file_type, srv_send_msg:false, file_name, upload_id }   → file_info
+```
+
+几个容易写错的点（代码注释里也标了）：
+
+* `file_size` / `block_size` 在官方文档里是**字符串**，不是数字；
+* `md5_10m` 是**文件前 10002432 字节**的 MD5，不是整个文件的；
+* 预签名 URL 自带鉴权，PUT 时**不能**附加 `Authorization` / `X-Union-Appid`，否则签名校验失败；
+* 单聊与群聊的上传/预上传/分片端点**互相独立**，不能跨场景复用。
+
+**开关**：默认**关闭**，在 `serve.yaml` 里打开：
+
+```yaml
+officialQQChunkedUploadEnable: true
+```
+
+打开后：**本地文件**走分片（可保留文件名）；**远程 URL** 仍走 URL 上传；
+语音/图片等既有路径**完全不变**。所以这个开关是安全的，出问题关掉即可回退。
+
+> botgo SDK 只封装了 `/files` 一个端点，`upload_prepare` 与 `upload_part_finish`
+> 由适配器自己发请求（`dice/platform_adapter_official_qq_chunked.go`），
+> 鉴权方式与 SDK 保持一致。测试通过注入的假腾讯服务器端到端验证了整个四步流程。
+
 ---
 
 ## 八、本次改动的文件清单
@@ -679,7 +726,7 @@ code:400, {"message":"请求参数file_info无效","code":40034032}
 | `dice/ext_log.go` | 抽出 `EvalPlayerGroupCardTemplate`；`.group bind` / `.log bind` 系列；读操作群回退 |
 | `dice/dice_attrs_manager.go` | `LoadByCtx` 支持绑定后的属性读取回退 |
 | `api/dice_config.go` | WebUI 保存绑定配置项与官方 QQ 请求超时 |
-| `dice/platform_adapter_official_qq.go` | 请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；统一 file_info 解码（单聊路径此前与群聊不一致） |
+| `dice/platform_adapter_official_qq.go` | 请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；统一 file_info 解码（单聊路径此前与群聊不一致）；新增 `apiDomainOverride` 测试钩子 |
 
 新增测试：
 
@@ -687,7 +734,9 @@ code:400, {"message":"请求参数file_info无效","code":40034032}
 |---|---|
 | `dice/ext_identity_bind_test.go` | 绑定：出题、答案解析、冷却、答错锁定、持久化、平台隔离、群/个人独立 |
 | `dice/official_qq_character_roll_markdown_test.go` | 状态栏：渲染、转义、实时更新、平台隔离、任意规则系统通用挂载 |
-| `dice/platform_adapter_official_qq_media_test.go` | 官方 QQ 富媒体：超时默认/收敛、file_info 透传、CQ:file 转义与往返、频道不受影响 |
+| `dice/platform_adapter_official_qq_media_test.go` | 官方 QQ 富媒体：超时默认/收敛、file_info 解码、CQ:file 转义与往返、频道不受影响 |
+| `dice/platform_adapter_official_qq_chunked.go` | 大文件分片上传：预上传/分片 PUT/分片完成/合并，保留文件名 |
+| `dice/platform_adapter_official_qq_chunked_test.go` | 分片上传测试：假腾讯服务器端到端、失败处理、开关路由、文件名推断 |
 
 ---
 
