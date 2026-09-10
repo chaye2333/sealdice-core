@@ -773,6 +773,170 @@ func TestIdentityBindGroupHelpMentionsNewCommand(t *testing.T) {
 	}
 }
 
+// ---------- 旧群号是可选的：个人绑定与群无关 ----------
+
+func TestIdentityBindUserBindWithoutOldGroup(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	env.addOldCard(t, "调查员甲")
+
+	// 只给旧 QQ 号，不给旧群号：也应该能出题
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
+	prompt := waitGroupMessage(t, env)
+	if !strings.Contains(prompt, "共 1 题") {
+		t.Fatalf("expected a question prompt without an old group id, got %q", prompt)
+	}
+	if !strings.Contains(prompt, bindTestOldUserID) {
+		t.Fatalf("expected the prompt to mention the old qq id, got %q", prompt)
+	}
+
+	sessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
+	session, ok := identityBindLoadSession(sessionKey)
+	if !ok {
+		t.Fatal("expected a pending bind session")
+	}
+	before := env.recorder.messageCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(session.Questions[0].Answer + 1)}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "绑定成功") {
+		t.Fatalf("expected the bind to succeed without an old group id, got %q", reply)
+	}
+
+	record, ok := identityBindStoreOf(env.d).get(env.d, identityBindUserKey(bindTestNewUserID))
+	if !ok {
+		t.Fatal("expected the binding to be stored")
+	}
+	if record.Old.UserID != bindTestOldUserID {
+		t.Fatalf("stored old user = %q, want %q", record.Old.UserID, bindTestOldUserID)
+	}
+	// 没有指定旧群时不应该凭空写入旧群
+	if record.Old.GroupID != "" {
+		t.Fatalf("expected no old group id when it was not provided, got %q", record.Old.GroupID)
+	}
+}
+
+func TestIdentityBindNoArgsShowsHelpAndStatus(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{}})
+	reply := waitGroupMessage(t, env)
+	if !strings.Contains(reply, ".bind") || !strings.Contains(reply, "尚未绑定旧QQ号") {
+		t.Fatalf("expected help plus the current status, got %q", reply)
+	}
+	if !strings.Contains(reply, "全局") {
+		t.Fatalf("expected the status to explain the binding is global, got %q", reply)
+	}
+}
+
+// ---------- 取消答题环节 ----------
+
+func TestIdentityBindCancelStopsUserSession(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	env.addOldCard(t, "调查员甲")
+
+	sessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
+
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
+		t.Fatalf("expected a question prompt, got %q", reply)
+	}
+
+	before := env.recorder.messageCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"cancel"}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "已取消") {
+		t.Fatalf("expected a cancel confirmation, got %q", reply)
+	}
+	if _, ok := identityBindLoadSession(sessionKey); ok {
+		t.Fatal("expected the user session to be gone after cancel")
+	}
+
+	// 取消之后可以重新发起
+	before = env.recorder.messageCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共 1 题") {
+		t.Fatalf("expected to be able to start over after cancel, got %q", reply)
+	}
+}
+
+func TestIdentityBindGroupCancelClearsUserSessionToo(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	env.addOldCard(t, "调查员甲")
+
+	userKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
+
+	// 先用 .bind 卡在答题环节
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
+		t.Fatalf("expected a question prompt, got %q", reply)
+	}
+	if _, ok := identityBindLoadSession(userKey); !ok {
+		t.Fatal("expected a pending user session")
+	}
+
+	// .group cancel 应该把个人会话也清掉，避免卡住无法重新绑定
+	before := env.recorder.messageCount()
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"cancel"}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "已取消") {
+		t.Fatalf("expected a cancel confirmation, got %q", reply)
+	}
+	if _, ok := identityBindLoadSession(userKey); ok {
+		t.Fatal(".group cancel should also clear the user session")
+	}
+}
+
+func TestIdentityBindCancelWithoutSessionIsHarmless(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"cancel"}})
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "没有进行中的绑定问答") {
+		t.Fatalf("expected a friendly no-session reply, got %q", reply)
+	}
+}
+
+// ---------- 两种绑定的状态必须分开显示 ----------
+
+func TestIdentityBindStatusesAreSeparated(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	store := identityBindStoreOf(env.d)
+
+	if err := store.put(env.d, &identityBindRecord{
+		Action: identityBindActionUser,
+		Key:    identityBindUserKey(bindTestNewUserID),
+		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
+		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
+	}); err != nil {
+		t.Fatalf("seed user bind: %v", err)
+	}
+
+	// 只有个人绑定时，群状态必须明确说「尚未绑定旧群」
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"status"}})
+	groupStatus := waitGroupMessage(t, env)
+	if !strings.Contains(groupStatus, "尚未绑定旧群") {
+		t.Fatalf("group status must not report the user binding as a group binding, got %q", groupStatus)
+	}
+	if strings.Contains(groupStatus, "已绑定旧群") {
+		t.Fatalf("group status wrongly claims a group binding: %q", groupStatus)
+	}
+	if !strings.Contains(groupStatus, ".bind status") {
+		t.Fatalf("group status should point at .bind status for the personal binding, got %q", groupStatus)
+	}
+
+	// 个人状态必须显示旧 QQ 号
+	before := env.recorder.messageCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"status"}})
+	userStatus := env.recorder.waitNextReply(t, before)
+	if !strings.Contains(userStatus, bindTestOldUserID) {
+		t.Fatalf("user status should show the bound old qq id, got %q", userStatus)
+	}
+	if !strings.Contains(userStatus, "全局") {
+		t.Fatalf("user status should explain the binding is global, got %q", userStatus)
+	}
+}
+
 func TestIdentityBindLogCommandBindsOnCorrectAnswer(t *testing.T) {
 	env := newBindTestEnv(t)
 	defer env.cleanup()

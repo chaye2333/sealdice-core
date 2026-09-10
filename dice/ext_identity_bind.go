@@ -224,10 +224,6 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-func identityBindIsOldGroupID(id string) bool {
-	return strings.HasPrefix(id, identityBindGroupPrefix)
-}
-
 // ---------- 存储 ----------
 
 func (s *identityBindStore) storePath(d *Dice) string {
@@ -781,19 +777,22 @@ func identityBindCheckAnswers(questions []identityBindQuestion, answers []int) b
 // ---------- .bind 指令 ----------
 
 func identityBindUserHelp() string {
-	return `.bind <旧QQ号> <旧群号> // 把当前官方身份绑定到迁移前的 QQ 号（读取其角色卡数据）
+	return `.bind <旧QQ号> // 绑定你的个人身份，之后你的角色卡/属性都从旧 QQ 号读取
 .bind <选项序号> // 在问答过程中提交答案，例如 .bind 132
-.bind cancel // 取消当前问答
-.bind status // 查看自己当前的绑定
-.bind list // 查看已有的绑定，需要管理权限
-.unbind // 解除自己的身份绑定
+.bind cancel // 取消进行中的问答
+.bind reset // 同上，顺便清掉群绑定的问答
+.bind status // 查看自己的绑定
+.bind list // 查看所有绑定记录，需要管理权限
+.unbind // 解除自己的个人绑定
 
-群绑定（把整个群绑到旧群，日志读取指向旧群，需要管理权限）：
+个人绑定与群无关、全局生效：在任何官方群里绑定一次即可。
+旧群号只是可选参数（.bind <旧QQ号> <旧群号>），填了也只会用于展示，不影响验证。
+
+群绑定（把整个群指向旧群，日志读取随之前移，需要管理权限）：
 .group bind <旧群号>
 .group unbind
 .group status
-
-个人绑定与群绑定互相独立，可以同时使用。`
+.group cancel`
 }
 
 // runIdentityBindCommand 处理 .bind / .unbind。
@@ -823,7 +822,7 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 	}
 
 	if !identityBindEnabled(d) {
-		ReplyToSender(ctx, msg, "身份绑定功能未开启，请联系骰主在 管理界面 → 扩展设置 → QQ身份与日志绑定 中启用。")
+		ReplyToSender(ctx, msg, "身份绑定功能未开启，请让骰主在 serve.yaml 中把 identityBindEnable 设为 true。")
 		return solved
 	}
 	if !identityBindSupported(ctx.EndPoint) {
@@ -831,13 +830,13 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 		return solved
 	}
 
-	sessionKey := identityBindSessionKey(ctx.EndPoint.ID, ctx.Player.UserID, action)
-
-	if cmdArgs.IsArgEqual(1, "cancel") {
-		identityBindClearSession(sessionKey)
-		ReplyToSender(ctx, msg, "已取消本次绑定。")
-		return solved
+	// 取消 / 重置：同时清掉个人与群两种问答会话，避免卡在答题环节
+	switch sub {
+	case "cancel", "reset":
+		return identityBindCancelSession(ctx, msg, true)
 	}
+
+	sessionKey := identityBindSessionKey(ctx.EndPoint.ID, ctx.Player.UserID, action)
 
 	if cmdArgs.IsArgEqual(1, "status") {
 		ReplyToSender(ctx, msg, identityBindFormatUserStatus(d, ctx))
@@ -855,11 +854,19 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 
 	// 已有问答会话时，参数当作答案
 	if session, ok := identityBindLoadSession(sessionKey); ok {
-		if cmdArgs.GetArgN(1) == "" {
+		// 兼容 .bind bind 1 / .bindb 这类写法，把 bind 关键字去掉再解析
+		raw := strings.Join(cmdArgs.Args, "")
+		if trimmed, cut := strings.CutPrefix(strings.ToLower(raw), "bind"); cut {
+			raw = trimmed
+		}
+		if strings.EqualFold(strings.TrimSpace(raw), "cancel") {
+			return identityBindCancelSession(ctx, msg, false)
+		}
+		if strings.TrimSpace(raw) == "" {
 			ReplyToSender(ctx, msg, identityBindFormatQuestions(session.Questions))
 			return solved
 		}
-		parsed, valid := identityBindParseAnswers(strings.Join(cmdArgs.Args, ""), len(session.Questions))
+		parsed, valid := identityBindParseAnswers(raw, len(session.Questions))
 		if !valid {
 			ReplyToSender(ctx, msg, fmt.Sprintf("答案格式不正确，请给出 %d 个选项序号，例如 `%s`。",
 				len(session.Questions), strings.Repeat("1", len(session.Questions))))
@@ -868,13 +875,14 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 		return identityBindVerifyUserAnswers(ctx, msg, sessionKey, session, parsed)
 	}
 
-	// 全新发起绑定：.bind <旧QQ号> [旧群号]
-	rawUser := sub
-	if rawUser == "" {
-		ReplyToSender(ctx, msg, identityBindUserHelp())
+	// 没有参数：输出帮助 + 当前状态，方便自查
+	if len(cmdArgs.Args) == 0 {
+		ReplyToSender(ctx, msg, identityBindUserHelp()+"\n\n"+identityBindFormatUserStatus(d, ctx))
 		return solved
 	}
-	oldUserID, err := normalizeIdentityBindUser(rawUser)
+
+	// 全新发起绑定：.bind <旧QQ号> [旧群号]（旧群号可选，个人绑定与群无关）
+	oldUserID, err := normalizeIdentityBindUser(cmdArgs.Args[0])
 	if err != nil {
 		ReplyToSender(ctx, msg, err.Error())
 		return solved
@@ -883,6 +891,41 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 	return identityBindStartUserSession(ctx, msg, cmdArgs, sessionKey, oldUserID)
 }
 
+// identityBindCancelSession 取消（清空）当前用户的绑定问答会话。
+// clearAll 为 true 时同时清掉个人与群两种会话。
+func identityBindCancelSession(ctx *MsgContext, msg *Message, clearAll bool) CmdExecuteResult {
+	solved := CmdExecuteResult{Matched: true, Solved: true}
+	if ctx == nil || ctx.Dice == nil || ctx.EndPoint == nil || ctx.Player == nil {
+		return solved
+	}
+
+	actions := []identityBindAction{identityBindActionUser}
+	if clearAll {
+		actions = append(actions, identityBindActionGroup)
+	}
+
+	cleared := 0
+	for _, action := range actions {
+		key := identityBindSessionKey(ctx.EndPoint.ID, ctx.Player.UserID, action)
+		if _, ok := identityBindLoadSession(key); ok {
+			cleared++
+		}
+		identityBindClearSession(key)
+	}
+
+	if cleared == 0 {
+		ReplyToSender(ctx, msg, "当前没有进行中的绑定问答。")
+		return solved
+	}
+	ReplyToSender(ctx, msg, "已取消进行中的绑定问答。绑定记录本身没有被修改，可以随时重新发起。")
+	return solved
+}
+
+// identityBindStartUserSession 发起个人身份绑定。
+//
+// 注意：个人身份绑定是**全局跨群通用**的——官方 QQ 的 MemberOpenID 本身就按群独立，
+// 但绑定的目标是"这个人的旧 QQ 号"，与旧群无关。角色卡是按 owner_id（旧 QQ 号）
+// 查询的，所以不需要旧群号。旧群号只是可选参数，用来展示更友好的提示。
 func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs, sessionKey, oldUserID string) CmdExecuteResult {
 	d := ctx.Dice
 	solved := CmdExecuteResult{Matched: true, Solved: true}
@@ -893,12 +936,13 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 	}
 
 	if existing, ok := identityBindStoreOf(d).get(d, identityBindUserKey(ctx.Player.UserID)); ok {
-		ReplyToSender(ctx, msg, fmt.Sprintf("你已经绑定到 %s 了，如需更换请先发送 `.unbind`。", existing.Old.UserID))
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"你已经绑定到 %s 了，如需更换请先发送 `.unbind`。", existing.Old.UserID))
 		return solved
 	}
 
-	// 验证数据来自旧群：优先使用命令里显式给出的旧群号，否则要求当前会话就是旧群。
-	oldGroupID := strings.TrimSpace(msg.GroupID)
+	// 旧群号是可选的：角色卡按 owner_id 查询，与群无关
+	oldGroupID := ""
 	if cmdArgs != nil {
 		if rawGroup := strings.TrimSpace(cmdArgs.GetArgN(2)); rawGroup != "" {
 			normalized, err := normalizeIdentityBindGroup(rawGroup)
@@ -910,18 +954,6 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 		}
 	}
 
-	if oldGroupID == "" {
-		ReplyToSender(ctx, msg, "当前会话没有群号信息，请使用 `.bind <旧QQ号> <旧群号>` 的格式。")
-		return solved
-	}
-	if !identityBindIsOldGroupID(oldGroupID) {
-		ReplyToSender(ctx, msg, fmt.Sprintf(
-			"无法确定旧群号。请使用 `.bind %s <旧群号>` 明确指定迁移前的群号。",
-			strings.TrimPrefix(oldUserID, identityBindUserPrefix),
-		))
-		return solved
-	}
-
 	questions, errText := identityBindBuildUserQuestions(d, oldUserID)
 	if errText != "" {
 		identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionUser)
@@ -931,10 +963,12 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 
 	oldGroupName := ""
 	oldPlayerName := ""
-	if oldGroup, ok := ctx.Session.ServiceAtNew.Load(oldGroupID); ok && oldGroup != nil {
-		oldGroupName = oldGroup.GroupName
-		if oldPlayer := oldGroup.PlayerGet(d.DBOperator, oldUserID); oldPlayer != nil {
-			oldPlayerName = oldPlayer.Name
+	if oldGroupID != "" {
+		if oldGroup, ok := ctx.Session.ServiceAtNew.Load(oldGroupID); ok && oldGroup != nil {
+			oldGroupName = oldGroup.GroupName
+			if oldPlayer := oldGroup.PlayerGet(d.DBOperator, oldUserID); oldPlayer != nil {
+				oldPlayerName = oldPlayer.Name
+			}
 		}
 	}
 
@@ -960,8 +994,8 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 	identityBindStoreSession(sessionKey, session)
 	identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionUser)
 
-	ReplyToSender(ctx, msg, fmt.Sprintf("正在验证 %s 在 %s 的身份，共 %d 题。\n%s",
-		oldUserID, oldGroupID, len(questions), identityBindFormatQuestions(questions)))
+	ReplyToSender(ctx, msg, fmt.Sprintf("正在验证旧身份 %s，共 %d 题。\n%s",
+		oldUserID, len(questions), identityBindFormatQuestions(questions)))
 	return solved
 }
 
@@ -1027,18 +1061,34 @@ func identityBindVerifyUserAnswers(ctx *MsgContext, msg *Message, sessionKey str
 	return solved
 }
 
+// identityBindFormatUserStatus 生成个人绑定状态。
+// 只展示「个人身份绑定」的信息；群绑定请用 .group status 查看，两者是独立的。
 func identityBindFormatUserStatus(d *Dice, ctx *MsgContext) string {
-	lines := []string{fmt.Sprintf("当前身份: %s", ctx.Player.UserID)}
-	if record, ok := identityBindStoreOf(d).get(d, identityBindUserKey(ctx.Player.UserID)); ok {
-		lines = append(lines, fmt.Sprintf("已绑定旧身份: %s（旧群 %s）", record.Old.UserID, record.Old.GroupID))
-	} else {
-		lines = append(lines, "尚未绑定旧身份")
+	lines := []string{
+		"【个人身份绑定】把你自己指向迁移前的旧 QQ 号，之后你的角色卡/属性都从旧身份读取。",
+		"作用范围: 全局（与群无关，绑定一次所有官方群通用）",
+		fmt.Sprintf("当前身份: %s", ctx.Player.UserID),
 	}
+	if record, ok := identityBindStoreOf(d).get(d, identityBindUserKey(ctx.Player.UserID)); ok {
+		lines = append(lines, fmt.Sprintf("已绑定旧QQ号: %s", record.Old.UserID))
+		if record.Old.UserName != "" {
+			lines = append(lines, fmt.Sprintf("旧群内昵称: %s", record.Old.UserName))
+		}
+		if record.Old.GroupID != "" {
+			lines = append(lines, fmt.Sprintf("绑定时填写的旧群: %s", record.Old.GroupID))
+		}
+		lines = append(lines, fmt.Sprintf("绑定时间: %s", time.Unix(record.Created, 0).Format("2006-01-02 15:04")))
+		lines = append(lines, "解除方式: .unbind")
+	} else {
+		lines = append(lines, "尚未绑定旧QQ号")
+		lines = append(lines, "发起绑定: .bind <旧QQ号>")
+	}
+	// 顺带提示本群的群绑定状态，避免两个功能混淆
 	if ctx.Group != nil {
 		if record, ok := identityBindStoreOf(d).get(d, identityBindGroupKey(ctx.Group.GroupID)); ok {
-			lines = append(lines, fmt.Sprintf("本群日志绑定: %s", record.Old.GroupID))
+			lines = append(lines, fmt.Sprintf("（本群群绑定: 旧群 %s，用 .group status 查看）", record.Old.GroupID))
 		} else {
-			lines = append(lines, "本群尚未绑定旧群日志")
+			lines = append(lines, "（本群未做群绑定，群绑定用 .group bind <旧群号>）")
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -1098,28 +1148,40 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 // ---------- .log bind / .log unbind ----------
 
 func identityBindLogHelp() string {
-	return `.group bind <旧群号> // 把当前官方群绑定到迁移前的旧群（日志读取指向旧群）
-.group unbind // 解除当前群的绑定
+	return `【群绑定】把当前官方群指向迁移前的旧群，之后本群的日志读取
+（.log list / .log get / .log stat / .log export）都从旧群取。
+
+.group bind <旧群号> // 发起群绑定（需要管理权限）
+.group bind <选项序号> // 在问答过程中提交答案
+.group cancel // 取消进行中的问答（同时清掉个人绑定的问答）
+.group unbind // 解除当前群的绑定（需要管理权限）
 .group status // 查看当前群的绑定
 
-说明：群绑定与个人身份绑定（.bind）互相独立，可以同时使用。
-兼容写法：.log bind / .log unbind / .log bindstatus 与上面完全等价。`
+说明：
+* 群绑定只影响「日志读取」；写入（.log new / on / end）仍然记在当前群。
+* 群绑定与个人身份绑定（.bind）完全独立，可以同时使用，互不影响。
+* 兼容写法：.log bind / .log unbind / .log bindstatus 与上面等价。`
 }
 
-// identityBindGroupStatus 生成当前群绑定状态文本。
+// identityBindGroupStatus 生成当前群的绑定状态。
+// 只展示「群绑定」的信息；个人身份绑定请用 .bind status 查看，两者是独立的。
 func identityBindGroupStatus(d *Dice, ctx *MsgContext) string {
-	lines := []string{fmt.Sprintf("当前群: %s", ctx.Group.GroupID)}
+	lines := []string{
+		"【群绑定】把整个群指向迁移前的旧群，之后本群的日志读取（.log list / get / stat / export）都从旧群取。",
+		fmt.Sprintf("当前群: %s", ctx.Group.GroupID),
+	}
 	if record, ok := identityBindStoreOf(d).get(d, identityBindGroupKey(ctx.Group.GroupID)); ok {
 		lines = append(lines, fmt.Sprintf("已绑定旧群: %s", record.Old.GroupID))
 		if record.Old.GroupName != "" {
 			lines = append(lines, fmt.Sprintf("旧群名称: %s", record.Old.GroupName))
 		}
 		lines = append(lines, fmt.Sprintf("绑定时间: %s", time.Unix(record.Created, 0).Format("2006-01-02 15:04")))
-		lines = append(lines, "日志读取: 旧群（.log list / get / stat / export）")
+		lines = append(lines, "解除方式: .group unbind")
 	} else {
 		lines = append(lines, "尚未绑定旧群")
-		lines = append(lines, "如需把日志读取指向旧群，请使用 `.group bind <旧群号>`")
+		lines = append(lines, "发起绑定: .group bind <旧群号>")
 	}
+	lines = append(lines, "（个人身份绑定与群绑定互相独立，用 .bind status 查看个人绑定）")
 	return strings.Join(lines, "\n")
 }
 
@@ -1147,6 +1209,11 @@ func runIdentityBindGroupCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs
 	sub := ""
 	if len(cmdArgs.Args) > 0 {
 		sub = strings.ToLower(strings.TrimSpace(cmdArgs.Args[0]))
+	}
+
+	// 取消 / 重置：群绑定和个人身份绑定的问答都会被清掉
+	if sub == "cancel" || sub == "reset" {
+		return identityBindCancelSession(ctx, msg, true)
 	}
 
 	// .group status 查看当前群绑定
@@ -1233,16 +1300,29 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 
 	sessionKey := identityBindSessionKey(ctx.EndPoint.ID, ctx.Player.UserID, action)
 
+	// 统一取第一个参数作为子指令：.group bind / .group / .log bind 都适用
+	sub := strings.ToLower(cmdArgs.GetArgN(1))
+	if sub != "bind" {
+		sub = ""
+	}
+
 	// 已有会话时，参数是答案
-	// 消息形如 `.group bind 123` 或 `.log bind 123`，把开头的 bind 关键字去掉再解析
+	// 消息形如 `.group bind 123` / `.log bind 123` / `.group 123`
 	if session, ok := identityBindLoadSession(sessionKey); ok {
 		raw := strings.Join(cmdArgs.Args, "")
-		if trimmed, cut := strings.CutPrefix(strings.ToLower(raw), "bind"); cut {
-			raw = trimmed
+		// 把开头的 bind 或 group 关键字去掉再解析
+		for _, keyword := range []string{"bind", "group", "groupbind", "log"} {
+			if trimmed, cut := strings.CutPrefix(strings.ToLower(raw), keyword); cut {
+				raw = trimmed
+				break
+			}
 		}
-		if strings.EqualFold(raw, "cancel") {
-			identityBindClearSession(sessionKey)
-			ReplyToSender(ctx, msg, "已取消本次群绑定。")
+		raw = strings.TrimSpace(raw)
+		if strings.EqualFold(raw, "cancel") || strings.EqualFold(raw, "reset") {
+			return identityBindCancelSession(ctx, msg, false)
+		}
+		if raw == "" {
+			ReplyToSender(ctx, msg, identityBindFormatQuestions(session.Questions))
 			return solved
 		}
 		parsed, valid := identityBindParseAnswers(raw, len(session.Questions))
@@ -1254,8 +1334,13 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		return identityBindVerifyLogAnswers(ctx, msg, sessionKey, session, parsed)
 	}
 
-	// 解析 <旧群号>：.group bind <旧群号> 时它是第 2 项
+	// 解析旧群号：
+	//   .group bind <旧群号> / .log bind <旧群号> -> 参数在 Args[1]
+	//   .group <旧群号>                          -> 参数在 Args[0]
 	rawGroup := cmdArgs.GetArgN(2)
+	if sub != "bind" {
+		rawGroup = sub
+	}
 	if rawGroup == "" {
 		ReplyToSender(ctx, msg, "请使用 `.group bind <旧群号>` 的格式，例如 `.group bind 123456`。")
 		return solved
