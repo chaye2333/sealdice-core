@@ -420,6 +420,25 @@ func (pa *PlatformAdapterOfficialQQ) Serve() int {
 	return pa.connect(nil)
 }
 
+// requestTimeout 返回官方 QQ OpenAPI 的单次请求超时。
+//
+// 这个超时作用在 SDK 的 resty client 上，覆盖全部请求（文本、富媒体上传、拉取机器人信息）。
+// 旧版本硬编码 3 秒，导致用 URL 发送语音/文件时经常报 "context deadline exceeded"——
+// 因为腾讯要先把整个文件下载完才返回响应头。现在默认 60 秒，并可通过
+// officialQQRequestTimeoutSec 配置调整。
+func (pa *PlatformAdapterOfficialQQ) requestTimeout() time.Duration {
+	sec := DefaultConfig.OfficialQQRequestTimeoutSec
+	if pa != nil && pa.EndPoint != nil && pa.EndPoint.Session != nil && pa.EndPoint.Session.Parent != nil {
+		if configured := pa.EndPoint.Session.Parent.Config.OfficialQQRequestTimeoutSec; configured > 0 {
+			sec = configured
+		}
+	}
+	if sec <= 0 {
+		sec = DefaultConfig.OfficialQQRequestTimeoutSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
 // connect 建立正式连接。probe 非空时复用探测结果，避免重复拉取机器人信息。
 // 调用方需确保 AppID/AppSecret 已就绪。
 func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult) int {
@@ -448,7 +467,7 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 		return pa.failConnect()
 	}
 
-	pa.Api = qqbot.NewOpenAPI(pa.AppID, pa.tokenSource).WithTimeout(3 * time.Second)
+	pa.Api = qqbot.NewOpenAPI(pa.AppID, pa.tokenSource).WithTimeout(pa.requestTimeout())
 
 	botInfo := probe
 	if botInfo == nil {
@@ -1966,12 +1985,14 @@ func (pa *PlatformAdapterOfficialQQ) uploadGroupMedia(qctx context.Context, grou
 	if err != nil {
 		return nil, err
 	}
-	decodedFileInfo, decodeErr := base64.StdEncoding.DecodeString(media.FileInfo)
-	if decodeErr != nil {
-		decodedFileInfo = []byte(media.FileInfo)
-	}
+	// file_info 是「序列化后的二进制数据」，官方文档明确要求直接透传，不要解析。
+	// 这里绝不能做 base64 解码：它的值可能恰好落在合法 base64 字符集里
+	// （例如 "AE86C5D3F0E14B238C656C0F6DD1D0479C" 这种 32 位十六进制串），
+	// 解码会成功但把值改坏。
+	// 注意 dto.Media.FileInfo 是 string 而 dto.MediaInfo.FileInfo 是 []byte，
+	// 所以这里只需要按字节原样搬运，不做任何编解码。
 	return &dto.MediaInfo{
-		FileInfo: decodedFileInfo,
+		FileInfo: []byte(media.FileInfo),
 	}, nil
 }
 
@@ -2041,6 +2062,23 @@ func (pa *PlatformAdapterOfficialQQ) sendC2CMsgRaw(ctx *MsgContext, rowMsgID, us
 			media, err := pa.uploadC2CMedia(qctx, userOpenID, e.File, 3)
 			if err != nil {
 				pa.EndPoint.Session.Parent.Logger.Error("official qq 发送单聊消息时，准备语音信息失败：" + err.Error())
+				continue
+			}
+
+			if toCreate.Media != nil {
+				sendCurrent(false)
+				content = ""
+				toCreate = pa.initMessageToCreate(ctx, rowMsgID)
+				toCreate.MessageReference = msgRef
+			}
+
+			toCreate.MsgType = 7
+			toCreate.Media = media
+		case *message.FileElement:
+			// file_type=4：任意格式，发送后展示为文件卡片。
+			media, err := pa.uploadC2CMedia(qctx, userOpenID, e, 4)
+			if err != nil {
+				pa.EndPoint.Session.Parent.Logger.Error("official qq 发送单聊消息时，准备文件信息失败：" + err.Error())
 				continue
 			}
 
@@ -2443,6 +2481,25 @@ func (pa *PlatformAdapterOfficialQQ) sendQQGroupMsgRaw(ctx *MsgContext, rowMsgID
 
 			toCreate.MsgType = 7
 			toCreate.Media = media
+		case *message.FileElement:
+			// file_type=4：任意格式，发送后展示为文件卡片。
+			// 注意 file_data(base64) 模式腾讯不支持自定义文件名，
+			// 想自定义文件名必须走 upload_prepare 分片上传。
+			media, err := pa.uploadGroupMedia(qctx, groupID, elem, 4)
+			if err != nil {
+				pa.EndPoint.Session.Parent.Logger.Error("official qq 发送群聊消息时，准备文件信息失败：" + err.Error())
+				continue
+			}
+
+			if toCreate.Media != nil {
+				sendCurrent(false)
+				content = ""
+				toCreate = pa.initMessageToCreate(ctx, rowMsgID)
+				toCreate.MessageReference = msgRef
+			}
+
+			toCreate.MsgType = 7
+			toCreate.Media = media
 		}
 	}
 
@@ -2640,12 +2697,32 @@ func (pa *PlatformAdapterOfficialQQ) mustExtractTwoID(text string) (string, stri
 	return "", "", OpenQQUnknown
 }
 
+// SendFileToPerson 通过 [CQ:file] 发送文件。
+//
+// 官方 QQ 支持 file_type=4 的文件消息（发送后展示为文件卡片），这里不再返回
+// 「不支持」，而是构造 CQ 码交给正常的发送链路；CQ 解析会调用
+// FilepathToFileElement 做路径校验（只允许程序目录或系统临时目录内的文件）。
+//
+// 不直接返回错误提示是为了保持「发送文件」指令的原有语义：路径不合法时
+// CQ 解析层会跳过该消息并写日志，与其它平台的行为一致。
 func (pa *PlatformAdapterOfficialQQ) SendFileToPerson(ctx *MsgContext, uid string, path string, flag string) {
-	pa.SendToPerson(ctx, uid, fmt.Sprintf("[尝试发送文件 %s，但不支持]", filepath.Base(path)), flag)
+	pa.SendToPerson(ctx, uid, officialQQFileCQCode(path), flag)
 }
 
+// SendFileToGroup 通过 [CQ:file] 发送文件。说明同 SendFileToPerson。
 func (pa *PlatformAdapterOfficialQQ) SendFileToGroup(ctx *MsgContext, uid string, path string, flag string) {
-	pa.SendToGroup(ctx, uid, fmt.Sprintf("[尝试发送文件 %s，但不支持]", filepath.Base(path)), flag)
+	pa.SendToGroup(ctx, uid, officialQQFileCQCode(path), flag)
+}
+
+// officialQQFileCQCode 构造文件消息的 CQ 码。
+//
+// 注意不要用 message.SealCodeToCqCode 生成：它只认 [img:/图:/文本:/语音:/视频:]，
+// 不认识 file，直接写 CQ 码字符串更直接。
+//
+// 路径里可能包含逗号或方括号，必须按 CQ 码规范转义（&#44; / &#91; 等），
+// 否则参数会被截断成一个不存在的路径。
+func officialQQFileCQCode(path string) string {
+	return fmt.Sprintf("[CQ:file,file=%s]", message.EscapeCQParam(path))
 }
 
 func (pa *PlatformAdapterOfficialQQ) QuitGroup(_ *MsgContext, _ string) {

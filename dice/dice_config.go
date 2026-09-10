@@ -67,7 +67,28 @@ func (c *Config) LoadYamlConfig(data []byte) error {
 	}
 	c.migrateOld2Version1()
 	c.FixIdentityBindConfig()
+	c.FixOfficialQQConfig()
 	return nil
+}
+
+// FixOfficialQQConfig 收敛官方 QQ 相关的配置到合理范围。
+//
+// 重点是请求超时：老配置文件里没有这个字段（0），如果直接拿去 SetTimeout(0)
+// 会导致请求立即超时，所以必须补成默认值。
+func (c *Config) FixOfficialQQConfig() {
+	const (
+		minTimeoutSec = 5   // 官方文档建议上传接口超时 ≥5 秒
+		maxTimeoutSec = 600 // 上限 10 分钟，避免误填一个巨大的值把机器人卡死
+	)
+	if c.OfficialQQRequestTimeoutSec <= 0 {
+		c.OfficialQQRequestTimeoutSec = DefaultConfig.OfficialQQRequestTimeoutSec
+	}
+	if c.OfficialQQRequestTimeoutSec < minTimeoutSec {
+		c.OfficialQQRequestTimeoutSec = minTimeoutSec
+	}
+	if c.OfficialQQRequestTimeoutSec > maxTimeoutSec {
+		c.OfficialQQRequestTimeoutSec = maxTimeoutSec
+	}
 }
 
 // FixIdentityBindConfig 把身份绑定相关配置收敛到合理范围。
@@ -176,23 +197,28 @@ type BaseConfig struct {
 	QQEnablePoke             bool       `json:"QQEnablePoke"            yaml:"QQEnablePoke"`              // 启用戳一戳
 	OfficialQQFileSendBase64 bool       `json:"officialQQFileSendBase64" yaml:"officialQQFileSendBase64"` // 是否使用base64发送本地/非公网文件
 	OfficialQQUseMarkdown    bool       `json:"officialQQUseMarkdown"    yaml:"officialQQUseMarkdown"`    // 是否自动把消息全转为markdown类型消息
-	TextCmdTrustOnly         bool       `json:"textCmdTrustOnly"        yaml:"textCmdTrustOnly"`          // 只允许信任用户或master使用text指令
-	IgnoreUnaddressedBotCmd  bool       `json:"ignoreUnaddressedBotCmd" yaml:"ignoreUnaddressedBotCmd"`   // 不响应群聊裸bot指令
-	UILogLimit               int64      `json:"-"                       yaml:"UILogLimit"`
-	FriendAddComment         string     `json:"friendAddComment"        yaml:"friendAddComment"` // 加好友验证信息
-	CustomReplyConfigEnable  bool       `json:"customReplyConfigEnable" yaml:"customReplyConfigEnable"`
-	AutoReloginEnable        bool       `json:"autoReloginEnable"       yaml:"autoReloginEnable"`    // 启用自动重新登录
-	RefuseGroupInvite        bool       `json:"refuseGroupInvite"       yaml:"refuseGroupInvite"`    // 拒绝加入新群
-	UpgradeWindowID          string     `json:"-"                       yaml:"upgradeWindowId"`      // 执行升级指令的窗口
-	UpgradeEndpointID        string     `json:"-"                       yaml:"upgradeEndpointId"`    // 执行升级指令的端点
-	BotExtFreeSwitch         bool       `json:"botExtFreeSwitch"        yaml:"botExtFreeSwitch"`     // 允许任意人员开关: 否则邀请者、群主、管理员、master有权限
-	BotExitWithoutAt         bool       `json:"botExitWithoutAt"        yaml:"botExitWithoutAt"`     // 不@骰娘即可执行退群指令
-	TrustOnlyMode            bool       `json:"trustOnlyMode"           yaml:"trustOnlyMode"`        // 只有信任的用户/master可以拉群和使用
-	AliveNoticeEnable        bool       `json:"aliveNoticeEnable"       yaml:"aliveNoticeEnable"`    // 定时通知
-	AliveNoticeValue         string     `json:"aliveNoticeValue"        yaml:"aliveNoticeValue"`     // 定时通知间隔
-	ReplyDebugMode           bool       `json:"replyDebugMode"          yaml:"replyDebugMode"`       // 回复调试
-	PlayerNameWrapEnable     bool       `json:"playerNameWrapEnable"    yaml:"playerNameWrapEnable"` // 启用玩家名称外框
-	DiceRandomMode           string     `json:"diceRandomMode"          yaml:"diceRandomMode"`       // 骰点随机模式
+	// OfficialQQRequestTimeoutSec 官方 QQ OpenAPI 的单次请求超时（秒）。
+	// 这个超时作用在 SDK 的 resty client 上，覆盖文本发送、富媒体上传、拉取机器人信息等全部请求。
+	// 默认 60 秒：官方文档建议上传接口超时 ≥5 秒，而用 URL 上传时腾讯要先下载完整个文件才回响应头，
+	// 3 秒会导致语音/文件经常报 "context deadline exceeded"。发大文件建议调到 120 以上。
+	OfficialQQRequestTimeoutSec int64  `json:"officialQQRequestTimeoutSec" yaml:"officialQQRequestTimeoutSec"`
+	TextCmdTrustOnly            bool   `json:"textCmdTrustOnly"        yaml:"textCmdTrustOnly"`        // 只允许信任用户或master使用text指令
+	IgnoreUnaddressedBotCmd     bool   `json:"ignoreUnaddressedBotCmd" yaml:"ignoreUnaddressedBotCmd"` // 不响应群聊裸bot指令
+	UILogLimit                  int64  `json:"-"                       yaml:"UILogLimit"`
+	FriendAddComment            string `json:"friendAddComment"        yaml:"friendAddComment"` // 加好友验证信息
+	CustomReplyConfigEnable     bool   `json:"customReplyConfigEnable" yaml:"customReplyConfigEnable"`
+	AutoReloginEnable           bool   `json:"autoReloginEnable"       yaml:"autoReloginEnable"`    // 启用自动重新登录
+	RefuseGroupInvite           bool   `json:"refuseGroupInvite"       yaml:"refuseGroupInvite"`    // 拒绝加入新群
+	UpgradeWindowID             string `json:"-"                       yaml:"upgradeWindowId"`      // 执行升级指令的窗口
+	UpgradeEndpointID           string `json:"-"                       yaml:"upgradeEndpointId"`    // 执行升级指令的端点
+	BotExtFreeSwitch            bool   `json:"botExtFreeSwitch"        yaml:"botExtFreeSwitch"`     // 允许任意人员开关: 否则邀请者、群主、管理员、master有权限
+	BotExitWithoutAt            bool   `json:"botExitWithoutAt"        yaml:"botExitWithoutAt"`     // 不@骰娘即可执行退群指令
+	TrustOnlyMode               bool   `json:"trustOnlyMode"           yaml:"trustOnlyMode"`        // 只有信任的用户/master可以拉群和使用
+	AliveNoticeEnable           bool   `json:"aliveNoticeEnable"       yaml:"aliveNoticeEnable"`    // 定时通知
+	AliveNoticeValue            string `json:"aliveNoticeValue"        yaml:"aliveNoticeValue"`     // 定时通知间隔
+	ReplyDebugMode              bool   `json:"replyDebugMode"          yaml:"replyDebugMode"`       // 回复调试
+	PlayerNameWrapEnable        bool   `json:"playerNameWrapEnable"    yaml:"playerNameWrapEnable"` // 启用玩家名称外框
+	DiceRandomMode              string `json:"diceRandomMode"          yaml:"diceRandomMode"`       // 骰点随机模式
 
 	VMVersionForReply      string `json:"VMVersionForReply"      yaml:"VMVersionForReply"`      // 自定义回复使用的vm版本
 	VMVersionForDeck       string `json:"VMVersionForDeck"       yaml:"VMVersionForDeck"`       // 牌堆使用的vm版本

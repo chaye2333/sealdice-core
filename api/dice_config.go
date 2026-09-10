@@ -458,6 +458,17 @@ func DiceConfigSet(c echo.Context) error {
 		config.OfficialQQUseMarkdown = val.(bool)
 	}
 
+	if val, ok := jsonMap["officialQQRequestTimeoutSec"]; ok {
+		switch v := val.(type) {
+		case float64:
+			config.OfficialQQRequestTimeoutSec = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				config.OfficialQQRequestTimeoutSec = parsed
+			}
+		}
+	}
+
 	if val, ok := jsonMap["officialQQEnableIdentityMigration"]; ok {
 		config.OfficialQQMigrationEnable = val.(bool)
 	}

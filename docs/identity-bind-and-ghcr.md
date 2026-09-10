@@ -545,6 +545,86 @@ $\scriptsize\textcolor{#E5484D}{\text{调查员甲 SAN50 HP30/30 DEX60}}$
 
 ---
 
+## 七点六、官方 QQ 富媒体（语音 / 文件）修复
+
+这一节修的是官方 QQ 适配器原有的三个问题，和插件（点歌卡片语音等）兼容性直接相关。
+
+### 7.6.1 请求超时 3 秒 → 60 秒（最要紧的一个）
+
+**症状**：点歌发语音时报「准备语音信息失败：… context deadline exceeded」。
+
+**原因**：适配器把 SDK 的请求超时硬编码成 3 秒：
+
+```go
+pa.Api = qqbot.NewOpenAPI(...).WithTimeout(3 * time.Second)
+```
+
+这个超时作用在 SDK 的 resty client 上，是**所有请求共用**的（文本、上传、拉机器人信息）。
+而用 `url` 方式上传富媒体时，腾讯要**先把整个文件下载完**才返回响应头，
+3 秒基本必然超时。
+
+**改法**：默认提到 60 秒，并且做成可配置：
+
+```yaml
+officialQQRequestTimeoutSec: 60
+```
+
+| 值 | 说明 |
+|---|---|
+| 默认 `60` | 只发语音（4~5MB）足够，官方文档也建议上传超时 ≥5 秒 |
+| `120` 以上 | 要发几十 MB 的大文件时建议调大 |
+| 下限 `5` | 低于会被自动抬到 5 秒 |
+| 上限 `600` | 高于会被收敛，避免误填把机器人卡死 |
+
+> 调大超时只是「允许它慢慢下」，源站慢的话机器人会一直卡着不回复。
+> 想彻底不等，用下面的本地文件方案让腾讯别去下载。
+
+**替代方案（不用腾讯下载）**：插件配置 `voiceUseLocalFile=true` + `localCacheDir`，
+插件先把音频下到本地，发 `[CQ:record,file=file:///...]`，适配器走 `file_data`(base64) 上传，
+`url` 留空，腾讯不再下载，5 秒都够用。
+
+### 7.6.2 文件消息（file_type=4）现在真的能发
+
+原来适配器**没有实现文件元素的发送**，`[CQ:file,...]` 会被静默丢弃；
+`SendFileToPerson` / `SendFileToGroup` 也只是回一句「尝试发送文件 xxx，但不支持」。
+
+现在补齐了：
+
+* 群聊 `sendQQGroupMsgRaw` 增加 `case *message.FileElement`，以 `file_type=4` 上传；
+* 单聊 `sendC2CMsgRaw` 同样增加该分支；
+* `SendFileToPerson` / `SendFileToGroup` 改为构造 `[CQ:file,file=...]` 交给正常发送链路。
+
+需要注意：
+
+* **文件路径必须在程序工作目录或系统临时目录内**，否则 `FilepathToFileElement`
+  会以「路径受限」拒绝（日志里会写「CQ码资源路径受限，已跳过」）。
+  日志导出用的 `os.CreateTemp("", ...)` 天然在临时目录里，可以直接用。
+* 路径里的逗号 / 方括号会用 `message.EscapeCQParam` 转义（`&#44;` / `&#91;`），
+  不会把参数截断。
+* `file_data`(base64) 模式**腾讯不支持自定义文件名**；要自定义文件名必须走
+  `upload_prepare` 分片上传。
+* **频道（QQ-CH）场景不支持文件**，官方文档里就是 ❌，本补丁不动频道。
+
+### 7.6.3 修掉一个会悄悄改坏 file_info 的 base64 解码
+
+```go
+// 旧代码（定时炸弹）
+decodedFileInfo, decodeErr := base64.StdEncoding.DecodeString(media.FileInfo)
+if decodeErr != nil {
+    decodedFileInfo = []byte(media.FileInfo)
+}
+```
+
+`file_info` 是「序列化后的二进制数据」，官方文档要求**直接透传、不要解析**。
+它的值可能是 `AE86C5D3F0E14B238C656C0F6DD1D0479C` 这种 32 位十六进制串 ——
+**恰好是合法 base64**，`DecodeString` 会成功并把 32 字符解成 16 字节再发回去，
+值就被改坏了。现在改为按字节原样搬运，不做任何编解码。
+
+> 这个 bug 在大多数随机 file_info 上「解不出来所以用原文」而侥幸没炸，
+> 但它是一个必然会踩到的定时炸弹。
+
+---
+
 ## 八、本次改动的文件清单
 
 新增：
@@ -564,16 +644,25 @@ $\scriptsize\textcolor{#E5484D}{\text{调查员甲 SAN50 HP30/30 DEX60}}$
 
 | 文件 | 改动 |
 |---|---|
-| `dice/dice_config.go` | 新增 3 个绑定配置字段 + `FixIdentityBindConfig()` 收敛取值范围 |
-| `dice/dice_config_default.go` | 默认值：绑定关闭、1 题、冷却 60 秒 |
+| `dice/dice_config.go` | 新增绑定配置字段 + `FixIdentityBindConfig()`；新增 `officialQQRequestTimeoutSec` + `FixOfficialQQConfig()` |
+| `dice/dice_config_default.go` | 默认值：绑定关闭、1 题、冷却 60 秒、答错锁 12 小时、官方 QQ 请求超时 60 秒 |
 | `dice/dice.go` | `Dice.IdentityBindStore` 字段与初始化 |
-| `dice/builtin_commands.go` | 注册全局指令 `.bind` / `.unbind`；骰点收尾挂状态栏 |
+| `dice/im_session.go` | `MsgContext.OfficialQQStatusBarPending` 标记字段 |
+| `dice/rollvm_migrate.go` | `DiceFormatTmpl` 在渲染最终回复模板时打状态栏标记 |
+| `dice/im_helpers.go` | 发送层统一消费状态栏标记（群聊 + 私聊） |
+| `dice/builtin_commands.go` | 注册全局指令 `.bind` / `.unbind` / `.group`（含 `.groupbind`） |
 | `dice/ext_log.go` | 抽出 `EvalPlayerGroupCardTemplate`；`.group bind` / `.log bind` 系列；读操作群回退 |
 | `dice/dice_attrs_manager.go` | `LoadByCtx` 支持绑定后的属性读取回退 |
-| `api/dice_config.go` | WebUI 保存这三个配置项 |
-| `dice/ext_fun.go` | `.drl` 骰池抽取挂状态栏 |
-| `dice/ext_coc7.go` | `.ra` / `.rc` / `.sc` 挂状态栏 |
-| `dice/ext_dnd5e.go` | DND 检定挂状态栏 |
+| `api/dice_config.go` | WebUI 保存绑定配置项与官方 QQ 请求超时 |
+| `dice/platform_adapter_official_qq.go` | 请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；修掉 file_info 的 base64 误解码 |
+
+新增测试：
+
+| 文件 | 作用 |
+|---|---|
+| `dice/ext_identity_bind_test.go` | 绑定：出题、答案解析、冷却、答错锁定、持久化、平台隔离、群/个人独立 |
+| `dice/official_qq_character_roll_markdown_test.go` | 状态栏：渲染、转义、实时更新、平台隔离、任意规则系统通用挂载 |
+| `dice/platform_adapter_official_qq_media_test.go` | 官方 QQ 富媒体：超时默认/收敛、file_info 透传、CQ:file 转义与往返、频道不受影响 |
 
 ---
 
