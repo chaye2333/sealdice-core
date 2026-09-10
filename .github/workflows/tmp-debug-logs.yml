@@ -1,0 +1,30 @@
+name: TMP Debug Fetch Logs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  show-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find last failed Build & Push run and print its logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          RUN_ID=$(gh api "repos/${{ github.repository }}/actions/runs?per_page=20" \
+            --jq '[.workflow_runs[] | select(.name=="Build & Push Docker image (GHCR)")][0].id')
+          echo "RUN_ID=$RUN_ID"
+          JOB_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/jobs" \
+            --jq '[.jobs[] | select(.name=="Build & Push")][0].id')
+          echo "JOB_ID=$JOB_ID"
+          gh api "repos/${{ github.repository }}/actions/jobs/$JOB_ID/logs" > /tmp/job.log || true
+          echo "=== log size: $(wc -c < /tmp/job.log) bytes ==="
+          echo "=== FAILURE CONTEXT ==="
+          grep -n -i -E "error|fail|ERR_|not found|denied|panic|cannot|unable" /tmp/job.log | tail -n 60 || true
+          echo "=== TAIL ==="
+          tail -n 80 /tmp/job.log || true
