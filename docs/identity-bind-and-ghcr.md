@@ -36,17 +36,22 @@
 
 ---
 
-## 三、开启功能（管理界面）
+## 三、开启功能
 
-管理界面 → 扩展设置 → **QQ身份与日志绑定**：
+### 3.1 怎么打开（重要：界面上暂时看不到开关）
 
-| 配置项 | 配置文件字段 | 默认 | 说明 |
-|---|---|---|---|
-| 启用身份与日志绑定 | `identityBindEnable` | `false` | 总开关，默认关闭，需手动打开 |
-| 验证题目数量 | `identityBindQuestionCount` | `1` | 1~5，超过 5 会被收敛到 5 |
-| 绑定冷却时间(秒) | `identityBindCooldownSec` | `60` | 同一用户两次发起绑定的最小间隔，0 表示不限制 |
+**先说结论：目前管理界面里找不到这个开关，这是正常的。**
 
-对应的 `serve.yaml` 片段：
+原因是前端来源：本仓库的 Dockerfile 会把 `static/frontend` 用 `go:embed` 打进二进制，
+而这份前端是**从官方 `sealdice-ui` release 下载的预编译产物**
+（见 `static/gen/download-fe.go`）。官方前端里当然没有我新加的配置项，
+所以界面不会渲染出这个分组。后端 API 其实是完整的（`DiceConfig` 会把整个
+`Config` 返回给前端，包含这几个字段），缺的只是界面控件。
+
+**所以现在请改配置文件开启**，路径在容器内是 `/app/data/default/serve.yaml`
+（宿主机上就是你映射的 `./data/default/serve.yaml`）。
+
+打开该文件，找到文件末尾区域，加入下面三行（如果已存在就改值）：
 
 ```yaml
 identityBindEnable: true
@@ -54,14 +59,34 @@ identityBindQuestionCount: 1
 identityBindCooldownSec: 60
 ```
 
-> 注意：仓库里的 WebUI 是 `ui/` 目录单独编译的。如果管理界面里还看不到这个分组，
-> 直接改 `data/default/serve.yaml` 里的上面三个字段也可以，改完重启核心。
+然后重启容器：
+
+```bash
+docker restart sealdice-core
+```
+
+**不用担心被界面覆盖**：`DiceConfigSet`（`api/dice_config.go`）只处理请求里出现过的
+键，界面保存设置时不会碰这几个键；而 `saveLocked` 会把整个 `Config` 写回去，
+所以手改的值会一直保留。
+
+### 3.2 配置项说明
+
+| 配置项 | 配置文件字段 | 默认 | 说明 |
+|---|---|---|---|
+| 启用身份与日志绑定 | `identityBindEnable` | `false` | 总开关，默认关闭，需手动打开 |
+| 验证题目数量 | `identityBindQuestionCount` | `1` | 1~5，超过 5 会被收敛到 5 |
+| 绑定冷却时间(秒) | `identityBindCooldownSec` | `60` | 同一用户两次发起绑定的最小间隔，0 表示不限制 |
 
 题目数量怎么选：
 
 * `1` 题最省事，适合信任度高的群；
 * 老玩家角色卡名比较独特时，`1` 题已经足够（要在他自己的多张卡里选对）；
 * 想更严格可以调到 `2`~`3`，玩家要连着答对。
+
+### 3.3 怎么验证开关生效
+
+在官方 bot 群里发 `.bind`（不带参数），如果返回的是帮助文本、而不是
+「身份绑定功能未开启」，说明开关已经生效。
 
 ---
 
