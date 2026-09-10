@@ -1196,7 +1196,7 @@ var _textMapBuiltin = map[string]*ds.VMValue{
 	"$tTimestamp": ds.NewIntVal(1722880283),
 	"$t人品":        ds.NewIntVal(35),
 	"$tSecond":    ds.NewIntVal(23),
-	"$t骰子昵称":      ds.NewStrVal("海豹核心"),
+	"$t骰子昵称":      ds.NewStrVal("鲸鱼娘与海豹娘的故事"),
 	"$tHour":      ds.NewIntVal(1),
 	"$t帐号ID_RAW":  ds.NewStrVal("1001"),
 	"$tMonth":     ds.NewIntVal(8),
