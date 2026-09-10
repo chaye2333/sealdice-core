@@ -181,7 +181,8 @@ func TestOfficialQQChunkedUploadGroupEndToEnd(t *testing.T) {
 		t.Fatalf("FilepathToFileElement: %v", err)
 	}
 
-	media, err := pa.uploadGroupMedia(context.Background(), "OpenQQ-Group:100-groupopenid", elem, 4)
+	// 调用链上 SendToGroup 已剥掉前缀，所以这里传的是裸 GroupOpenID
+	media, err := pa.uploadGroupMedia(context.Background(), "groupopenid", elem, 4)
 	if err != nil {
 		t.Fatalf("uploadGroupMedia: %v", err)
 	}
@@ -308,7 +309,7 @@ func TestOfficialQQChunkedUploadPrepareFailure(t *testing.T) {
 		t.Fatalf("FilepathToFileElement: %v", err)
 	}
 
-	_, err = pa.uploadGroupMedia(context.Background(), "OpenQQ-Group:100-g", elem, 4)
+	_, err = pa.uploadGroupMedia(context.Background(), "g", elem, 4)
 	if err == nil {
 		t.Fatal("expected an error when upload_prepare fails")
 	}
@@ -337,7 +338,7 @@ func TestOfficialQQChunkedUploadPartFailure(t *testing.T) {
 		t.Fatalf("FilepathToFileElement: %v", err)
 	}
 
-	_, err = pa.uploadGroupMedia(context.Background(), "OpenQQ-Group:100-g", elem, 4)
+	_, err = pa.uploadGroupMedia(context.Background(), "g", elem, 4)
 	if err == nil {
 		t.Fatal("expected an error when a part PUT fails")
 	}
@@ -389,7 +390,7 @@ func TestOfficialQQChunkedUploadSkipsRemoteURL(t *testing.T) {
 	// 因此用 recover 断言"没有真的发起上传"更稳妥。
 	func() {
 		defer func() { _ = recover() }()
-		_, _ = pa.uploadGroupMedia(context.Background(), "OpenQQ-Group:100-g",
+		_, _ = pa.uploadGroupMedia(context.Background(), "g",
 			&message.FileElement{URL: "https://example.com/a.png"}, 1)
 	}()
 

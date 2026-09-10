@@ -152,12 +152,18 @@ func (pa *PlatformAdapterOfficialQQ) officialQQShouldUseChunkedUpload(file *mess
 
 // uploadGroupMediaChunked 用分片上传的方式上传群文件，可自定义文件名。
 // 仅对「本地文件」使用：远程 URL 走 URL 上传更省事，也是腾讯推荐的整文件方式。
+// uploadGroupMediaChunked 用分片上传的方式上传群文件，可自定义文件名。
+//
+// 注意 groupID 的形态：调用链是 SendToGroup -> sendQQGroupMsgRaw -> 这里，
+// 而 SendToGroup 开头就调用了 mustExtractID，所以传进来的是**剥掉前缀的裸 GroupOpenID**
+// （例如 "1D8143A1F14230DC012F302A12DD0526"），不是 "OpenQQ-Group:<UIN>-<openid>"。
+// 因此这里不能再解析一次，直接用即可。
 func (pa *PlatformAdapterOfficialQQ) uploadGroupMediaChunked(
 	qctx context.Context, groupID string, file *message.FileElement, fileType int,
 ) (*dto.MediaInfo, error) {
-	groupOpenID, idType := pa.mustExtractID(groupID)
-	if idType != OpenQQGroupOpenid {
-		return nil, fmt.Errorf("分片上传需要群 OpenID，收到 %q", groupID)
+	groupOpenID := strings.TrimSpace(groupID)
+	if groupOpenID == "" {
+		return nil, errors.New("分片上传缺少群 OpenID")
 	}
 
 	fileName, data, err := officialQQReadLocalFile(file)
@@ -227,8 +233,12 @@ func (pa *PlatformAdapterOfficialQQ) uploadC2CMediaChunked(
 
 // officialQQRunChunkedUpload 执行分片上传的前三步，返回 upload_id。
 //
-// basePath 形如 "/v2/groups/<openid>" 或 "/v2/users/<openid>"，两个场景的
+// basePath 形如 "/v2/groups/<GroupOpenID>" 或 "/v2/users/<UserOpenID>"，两个场景的
 // 预上传与分片完成端点只在路径前缀上不同，因此共用同一段逻辑。
+//
+// ⚠️ 传进来的必须是**裸 OpenID**：调用链 SendToGroup/SendToPerson 开头就调用了
+// mustExtractID 把 "OpenQQ-Group:<UIN>-<openid>" 的前缀剥掉，
+// 所以这里不能再解析一次（曾经因此报"分片上传需要群 OpenID"）。
 func (pa *PlatformAdapterOfficialQQ) officialQQRunChunkedUpload(
 	qctx context.Context, basePath, fileName string, data []byte, fileType int,
 ) (string, error) {
