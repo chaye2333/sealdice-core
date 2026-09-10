@@ -1,4 +1,6 @@
 # 构建镜像时不需要打进上下文的内容
+
+# 版本库与 CI 元数据
 .git
 .github
 .idea
@@ -14,14 +16,14 @@ sealdice-core
 sealdice-core.exe
 sealdice-core.zip
 
-# 前端依赖与产物（镜像内会重新构建）
-ui/node_modules
-ui/dist
+# ui/ 是仓库自带的 Vue 脚手架样例，不是海豹管理界面，镜像里不需要
+# （真正的管理界面由 `go generate ./static/...` 下载，见 Dockerfile 说明）
+ui
 
-# 子模块目录（当前为空占位）
+# 子模块目录：docker build 时无法初始化，直接排除
 sealdice-builtins
 sealdice-ui
 
-# 文档与测试数据
+# 文档
 docs
 *.md

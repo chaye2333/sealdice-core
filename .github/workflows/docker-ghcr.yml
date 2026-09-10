@@ -99,3 +99,38 @@ jobs:
             VERSION_BUILD_METADATA=${{ steps.version.outputs.meta }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 烟雾测试：确认镜像里真的是海豹管理界面，而不是那个 Vue 脚手架样例页。
+      # 历史上这里踩过坑——曾经误用了仓库的 ui/ 目录，结果镜像里是 Vite 欢迎页。
+      - name: Smoke test the admin UI is bundled
+        run: |
+          set -e
+          IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "verifying $IMAGE"
+          docker run --rm --entrypoint sh "$IMAGE" -c '
+            set -e
+            echo "--- sealdice binary version ---"
+            /app/sealdice-core --version
+          '
+          # 镜像里没有前端文件（已 go:embed 进二进制），改为直接检查运行时
+          # 首页是否返回海豹管理界面，而不是 Vite 脚手架欢迎页。
+          docker run -d --name smktest -p 13211:3211 "$IMAGE"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:13211/ -o /tmp/page.html; then break; fi
+            sleep 1
+          done
+          echo "--- index.html head ---"
+          head -c 600 /tmp/page.html || true
+          echo
+          if grep -qi "Vite + Vue 3\|You've successfully created" /tmp/page.html; then
+            echo "::error::镜像里打包的是 Vue 脚手架样例页，不是海豹管理界面"
+            docker logs smktest || true
+            exit 1
+          fi
+          if ! grep -qi "sealdice" /tmp/page.html; then
+            echo "::error::首页里找不到 sealdice 字样，前端可能没打进去"
+            docker logs smktest || true
+            exit 1
+          fi
+          echo "OK: 管理界面已正确打包"
+          docker rm -f smktest

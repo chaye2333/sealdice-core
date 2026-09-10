@@ -1,31 +1,24 @@
-# 多阶段构建：编译 WebUI → 编译核心 → 精简运行镜像
+# 多阶段构建：编译核心（内含真正的 WebUI）→ 精简运行镜像
 #
 # 构建（在仓库根目录执行）：
 #   docker build -t sealdice-core:local .
 #
-# 说明：
-#   * 核心使用 CGO_ENABLED=0 编译，SQLite 走纯 Go 实现（见 migrate/db_util.go 的 !cgo 分支），
-#     因此运行镜像不需要 glibc / GCC，镜像更小、跨平台更稳。
-#   * WebUI 由仓库内的 ui/ 目录编译，产物复制进 static/frontend 后再编译核心，
-#     这样 UI 会被 embed 进最终二进制。
+# 两条重要说明：
+#
+# 1) WebUI 不能拿仓库里的 ui/ 目录来构建！
+#    那个 ui/ 是海豹仓库自带的一个 Vue 脚手架样例页（HelloWorld/TheWelcome/counter），
+#    编译出来是 "You've successfully created a project with Vite + Vue 3" 欢迎页，
+#    不是海豹的管理界面。
+#    真正的管理界面由 sealdice-ui 仓库产出，上游约定是放在 static/frontend/，
+#    再被 static/static.go 的 go:embed 打进二进制。
+#    README 明确写了用 `go generate ./...` 从官方 release 拉取前端产物
+#    （见 static/gen/download-fe.go），这里沿用同一套机制。
+#    如果下载失败，本 Dockerfile 会在构建期直接报错，不会静默塞一个错误的前端进去。
+#
+# 2) 核心用 CGO_ENABLED=0 编译，SQLite 走纯 Go 实现（见 migrate/db_util.go 的 !cgo 分支），
+#    因此运行镜像不需要 glibc / GCC，镜像更小、跨平台更稳。
 
-# ---------- 阶段 1：编译 WebUI ----------
-FROM node:22-alpine AS ui-builder
-
-WORKDIR /src/ui
-
-RUN corepack enable
-
-# 先装依赖，利用 Docker 层缓存
-# pnpm-workspace.yaml 里有 allowBuilds 授权（esbuild / @tailwindcss/oxide 是原生模块），
-# 少了它 pnpm install 会以 ERR_PNPM_IGNORED_BUILDS 失败。
-COPY ui/package.json ui/pnpm-lock.yaml ui/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY ui/ ./
-RUN pnpm run build-only
-
-# ---------- 阶段 2：编译 Go 核心 ----------
+# ---------- 阶段 1：编译 Go 核心 ----------
 FROM golang:1.25-alpine AS core-builder
 
 ARG VERSION_BUILD_METADATA="+dev"
@@ -39,9 +32,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . ./
-# 用真实 WebUI 产物覆盖仓库里的占位页
-RUN rm -rf static/frontend && mkdir -p static/frontend
-COPY --from=ui-builder /src/ui/dist/ static/frontend/
+
+# 拉取官方 sealdice-ui 产物并解压到 static/frontend
+# 产物结构：static/frontend/{index.html,favicon.svg,assets/...}
+RUN go generate ./static/... && \
+    test -f static/frontend/index.html && \
+    test -d static/frontend/assets && \
+    echo "=== 已打包管理界面 ===" && \
+    ls static/frontend
 
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 # VERSION_BUILD_METADATA 必须是合法 semver 元数据（带 + 前缀），否则 dice.VERSION 初始化会 panic。
@@ -52,7 +50,7 @@ RUN BUILD_META="${VERSION_BUILD_METADATA:-+$(date -u +%Y%m%d)}" && \
       -o /out/sealdice-core . && \
     /out/sealdice-core --version
 
-# ---------- 阶段 3：运行镜像 ----------
+# ---------- 阶段 2：运行镜像 ----------
 FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates tzdata && \
