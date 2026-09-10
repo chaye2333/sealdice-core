@@ -682,14 +682,27 @@ code:400, {"message":"请求参数file_info无效","code":40034032}
 * 预签名 URL 自带鉴权，PUT 时**不能**附加 `Authorization` / `X-Union-Appid`，否则签名校验失败；
 * 单聊与群聊的上传/预上传/分片端点**互相独立**，不能跨场景复用。
 
-**开关**：默认**关闭**，在 `serve.yaml` 里打开：
+**开关**：**默认关闭，必须显式打开**。在 `serve.yaml` 里加一行：
 
 ```yaml
 officialQQChunkedUploadEnable: true
 ```
 
-打开后：**本地文件**走分片（可保留文件名）；**远程 URL** 仍走 URL 上传；
+> ⚠️ **不打开这一行，文件照样能发，但名字仍是「未命名」**——
+> 关着时走的是旧的 `file_data` 路径，而那条路径腾讯不给文件名。
+
+**打开后的行为**：本地文件走分片（可保留文件名）；**远程 URL** 仍走 URL 上传；
 语音/图片等既有路径**完全不变**。所以这个开关是安全的，出问题关掉即可回退。
+
+**排查清单**（名字还是「未命名」时逐条看）：
+
+- [ ] `serve.yaml` 里确实有 `officialQQChunkedUploadEnable: true`
+      （**顶格**、不要缩进；也不要和已有的键重复——重复会导致
+      `serve.yaml parse failed`，骰子会启动失败）
+- [ ] 改完后**重启过**容器
+- [ ] 日志里能搜到 `official qq 分片上传: 文件=... 大小=... 分片数=...`；
+      **有这行才说明走的是分片路径**，没有就是开关没生效
+- [ ] 发的是**本地文件**（`file://` 或普通路径）；远程 URL 设计上不走分片
 
 > botgo SDK 只封装了 `/files` 一个端点，`upload_prepare` 与 `upload_part_finish`
 > 由适配器自己发请求（`dice/platform_adapter_official_qq_chunked.go`），
