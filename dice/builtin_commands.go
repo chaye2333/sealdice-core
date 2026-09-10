@@ -716,13 +716,7 @@ func (d *Dice) registerCoreCommands() {
 		Solve: func(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
 			arg := cmdArgs.GetArgN(1)
 			if arg == "" {
-				// 骰子名字走文案模板「核心:骰子名字」，可在 text-template.yaml 里自定义。
-				// 取不到时回退到默认名字，避免因为空模板导致这行变空。
-				diceName := strings.TrimSpace(DiceFormatTmpl(ctx, "核心:骰子名字"))
-				if diceName == "" || strings.HasPrefix(diceName, "<%未知项") {
-					diceName = "鲸鱼娘与海豹娘的故事"
-				}
-				text := diceName + " " + VERSION.String() + "\n"
+				text := "海豹核心 " + VERSION.String() + "\n"
 				text += "官网: sealdice.com" + "\n"
 				text += "海豹群: 524364253" + "\n"
 				text += DiceFormatTmpl(ctx, "核心:骰子帮助文本_附加说明")
