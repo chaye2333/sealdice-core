@@ -24,8 +24,10 @@ jobs:
           echo "JOB_ID=$JOB_ID"
           gh api "repos/${{ github.repository }}/actions/jobs/$JOB_ID/logs" > /tmp/job.log || true
           echo "=== log size: $(wc -c < /tmp/job.log) bytes ==="
-          echo "=== ERROR LINES ==="
-          grep -n -i -E "error|fail|ERR_|not found|denied|panic|unable|invalid" /tmp/job.log | tail -n 80 || true
+          echo "=== ERROR LINES (with context) ==="
+          grep -n -i -E "##\[error\]|ERROR:|error during|failed to|ERR_|not found|cannot|unable" /tmp/job.log | tail -n 40 || true
+          echo "=== LAST 120 LINES OF THE FAILED JOB ==="
+          tail -n 120 /tmp/job.log | sed -e 's/\x1b\[[0-9;]*m//g' || true
 
   reproduce-ui-build:
     runs-on: ubuntu-latest
