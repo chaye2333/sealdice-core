@@ -241,7 +241,7 @@ func TestGroupBindViaCommandClearsRealGroupState(t *testing.T) {
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
 	waitGroupMessage(t, env)
 
-	challenge, ok := identityBindLoadCode(identityBindActionGroup, bindTestOldGroupID)
+	challenge, ok := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID)
 	if !ok || challenge.Status != identityBindCodeDelivered {
 		t.Fatalf("expected a delivered group challenge, got %+v / %v", challenge, ok)
 	}

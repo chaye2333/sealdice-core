@@ -92,27 +92,13 @@ func (c *Config) FixOfficialQQConfig() {
 }
 
 // FixIdentityBindConfig 把身份绑定相关配置收敛到合理范围。
-// 老配置文件里这几个字段为 0（缺省），需要补成默认值，避免出现“题目数量 0 题”这类无效状态。
+// 老配置文件里这些字段为 0（缺省），需要补成默认值。
 func (c *Config) FixIdentityBindConfig() {
-	if c.IdentityBindQuestionCount <= 0 {
-		c.IdentityBindQuestionCount = DefaultConfig.IdentityBindQuestionCount
-	}
-	if c.IdentityBindQuestionCount > identityBindMaxQuestionCount {
-		c.IdentityBindQuestionCount = identityBindMaxQuestionCount
-	}
 	if c.IdentityBindCooldownSec < 0 {
 		c.IdentityBindCooldownSec = 0
 	}
 	if c.IdentityBindCooldownSec > identityBindMaxCooldownSec {
 		c.IdentityBindCooldownSec = identityBindMaxCooldownSec
-	}
-	// 答错锁定：默认 12 小时。老配置文件里该字段为 0，需要补成默认值，
-	// 否则等于「答错没有任何惩罚」，会被穷举爆破。
-	if c.IdentityBindFailCooldownSec <= 0 {
-		c.IdentityBindFailCooldownSec = DefaultConfig.IdentityBindFailCooldownSec
-	}
-	if c.IdentityBindFailCooldownSec > identityBindMaxCooldownSec {
-		c.IdentityBindFailCooldownSec = identityBindMaxCooldownSec
 	}
 	if c.LogMultiBotDedupWindowSec <= 0 {
 		c.LogMultiBotDedupWindowSec = DefaultConfig.LogMultiBotDedupWindowSec
@@ -274,13 +260,8 @@ type BaseConfig struct {
 	// IdentityBindEnable 是否允许用户使用 .bind 系列指令，把 QQ 官方机器人的身份
 	// 绑定回迁移前的旧账号（例如 NapCat 时代的 QQ:12345）。
 	IdentityBindEnable bool `json:"identityBindEnable" yaml:"identityBindEnable"`
-	// IdentityBindQuestionCount 身份验证需要答对的题目数量。
-	IdentityBindQuestionCount int64 `json:"identityBindQuestionCount" yaml:"identityBindQuestionCount"`
 	// IdentityBindCooldownSec 同一个用户两次发起绑定之间的最小间隔（秒）。
 	IdentityBindCooldownSec int64 `json:"identityBindCooldownSec" yaml:"identityBindCooldownSec"`
-	// IdentityBindFailCooldownSec 答案答错后的锁定时长（秒），默认 12 小时。
-	// 目的是防止用穷举的方式猜别人的角色卡名 / 日志名。
-	IdentityBindFailCooldownSec int64 `json:"identityBindFailCooldownSec" yaml:"identityBindFailCooldownSec"`
 
 	// LogMultiBotDedupWindowSec 同一条玩家消息在多久内只记一次日志（秒）。
 	//
@@ -293,24 +274,30 @@ type BaseConfig struct {
 	// 完全相同的消息会被并成一条。日志是永久记录，所以这个模式必须主动开启。
 	LogMultiBotDedupWindowSec int64 `json:"logMultiBotDedupWindowSec" yaml:"logMultiBotDedupWindowSec"`
 
-	// IdentityBindUseVerificationCode 是否用「私聊验证码」验证身份归属。**默认开启**。
+	// IdentityBindUseVerificationCode 是否用「验证码」验证身份归属。**默认开启**。
 	//
-	// 这是防抢号的关键：答题只能拦住不知道你信息的人，拦不住"知道你旧 QQ 号
-	// 又猜得到你卡名"的人。验证码由民间 bot 私聊发到被声明的旧 QQ 号上，
-	// 只有真正持有那个号的人才能收到并回复，因此无法伪造。
+	// 这是防抢号的唯一手段：答题只能拦住不知道你信息的人，拦不住"知道你旧 QQ 号
+	// 又猜得到你卡名"的人。验证码发给被声明的旧账号，只有真正持有它的人才能确认。
 	//
-	// ⚠️ 它依赖民间 bot（OneBot 连接）在线。如果骰主已经放弃民间 bot 运营、
-	// 打算纯用官 bot 做数据迁移，请关掉这个开关，改回答题验证。
+	// 投递通道（自动选择，无需手工切换）：
+	//  1. 民间 bot（OneBot）能发私聊 → 私聊验证码；
+	//  2. 否则若开了 IdentityBindUseEmailCode 且邮件配置完整 → 寄 QQ 邮箱验证码。
 	//
-	// 开启后答题环节默认被跳过（要两者并用请再打开 IdentityBindKeepQuiz）。
+	// 关掉它 = 放弃防抢号，仅在骰主完全无法提供任何通道时才考虑。
 	IdentityBindUseVerificationCode bool `json:"identityBindUseVerificationCode" yaml:"identityBindUseVerificationCode"`
 	// IdentityBindCodeLength 验证码位数，4~8，默认 6。
 	IdentityBindCodeLength int64 `json:"identityBindCodeLength" yaml:"identityBindCodeLength"`
 	// IdentityBindCodeExpireSec 验证码有效期（秒），60~3600，默认 600（10 分钟）。
 	IdentityBindCodeExpireSec int64 `json:"identityBindCodeExpireSec" yaml:"identityBindCodeExpireSec"`
-	// IdentityBindKeepQuiz 验证码通过之后是否还要求答题。
-	// 默认 false：验证码已经证明了归属，再答题只是增加摩擦。
-	IdentityBindKeepQuiz bool `json:"identityBindKeepQuiz" yaml:"identityBindKeepQuiz"`
+	// IdentityBindUseEmailCode 民间 bot 发不出私聊时，改寄「QQ 邮箱」验证码。
+	//
+	// 用途：骰主放弃民间 bot 运营、只留官方 bot 时，私聊通道不可用，
+	// 此时用邮箱验证码代替（前提是骰主已经配好 mailEnable/mailFrom/mailPassword/mailSmtp）。
+	//
+	// 地址规则：旧 QQ 号 → <QQ号>@qq.com（与海豹现有邮件通知逻辑一致）。
+	// 这是唯一"零配置又有约束力"的方案：QQ 邮箱绑定 QQ 号，所以能证明账号归属。
+	// **不会**采用用户自己填的邮箱——那既证明不了归属，又会让骰子变成发信机。
+	IdentityBindUseEmailCode bool `json:"identityBindUseEmailCode" yaml:"identityBindUseEmailCode"`
 }
 
 type RateLimitConfig struct {

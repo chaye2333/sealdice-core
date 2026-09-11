@@ -25,6 +25,9 @@ data/
 pegtest/
 temp/
 
+# 本地编译产物（Windows exe、打包目录、临时脚本），不要进仓库
+/dist-build/
+
 .goreleaser.yaml
 dist/
 go-cqhttp/

@@ -481,17 +481,6 @@ func DiceConfigSet(c echo.Context) error {
 		config.IdentityBindEnable = val.(bool)
 	}
 
-	if val, ok := jsonMap["identityBindQuestionCount"]; ok {
-		switch v := val.(type) {
-		case float64:
-			config.IdentityBindQuestionCount = int64(v)
-		case string:
-			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
-				config.IdentityBindQuestionCount = parsed
-			}
-		}
-	}
-
 	if val, ok := jsonMap["identityBindCooldownSec"]; ok {
 		switch v := val.(type) {
 		case float64:
@@ -503,16 +492,6 @@ func DiceConfigSet(c echo.Context) error {
 		}
 	}
 
-	if val, ok := jsonMap["identityBindFailCooldownSec"]; ok {
-		switch v := val.(type) {
-		case float64:
-			config.IdentityBindFailCooldownSec = int64(v)
-		case string:
-			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
-				config.IdentityBindFailCooldownSec = parsed
-			}
-		}
-	}
 	if val, ok := jsonMap["logMultiBotDedupWindowSec"]; ok {
 		switch v := val.(type) {
 		case float64:
@@ -528,9 +507,9 @@ func DiceConfigSet(c echo.Context) error {
 			config.IdentityBindUseVerificationCode = b
 		}
 	}
-	if val, ok := jsonMap["identityBindKeepQuiz"]; ok {
+	if val, ok := jsonMap["identityBindUseEmailCode"]; ok {
 		if b, okBool := val.(bool); okBool {
-			config.IdentityBindKeepQuiz = b
+			config.IdentityBindUseEmailCode = b
 		}
 	}
 	if val, ok := jsonMap["identityBindCodeLength"]; ok {

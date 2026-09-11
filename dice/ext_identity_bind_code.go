@@ -35,6 +35,18 @@ import (
 
 type identityBindCodeStatus string
 
+// identityBindCodeChannel 验证码走哪条通道投递。
+type identityBindCodeChannel string
+
+const (
+	// identityBindCodeChannelNone 还没投递
+	identityBindCodeChannelNone identityBindCodeChannel = ""
+	// identityBindCodeChannelDM 民间 bot 私聊
+	identityBindCodeChannelDM identityBindCodeChannel = "dm"
+	// identityBindCodeChannelEmail QQ 邮箱
+	identityBindCodeChannelEmail identityBindCodeChannel = "email"
+)
+
 const (
 	// identityBindCodePending 已登记，等待民间 bot 投递
 	identityBindCodePending identityBindCodeStatus = "pending"
@@ -65,7 +77,7 @@ const (
 	identityBindCodeKeepRecordFor = 10 * time.Minute
 )
 
-// identityBindCodeChallenge 一次等待私聊确认的绑定。
+// identityBindCodeChallenge 一次等待确认的绑定。
 type identityBindCodeChallenge struct {
 	Action identityBindAction
 
@@ -74,19 +86,23 @@ type identityBindCodeChallenge struct {
 	// Old 被声明为"自己的"旧身份（旧 QQ 号 / 旧群）
 	Old identityBindEndpoint
 
-	// Code 验证码，仅用于私聊投递与校验
+	// Code 验证码，仅用于投递与校验
 	Code string
-	// DeliverTo 验证码要私聊发给谁。
-	// 个人绑定 = 旧 QQ 号；群绑定 = 旧群的邀请人。
+	// DeliverTo 验证码要发给谁。
+	// 个人绑定 = 旧 QQ 号（私聊通道）；群绑定 = 旧群的邀请人。
 	DeliverTo string
 	// ConfirmBy 只有这个身份回复才被接受。
 	// 个人绑定 = 旧 QQ 号；群绑定 = 旧群的邀请人（""表示不做发信人校验）。
 	ConfirmBy string
+	// Channel 实际使用的投递通道，决定了「用户该去哪里拿码、去哪里回复」。
+	Channel identityBindCodeChannel
 
 	Status   identityBindCodeStatus
 	Attempts int
 	// SentByEP 实际投递用的端点 ID，用于提示与排查
 	SentByEP string
+	// SentTo 实际投递到的地址（私聊=QQ号，邮箱=邮箱地址），用于提示
+	SentTo string
 
 	CreatedAt   int64
 	ExpiresAt   int64
@@ -111,10 +127,23 @@ var (
 	globalIdentityBindDeliverOnce sync.Once
 )
 
-// identityBindCodeKey 个人绑定用旧 QQ 号做键，群绑定用旧群号做键。
-// 同一个目标同时只允许一条挑战，天然防止重复轰炸。
-func identityBindCodeKey(action identityBindAction, oldID string) string {
-	return string(action) + "|" + oldID
+// identityBindChallengeOwnerID 一条挑战归属于谁——也就是**发起绑定的人**。
+//
+// 个人绑定取官方侧用户 ID，群绑定取真实群 ID。
+// 为什么不用被声明的旧身份做键：那个键是"私聊投给谁"，不是"谁在等结果"。
+// 用旧身份做键会导致 .bind cancel 查不到自己的挑战（发起者根本不知道自己
+// 那个号对应的旧身份键是什么），从而永远取消不掉。
+func identityBindChallengeOwnerID(action identityBindAction, newID identityBindEndpoint) string {
+	if action == identityBindActionGroup {
+		return newID.GroupID
+	}
+	return newID.UserID
+}
+
+// identityBindCodeKey 挑战的存储键：由「发起者 + 类型」构成。
+// 同一个发起者同时只允许一条挑战，后发起的覆盖前一条。
+func identityBindCodeKey(action identityBindAction, ownerID string) string {
+	return string(action) + "|" + ownerID
 }
 
 // identityBindGenerateCode 生成一个数字验证码。
@@ -137,21 +166,22 @@ func identityBindGenerateCode(length int) (string, error) {
 	return b.String(), nil
 }
 
-// identityBindPutCode 登记一条新挑战，覆盖同一目标的旧挑战。
+// identityBindPutCode 登记一条新挑战，覆盖同一发起者的旧挑战。
 func identityBindPutCode(challenge *identityBindCodeChallenge) {
-	if challenge == nil || challenge.Old.UserID == "" && challenge.Old.GroupID == "" {
+	if challenge == nil {
 		return
 	}
-	oldID := challenge.Old.UserID
-	if challenge.Action == identityBindActionGroup {
-		oldID = challenge.Old.GroupID
+	owner := identityBindChallengeOwnerID(challenge.Action, challenge.New)
+	if owner == "" {
+		return
 	}
-	globalIdentityBindCodes.Store(identityBindCodeKey(challenge.Action, oldID), challenge)
+	globalIdentityBindCodes.Store(identityBindCodeKey(challenge.Action, owner), challenge)
 }
 
-// identityBindTakeCode 取出并删除一条待投递的挑战（不删除，只标记）。
-func identityBindLoadCode(action identityBindAction, oldID string) (*identityBindCodeChallenge, bool) {
-	v, ok := globalIdentityBindCodes.Load(identityBindCodeKey(action, oldID))
+// identityBindLoadCode 按**发起者**取挑战。
+// 传 userID = 官方侧用户 ID（个人）或真实群 ID（群）。
+func identityBindLoadCode(action identityBindAction, ownerID string) (*identityBindCodeChallenge, bool) {
+	v, ok := globalIdentityBindCodes.Load(identityBindCodeKey(action, ownerID))
 	if !ok || v == nil {
 		return nil, false
 	}
@@ -187,8 +217,8 @@ func identityBindCleanupCodes() {
 
 // ---------- 配置 ----------
 
-// identityBindUseVerificationCode 是否启用私聊验证码。
-// 开启后，答题环节默认被跳过（可以再显式打开两者并用）。
+// identityBindUseVerificationCode 是否启用验证码验证身份归属。
+// 关掉等于放弃防抢号，仅在骰主完全无法提供任何投递通道时才考虑。
 func identityBindUseVerificationCode(d *Dice) bool {
 	return d != nil && d.Config.IdentityBindUseVerificationCode
 }
@@ -224,12 +254,6 @@ func identityBindCodeExpiry(d *Dice) time.Duration {
 		sec = 3600
 	}
 	return time.Duration(sec) * time.Second
-}
-
-// identityBindQuizStillRequired 是否在做完验证码之后还要求答题。
-// 默认不要求：验证码已经证明了归属，再答题只会增加摩擦。
-func identityBindQuizStillRequired(d *Dice) bool {
-	return d != nil && d.Config.IdentityBindKeepQuiz
 }
 
 // ---------- 端点的挑选 ----------
@@ -297,6 +321,59 @@ func identityBindSendPrivate(d *Dice, ep *EndPointInfo, targetRawID string, text
 	return nil
 }
 
+// ---------- 通道一：QQ 邮箱 ----------
+
+// identityBindQQMailAddress 从旧 QQ 号推出 QQ 邮箱地址。
+//
+// 为什么用 <QQ号>@qq.com：这是唯一"零配置又有约束力"的方案。
+// QQ 邮箱与 QQ 号绑定，所以能收到这封信 ≈ 控制着这个 QQ 号。
+// **不会**接受用户自己填的邮箱——那既证明不了归属，又会让骰子变成发信机。
+func identityBindQQMailAddress(oldUserID string) string {
+	qq := identityBindExtractQQNumber(oldUserID)
+	if qq == "" {
+		return ""
+	}
+	return qq + "@qq.com"
+}
+
+// identityBindEmailCodeUsable 判断邮箱通道当前是否可用。
+func identityBindEmailCodeUsable(d *Dice) bool {
+	if d == nil || !d.Config.IdentityBindUseEmailCode {
+		return false
+	}
+	return d.CanSendMail()
+}
+
+// identityBindSendEmailCode 把验证码寄给旧 QQ 号的 QQ 邮箱。
+//
+// 注意：SendMailRow 是同步的，SMTP 可能阻塞好几秒，所以调用方必须在
+// 后台 worker 里执行（identityBindDeliverPendingCodes 就是），绝不能在指令处理路径上直接调。
+func identityBindSendEmailCode(d *Dice, c *identityBindCodeChallenge) error {
+	if d == nil || c == nil {
+		return errors.New("上下文为空")
+	}
+	if !identityBindEmailCodeUsable(d) {
+		return errors.New("邮箱通道未启用或邮件配置不完整（需要 mailEnable/mailFrom/mailPassword/mailSmtp）")
+	}
+	to := identityBindQQMailAddress(c.Old.UserID)
+	if to == "" {
+		return errors.New("无法从旧 QQ 号推出 QQ 邮箱地址")
+	}
+
+	subject := "身份绑定验证码"
+	body := fmt.Sprintf(
+		"有人正在 QQ 官方机器人上把身份绑定到这个 QQ 号（%s）。\n\n"+
+			"如果**是你本人**在操作，请把下面的验证码回复给官方机器人：\n\n"+
+			"    %s\n\n"+
+			"验证码 %s 内有效。\n"+
+			"不是本人操作请直接忽略本邮件，绑定不会生效。\n",
+		c.Old.UserID, c.Code, identityBindFormatDuration(identityBindCodeExpiry(d)))
+
+	d.SendMailRow(subject, []string{to}, body, nil)
+	c.SentTo = to
+	return nil
+}
+
 // ---------- 投递 worker ----------
 
 // identityBindStartCodeWorker 启动验证码投递后台任务。
@@ -343,63 +420,84 @@ func identityBindDeliverPendingCodes(d *Dice) {
 
 	for _, item := range todo {
 		c := item.c
-		ep := identityBindFindOldBotEndPoint(session, nil)
-		if ep == nil {
-			// 没有民间 bot 连接就没法发验证码。
-			// 不要在这里反复刷屏，标记一次让用户知道原因即可。
-			if c.Reason == "" {
-				c.Reason = "没有可用的民间 bot（OneBot）连接，无法发送验证码"
+
+		// 通道一：民间 bot 私聊（首选——只有它同时能证明"控制着这个 QQ 号"）
+		if ep := identityBindFindOldBotEndPoint(session, nil); ep != nil {
+			body := fmt.Sprintf(
+				"【鲸娘与豹】身份绑定验证码\n\n"+
+					"有人正在 QQ 官方机器人上把身份绑定到你这个号（%s）。\n"+
+					"如果**是你本人**在操作，请把下面的验证码私聊发给我：\n\n"+
+					"    %s\n\n"+
+					"验证码 %s 内有效，不是本人操作请直接忽略本条消息。",
+				c.Old.UserID, c.Code, identityBindFormatDuration(identityBindCodeExpiry(d)))
+
+			if err := identityBindSendPrivate(d, ep, c.DeliverTo, body); err != nil {
+				c.Reason = "私聊投递失败: " + err.Error()
+			} else {
+				c.Status = identityBindCodeDelivered
+				c.Channel = identityBindCodeChannelDM
+				c.SentByEP = ep.ID
+				c.SentTo = c.DeliverTo
+				c.DeliveredAt = time.Now().Unix()
+				c.Reason = ""
+				d.Logger.Infof("身份绑定验证码已私聊投递: 目标=%s 发起者=%s 端点=%s",
+					c.Old.UserID, c.New.UserID, ep.ID)
+				continue
 			}
+		}
+
+		// 通道二：QQ 邮箱（只在个人绑定上有意义——群号推不出邮箱，
+		// 而且群绑定要证明的是"群"，不是某个 QQ 号）
+		if c.Action == identityBindActionUser && identityBindEmailCodeUsable(d) {
+			if err := identityBindSendEmailCode(d, c); err != nil {
+				c.Reason = "邮箱投递失败: " + err.Error()
+				continue
+			}
+			c.Status = identityBindCodeDelivered
+			c.Channel = identityBindCodeChannelEmail
+			c.SentByEP = ""
+			c.DeliveredAt = time.Now().Unix()
+			c.Reason = ""
+			d.Logger.Infof("身份绑定验证码已邮件投递: 目标=%s 收件=%s 发起者=%s",
+				c.Old.UserID, c.SentTo, c.New.UserID)
 			continue
 		}
 
-		who := "【鲸娘与豹】身份绑定验证码"
-		body := fmt.Sprintf(
-			"%s\n\n有人正在 QQ 官方机器人上把身份绑定到你这个号（%s）。\n"+
-				"如果**是你本人**在操作，请把下面的验证码私聊发给我：\n\n"+
-				"    %s\n\n"+
-				"验证码 %s 内有效，不是本人操作请直接忽略本条消息。",
-			who, c.Old.UserID, c.Code, identityBindFormatDuration(identityBindCodeExpiry(d)))
-
-		if err := identityBindSendPrivate(d, ep, c.DeliverTo, body); err != nil {
-			c.Reason = "验证码发送失败: " + err.Error()
-			continue
+		// 两条通道都不可用：把原因说清楚，别反复刷屏
+		if c.Reason == "" || c.Channel == identityBindCodeChannelNone {
+			switch {
+			case c.Action == identityBindActionGroup:
+				c.Reason = "没有可用的民间 bot（OneBot）连接，群绑定无法投递验证码"
+			case identityBindEmailCodeUsable(d):
+				c.Reason = "验证码投递失败，请稍后重试"
+			default:
+				c.Reason = "没有可用的民间 bot（OneBot）连接；如需用邮箱收取验证码，" +
+					"请在管理界面打开「使用邮箱发送验证码」并配好 SMTP"
+			}
 		}
-		c.Status = identityBindCodeDelivered
-		c.SentByEP = ep.ID
-		c.DeliveredAt = time.Now().Unix()
-		c.Reason = ""
-		d.Logger.Infof("身份绑定验证码已投递: 目标=%s 发起者=%s 端点=%s",
-			c.Old.UserID, c.New.UserID, ep.ID)
 	}
 }
 
-// ---------- 民间 bot 侧：接收验证码 ----------
+// ---------- 接收验证码 ----------
 
-// identityBindTryConsumeCode 处理一条私聊消息，看它是不是验证码回复。
+// identityBindTryConsumeCode 看一条消息是不是验证码回复。
 //
-// 返回 handled=true 表示这条消息就是验证码回复，调用方不应再当普通指令处理。
+// 返回 true 表示这条消息就是验证码回复，调用方不应再当普通指令处理。
 //
-// 注意：这个函数在**民间 bot**（OneBot）侧被调用。它要负责：
-//  1. 校验发信人确实是挑战里声明的那个旧账号（ConfirmBy）；
-//  2. 校验验证码；
-//  3. 真正建立绑定（此时才知道官方侧发起者是谁）；
-//  4. 通过官方 bot 回执，让发起者知道结果。
+// 两条通道的确认方式不同，所以匹配条件也不同：
+//
+//	私聊通道（民间 bot）：只有"被声明的那个旧账号"回复才有效。
+//	                        发到哪个号、就由哪个号确认，天然绑定归属。
+//	邮箱通道（官方 bot）：  码只进了发起者的 QQ 邮箱，所以由**官方侧的发起者**
+//	                        在官方 bot 侧回复。发起者身份由官方 OpenID 保证。
+//
+// 两者共同点：验证码本身只有"被声明的旧账号"能拿到，所以都能证明归属。
 func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool {
 	if ctx == nil || ctx.Dice == nil || msg == nil {
 		return false
 	}
 	d := ctx.Dice
 	if !identityBindEnabled(d) || !identityBindUseVerificationCode(d) {
-		return false
-	}
-	// 只在私聊里认验证码。群聊里一条纯数字消息绝不能被当成验证码吞掉
-	// （那会让「1」「2」这类正常发言直接消失）。
-	if !ctx.IsPrivate && msg.MessageType != "private" {
-		return false
-	}
-	// 只有非官方端点（民间 bot）才处理，避免官方 bot 收到一串数字就误判
-	if identityBindSupported(ctx.EndPoint) {
 		return false
 	}
 
@@ -413,11 +511,29 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 		}
 	}
 
-	// 扫描所有已投递、未过期的挑战，找验证码匹配的那一条
+	onOfficial := identityBindSupported(ctx.EndPoint)
+	isPrivate := ctx.IsPrivate || msg.MessageType == "private"
+
+	// 扫描所有已投递、未过期的挑战，找验证码匹配、且**通道与当前端点相符**的那一条
 	var matched *identityBindCodeChallenge
 	var matchedKey string
 	globalIdentityBindCodes.Range(func(key string, c *identityBindCodeChallenge) bool {
 		if c == nil || c.Status != identityBindCodeDelivered || c.expired() {
+			return true
+		}
+		// 通道必须对得上：邮箱码不在民间 bot 侧认，私聊码不在官方侧认。
+		// 这条限制同时保证了"群聊里的纯数字消息不会被吞掉"——
+		// 私聊通道要求 isPrivate，而邮箱通道要求发信人是发起者本人。
+		switch c.Channel {
+		case identityBindCodeChannelEmail:
+			if !onOfficial {
+				return true
+			}
+		case identityBindCodeChannelDM:
+			if onOfficial || !isPrivate {
+				return true
+			}
+		default:
 			return true
 		}
 		if subtleCompareCode(c.Code, code) {
@@ -429,16 +545,21 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	})
 	if matched == nil {
 		// 不是验证码回复，交回给正常指令流程。
-		// 不做任何提示：私聊里随便发个数字不该被骰子插嘴。
+		// 不做任何提示：随手发个数字不该被骰子插嘴。
 		return false
 	}
 
-	// 发信人必须是挑战里指定的确认人
-	if matched.ConfirmBy != "" && !identityBindSameQQUser(msg.Sender.UserID, matched.ConfirmBy) {
+	// 决定"谁有资格确认"
+	wantConfirmer := matched.ConfirmBy
+	if matched.Channel == identityBindCodeChannelEmail {
+		// 邮箱码：由官方侧发起者确认
+		wantConfirmer = matched.New.UserID
+	}
+	if wantConfirmer != "" && !identityBindSameQQUser(msg.Sender.UserID, wantConfirmer) {
 		// 有人在用错误的号试别人的验证码 —— 记一次失败
 		matched.Attempts++
 		d.Logger.Warnf("身份绑定验证码发信人不符: 期望=%s 实际=%s 目标=%s",
-			matched.ConfirmBy, msg.Sender.UserID, matched.Old.UserID)
+			wantConfirmer, msg.Sender.UserID, matched.Old.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID,
 			"这个验证码不是发给你的，请让本人用他自己的号回复。")
 		if matched.Attempts >= identityBindCodeMaxAttempts {
@@ -479,13 +600,18 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	// 清理可能存在的同目标旧挑战与答题会话
 	identityBindClearSession(identityBindSessionKey(ctx.EndPoint.ID, matched.New.UserID, matched.Action))
 
-	// 回执给民间 bot 侧本人
-	if matched.Action == identityBindActionGroup {
-		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
-			"验证通过！官方群已经和旧群 %s 绑定，双方现在共用同一份日志。", matched.Old.GroupID))
-	} else {
-		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
-			"验证通过！你的官方身份 %s 现在与旧 QQ 号共用同一份数据。", matched.New.UserID))
+	// 回执给确认人。
+	// 私聊通道：确认人是民间 bot 侧那个旧号 → 私聊回复他。
+	// 邮箱通道：确认人就是官方侧发起者，而他正在官方群里等消息，
+	//           identityBindNotifyNewSide 已经会通知到，这里不必再私聊一次。
+	if matched.Channel == identityBindCodeChannelDM {
+		if matched.Action == identityBindActionGroup {
+			identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
+				"验证通过！官方群已经和旧群 %s 绑定，双方现在共用同一份日志。", matched.Old.GroupID))
+		} else {
+			identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
+				"验证通过！你的官方身份 %s 现在与旧 QQ 号共用同一份数据。", matched.New.UserID))
+		}
 	}
 
 	// 通知官方 bot 侧的发起者

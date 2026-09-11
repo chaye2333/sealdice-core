@@ -127,7 +127,6 @@ func newBindTestEnv(t *testing.T) *bindTestEnv {
 	ep.Platform = "QQ"
 	ep.ProtocolType = "official"
 	d.Config.IdentityBindEnable = true
-	d.Config.IdentityBindQuestionCount = 1
 	d.Config.IdentityBindCooldownSec = 0
 	// 这个环境专门用来测**答题路径**，所以显式关掉验证码。
 	// （产品默认是开着验证码的，见 DefaultConfig；需要验证码的用例自己打开。）
@@ -846,14 +845,8 @@ func TestDefaultConfigValuesLandOnTheRightFields(t *testing.T) {
 	if c.IdentityBindEnable {
 		t.Fatal("IdentityBindEnable should default to false")
 	}
-	if c.IdentityBindQuestionCount != 1 {
-		t.Fatalf("IdentityBindQuestionCount = %d, want 1", c.IdentityBindQuestionCount)
-	}
 	if c.IdentityBindCooldownSec != 60 {
 		t.Fatalf("IdentityBindCooldownSec = %d, want 60", c.IdentityBindCooldownSec)
-	}
-	if c.IdentityBindFailCooldownSec != 12*3600 {
-		t.Fatalf("IdentityBindFailCooldownSec = %d, want %d", c.IdentityBindFailCooldownSec, 12*3600)
 	}
 	if c.LogMultiBotDedupWindowSec != logDedupDefaultWindowSec {
 		t.Fatalf("LogMultiBotDedupWindowSec = %d, want %d (upstream behaviour)",
@@ -921,79 +914,6 @@ func TestIdentityBindNormalizeOldIDs(t *testing.T) {
 	}
 }
 
-func TestIdentityBindParseAnswers(t *testing.T) {
-	cases := []struct {
-		text   string
-		count  int
-		want   []int
-		wantOK bool
-	}{
-		{"1", 1, []int{1}, true},
-		{"132", 3, []int{1, 3, 2}, true},
-		{"1 3 2", 3, []int{1, 3, 2}, true},
-		{"1,3,2", 3, []int{1, 3, 2}, true},
-		{"１３２", 3, nil, false}, // 全角数字不接受
-		{"13", 3, nil, false},
-		{"1324", 3, nil, false},
-		{"abc", 3, nil, false},
-	}
-	for _, tc := range cases {
-		got, ok := identityBindParseAnswers(tc.text, tc.count)
-		if ok != tc.wantOK {
-			t.Fatalf("parse(%q) ok = %v, want %v", tc.text, ok, tc.wantOK)
-		}
-		if !ok {
-			continue
-		}
-		if len(got) != len(tc.want) {
-			t.Fatalf("parse(%q) = %v, want %v", tc.text, got, tc.want)
-		}
-		for i := range got {
-			if got[i] != tc.want[i] {
-				t.Fatalf("parse(%q) = %v, want %v", tc.text, got, tc.want)
-			}
-		}
-	}
-}
-
-func TestIdentityBindBuildQuestionsClampsCountToAvailableNames(t *testing.T) {
-	questions, ok := identityBindBuildQuestions("你的角色卡名是", []string{"甲"}, []string{"乙", "丙"}, 5)
-	if !ok {
-		t.Fatal("expected questions to be generated")
-	}
-	if len(questions) != 1 {
-		t.Fatalf("expected question count to be clamped to 1, got %d", len(questions))
-	}
-	if len(questions[0].Options) < 2 {
-		t.Fatalf("expected at least one distractor, got %v", questions[0].Options)
-	}
-	if questions[0].Options[questions[0].Answer] != "甲" {
-		t.Fatalf("answer index points at %q, want 甲", questions[0].Options[questions[0].Answer])
-	}
-}
-
-func TestIdentityBindBuildQuestionsRejectsEmptyCandidates(t *testing.T) {
-	if _, ok := identityBindBuildQuestions("x", nil, []string{"y"}, 1); ok {
-		t.Fatal("expected no questions when there are no candidates")
-	}
-}
-
-func TestIdentityBindCheckAnswersRequiresAllCorrect(t *testing.T) {
-	questions := []identityBindQuestion{
-		{Options: []string{"a", "b"}, Answer: 1},
-		{Options: []string{"c", "d"}, Answer: 0},
-	}
-	if !identityBindCheckAnswers(questions, []int{2, 1}) {
-		t.Fatal("expected all-correct answers to pass")
-	}
-	if identityBindCheckAnswers(questions, []int{1, 1}) {
-		t.Fatal("expected a wrong first answer to fail")
-	}
-	if identityBindCheckAnswers(questions, []int{2}) {
-		t.Fatal("expected a length mismatch to fail")
-	}
-}
-
 func TestIdentityBindPlatformIsolation(t *testing.T) {
 	official := &EndPointInfo{EndPointInfoBase: EndPointInfoBase{Platform: "QQ", ProtocolType: "official"}}
 	onebot := &EndPointInfo{EndPointInfoBase: EndPointInfoBase{Platform: "QQ", ProtocolType: "onebot"}}
@@ -1015,27 +935,27 @@ func TestIdentityBindPlatformIsolation(t *testing.T) {
 
 func TestIdentityBindConfigClamping(t *testing.T) {
 	cfg := Config{}
-	cfg.IdentityBindQuestionCount = 0
 	cfg.IdentityBindCooldownSec = -5
 	cfg.FixIdentityBindConfig()
-	if cfg.IdentityBindQuestionCount != DefaultConfig.IdentityBindQuestionCount {
-		t.Fatalf("expected question count default %d, got %d",
-			DefaultConfig.IdentityBindQuestionCount, cfg.IdentityBindQuestionCount)
-	}
 	if cfg.IdentityBindCooldownSec != 0 {
 		t.Fatalf("expected negative cooldown to clamp to 0, got %d", cfg.IdentityBindCooldownSec)
 	}
 
-	cfg.IdentityBindQuestionCount = 999
 	cfg.IdentityBindCooldownSec = 99999999
+	cfg.IdentityBindCodeLength = 999
+	cfg.IdentityBindCodeExpireSec = 999999
 	cfg.FixIdentityBindConfig()
-	if cfg.IdentityBindQuestionCount != identityBindMaxQuestionCount {
-		t.Fatalf("expected question count clamp to %d, got %d",
-			identityBindMaxQuestionCount, cfg.IdentityBindQuestionCount)
-	}
 	if cfg.IdentityBindCooldownSec != identityBindMaxCooldownSec {
 		t.Fatalf("expected cooldown clamp to %d, got %d",
 			identityBindMaxCooldownSec, cfg.IdentityBindCooldownSec)
+	}
+	// 验证码相关字段也要被收敛
+	if cfg.IdentityBindCodeLength != identityBindCodeMaxLen {
+		t.Fatalf("expected code length clamp to %d, got %d",
+			identityBindCodeMaxLen, cfg.IdentityBindCodeLength)
+	}
+	if cfg.IdentityBindCodeExpireSec != 3600 {
+		t.Fatalf("expected code expiry clamp to 3600, got %d", cfg.IdentityBindCodeExpireSec)
 	}
 }
 
@@ -1213,24 +1133,30 @@ func TestIdentityBindIsOfficialQQID(t *testing.T) {
 // 引入双向索引之后，旧号侧也指向官方 ID，所以「谁先绑谁得」必须显式拦住，
 // 否则后来者一绑就把前面那个人的数据（属性、角色卡、日志）全部接管过去。
 func TestIdentityBindUniquenessBlocksTakeover(t *testing.T) {
-	env := newBindTestEnv(t)
+	env := newCodeTestEnv(t)
 	defer env.cleanup()
 	env.addOldCard(t, "调查员甲")
 
-	// 第一个人正常绑定成功
+	// 第一个人正常绑定成功（走验证码）
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
-	questionReply := waitGroupMessage(t, env)
-	if !strings.Contains(questionReply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", questionReply)
+	prompt := waitGroupMessage(t, env)
+	if !strings.Contains(prompt, "验证码") {
+		t.Fatalf("expected a code-flow prompt, got %q", prompt)
 	}
-	session, ok := identityBindLoadSession(identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser))
-	if !ok {
-		t.Fatal("expected a pending bind session for the first user")
+	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID)
+	if !ok || challenge.Status != identityBindCodeDelivered {
+		t.Fatalf("expected a delivered challenge for the first user, got %+v / %v", challenge, ok)
 	}
-	beforeAnswer := env.recorder.messageCount()
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(session.Questions[0].Answer + 1)}})
-	if reply := env.recorder.waitNextReply(t, beforeAnswer); !strings.Contains(reply, "绑定成功") {
-		t.Fatalf("expected the first bind to succeed, got %q", reply)
+	// 第一人通过民间 bot 私聊确认
+	oldEP := codeOldEndPoint(t, env)
+	firstCtx, firstMsg := newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
+	firstCtx.IsPrivate = true
+	firstMsg.MessageType = "private"
+	if !identityBindTryConsumeCode(firstCtx, firstMsg, challenge.Code) {
+		t.Fatal("the first user's code reply should be consumed")
+	}
+	if _, found := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID); !found {
+		t.Fatal("expected the first bind to have created a record")
 	}
 
 	// 第二个人用不同的官方身份，试图绑定同一个旧号
@@ -1251,9 +1177,15 @@ func TestIdentityBindUniquenessBlocksTakeover(t *testing.T) {
 	if record.New.UserID != bindTestNewUserID {
 		t.Fatalf("binding owner changed to %s, want %s", record.New.UserID, bindTestNewUserID)
 	}
-	// 第二个人不应该留下任何会话
-	if _, ok := identityBindLoadSession(identityBindSessionKey(env.ctx.EndPoint.ID, secondUserID, identityBindActionUser)); ok {
-		t.Fatal("rejected user must not get a bind session")
+	// 第二个人不应该拿到可用的挑战。
+	// 注意：已完成（used）的挑战会保留一段时间供排查，所以"存在"不等于"可用"——
+	// 这里检查的是归属：不能出现一条以**第二个人**为发起者的挑战。
+	for _, owner := range []string{secondUserID, bindTestNewUserID} {
+		if c, ok := identityBindLoadCode(identityBindActionUser, owner); ok {
+			if c.Status == identityBindCodePending || c.Status == identityBindCodeDelivered {
+				t.Fatalf("rejected user must not hold an active challenge, got owner=%q status=%q", owner, c.Status)
+			}
+		}
 	}
 }
 
@@ -1302,96 +1234,6 @@ func TestIdentityBindCommandRejectsOneBot(t *testing.T) {
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
 	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "仅用于 QQ 官方机器人") {
 		t.Fatalf("expected a platform rejection reply, got %q", reply)
-	}
-}
-
-func TestIdentityBindCommandWithoutOldDataExplainsWhy(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "找不到") {
-		t.Fatalf("expected a missing-data reply, got %q", reply)
-	}
-}
-
-func TestIdentityBindCommandFullFlowBindsOnCorrectAnswer(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-	env.addOldCard(t, "调查员甲")
-
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
-	questionReply := waitGroupMessage(t, env)
-	if !strings.Contains(questionReply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", questionReply)
-	}
-
-	session, ok := identityBindLoadSession(identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser))
-	if !ok {
-		t.Fatal("expected a pending bind session")
-	}
-	if len(session.Questions) != 1 {
-		t.Fatalf("expected 1 question, got %d", len(session.Questions))
-	}
-	answer := session.Questions[0].Answer + 1
-
-	before := env.recorder.messageCount()
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(answer)}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "绑定成功") {
-		t.Fatalf("expected a success reply, got %q", reply)
-	}
-
-	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewUserID)
-	if !ok {
-		t.Fatal("expected the binding to be stored")
-	}
-	if record.Old.UserID != bindTestOldUserID || record.Old.GroupID != bindTestOldGroupID {
-		t.Fatalf("stored record = %+v, want old %s / %s", record.Old, bindTestOldGroupID, bindTestOldUserID)
-	}
-	// 会话必须被消费掉，避免重复提交
-	if _, ok := identityBindLoadSession(identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)); ok {
-		t.Fatal("expected the session to be cleared after success")
-	}
-}
-
-func TestIdentityBindCommandWrongAnswerFailsAndClearsSession(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-	env.addOldCard(t, "调查员甲")
-	env.addOldCard(t, "调查员乙")
-
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
-	sessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
-	// 先等到出题消息落地，否则消息计数会算错
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", reply)
-	}
-	session, ok := identityBindLoadSession(sessionKey)
-	if !ok {
-		t.Fatal("expected a pending bind session")
-	}
-	correct := session.Questions[0].Answer + 1
-	wrong := 0
-	for i := 1; i <= len(session.Questions[0].Options); i++ {
-		if i != correct {
-			wrong = i
-			break
-		}
-	}
-	if wrong == 0 {
-		t.Fatal("test setup could not produce a wrong answer")
-	}
-
-	before := env.recorder.messageCount()
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(wrong)}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "答案不正确") {
-		t.Fatalf("expected a failure reply, got %q", reply)
-	}
-	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewUserID); ok {
-		t.Fatal("a failed verification must not create a binding")
-	}
-	if _, ok := identityBindLoadSession(sessionKey); ok {
-		t.Fatal("expected the session to be cleared after a wrong answer")
 	}
 }
 
@@ -1470,50 +1312,59 @@ func TestIdentityBindLogCommandRejectsMissingOldGroup(t *testing.T) {
 // ---------- .group 与 .bind 必须能同时使用 ----------
 
 func TestIdentityBindGroupCommandAndUserBindAreIndependent(t *testing.T) {
-	env := newBindTestEnv(t)
+	env := newCodeTestEnv(t)
 	defer env.cleanup()
-	// 旧身份既有角色卡（个人绑定要出题），旧群也有日志（群绑定要出题）
 	env.addOldCard(t, "调查员甲")
 	env.addOldLog(t, "第一话")
+	env.ctx.PrivilegeLevel = 100
 
-	// 1) 先做个人身份绑定
+	// 1) 先做个人身份绑定（验证码，私聊给旧号）
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a user-bind question prompt, got %q", reply)
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "验证码") {
+		t.Fatalf("expected a user-bind code prompt, got %q", reply)
 	}
-	userSessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
-	userSession, ok := identityBindLoadSession(userSessionKey)
-	if !ok {
-		t.Fatal("expected a pending user bind session")
+	userChallenge, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID)
+	if !ok || userChallenge.Status != identityBindCodeDelivered {
+		t.Fatalf("expected a delivered user challenge, got %+v / %v", userChallenge, ok)
 	}
-	before := env.recorder.messageCount()
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(userSession.Questions[0].Answer + 1)}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "绑定成功") {
-		t.Fatalf("expected the user bind to succeed, got %q", reply)
+	oldEP := codeOldEndPoint(t, env)
+	userCtx, userMsg := newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
+	userCtx.IsPrivate = true
+	userMsg.MessageType = "private"
+	if !identityBindTryConsumeCode(userCtx, userMsg, userChallenge.Code) {
+		t.Fatal("the user code reply should be consumed")
+	}
+	if _, found := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID); !found {
+		t.Fatal("expected the user bind to have created a record")
 	}
 
 	// 2) 个人绑定已存在时，群绑定必须仍然可用（这是之前会互相阻断的地方）
-	groupSessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionGroup)
-	if _, exists := identityBindLoadSession(groupSessionKey); exists {
-		t.Fatal("group session should not exist yet")
+	if _, exists := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID); exists {
+		t.Fatal("group challenge should not exist yet")
 	}
-	before = env.recorder.messageCount()
+	oldGroup := groupForTest(t, env, bindTestOldGroupID)
+	oldGroup.InviteUserID = bindTestOldUserID
+
+	before := env.recorder.messageCount()
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
 	groupPrompt := env.recorder.waitNextReply(t, before)
-	if !strings.Contains(groupPrompt, "共 1 题") {
-		t.Fatalf("expected a group-bind question prompt even though the user is already bound, got %q", groupPrompt)
+	if !strings.Contains(groupPrompt, "验证码") {
+		t.Fatalf("expected a group-bind code prompt even though the user is already bound, got %q", groupPrompt)
 	}
-	groupSession, ok := identityBindLoadSession(groupSessionKey)
-	if !ok {
-		t.Fatal("expected a pending group bind session")
+	groupChallenge, ok := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID)
+	if !ok || groupChallenge.Status != identityBindCodeDelivered {
+		t.Fatalf("expected a delivered group challenge, got %+v / %v", groupChallenge, ok)
 	}
-	if groupSession.Questions[0].Kind != identityBindQuestionText {
-		t.Fatalf("log questions must be free-text, got kind %v", groupSession.Questions[0].Kind)
+	// 群绑定的确认人是旧群邀请人
+	if groupChallenge.ConfirmBy != bindTestOldUserID {
+		t.Fatalf("group challenge confirmer = %q, want the inviter %q", groupChallenge.ConfirmBy, bindTestOldUserID)
 	}
-	before = env.recorder.messageCount()
-	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", groupSession.Questions[0].Answers[0]}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共用同一份日志") {
-		t.Fatalf("expected the group bind to succeed, got %q", reply)
+	// 邀请人私聊确认
+	invCtx, invMsg := newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
+	invCtx.IsPrivate = true
+	invMsg.MessageType = "private"
+	if !identityBindTryConsumeCode(invCtx, invMsg, groupChallenge.Code) {
+		t.Fatal("the inviter's code reply should be consumed")
 	}
 
 	// 3) 两条绑定必须同时存在，且键互不覆盖
@@ -1589,17 +1440,19 @@ func TestIdentityBindGroupStatusShowsBinding(t *testing.T) {
 }
 
 func TestIdentityBindLogAliasStillWorks(t *testing.T) {
-	env := newBindTestEnv(t)
+	env := newCodeTestEnv(t)
 	defer env.cleanup()
-	env.addOldLog(t, "第一话")
+	env.ctx.PrivilegeLevel = 100
+	oldGroup := groupForTest(t, env, bindTestOldGroupID)
+	oldGroup.InviteUserID = bindTestOldUserID
 
 	// 旧的 .log bind 写法必须继续可用
 	result, handled := runIdentityBindLogCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
 	if !handled || !result.Solved {
 		t.Fatalf("expected .log bind to keep working, got (%+v, %v)", result, handled)
 	}
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a question prompt from the .log alias, got %q", reply)
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "验证码") {
+		t.Fatalf("expected a code prompt from the .log alias, got %q", reply)
 	}
 }
 
@@ -1617,29 +1470,30 @@ func TestIdentityBindGroupHelpMentionsNewCommand(t *testing.T) {
 // ---------- 旧群号是可选的：个人绑定与群无关 ----------
 
 func TestIdentityBindUserBindWithoutOldGroup(t *testing.T) {
-	env := newBindTestEnv(t)
+	env := newCodeTestEnv(t)
 	defer env.cleanup()
 	env.addOldCard(t, "调查员甲")
 
-	// 只给旧 QQ 号，不给旧群号：也应该能出题
+	// 只给旧 QQ 号，不给旧群号：验证码通道照样要能用
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
 	prompt := waitGroupMessage(t, env)
-	if !strings.Contains(prompt, "共 1 题") {
-		t.Fatalf("expected a question prompt without an old group id, got %q", prompt)
+	if !strings.Contains(prompt, "验证码") {
+		t.Fatalf("expected a code prompt without an old group id, got %q", prompt)
 	}
 	if !strings.Contains(prompt, bindTestOldUserID) {
 		t.Fatalf("expected the prompt to mention the old qq id, got %q", prompt)
 	}
 
-	sessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
-	session, ok := identityBindLoadSession(sessionKey)
-	if !ok {
-		t.Fatal("expected a pending bind session")
+	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID)
+	if !ok || challenge.Status != identityBindCodeDelivered {
+		t.Fatalf("expected a delivered challenge, got %+v / %v", challenge, ok)
 	}
-	before := env.recorder.messageCount()
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(session.Questions[0].Answer + 1)}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "绑定成功") {
-		t.Fatalf("expected the bind to succeed without an old group id, got %q", reply)
+	oldEP := codeOldEndPoint(t, env)
+	oldCtx, oldMsg := newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
+	oldCtx.IsPrivate = true
+	oldMsg.MessageType = "private"
+	if !identityBindTryConsumeCode(oldCtx, oldMsg, challenge.Code) {
+		t.Fatal("the code reply should be consumed")
 	}
 
 	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewUserID)
@@ -1669,18 +1523,19 @@ func TestIdentityBindNoArgsShowsHelpAndStatus(t *testing.T) {
 	}
 }
 
-// ---------- 取消答题环节 ----------
+// ---------- 取消进行中的绑定验证 ----------
 
 func TestIdentityBindCancelStopsUserSession(t *testing.T) {
-	env := newBindTestEnv(t)
+	env := newCodeTestEnv(t)
 	defer env.cleanup()
 	env.addOldCard(t, "调查员甲")
 
-	sessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
-
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", reply)
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "验证码") {
+		t.Fatalf("expected a code prompt, got %q", reply)
+	}
+	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID); !ok {
+		t.Fatal("expected a pending code challenge")
 	}
 
 	before := env.recorder.messageCount()
@@ -1688,185 +1543,50 @@ func TestIdentityBindCancelStopsUserSession(t *testing.T) {
 	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "已取消") {
 		t.Fatalf("expected a cancel confirmation, got %q", reply)
 	}
-	if _, ok := identityBindLoadSession(sessionKey); ok {
-		t.Fatal("expected the user session to be gone after cancel")
+	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID); ok {
+		t.Fatal("expected the challenge to be gone after cancel")
 	}
 
 	// 取消之后可以重新发起
 	before = env.recorder.messageCount()
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共 1 题") {
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "验证码") {
 		t.Fatalf("expected to be able to start over after cancel, got %q", reply)
 	}
 }
 
 func TestIdentityBindGroupCancelClearsUserSessionToo(t *testing.T) {
-	env := newBindTestEnv(t)
+	env := newCodeTestEnv(t)
 	defer env.cleanup()
 	env.addOldCard(t, "调查员甲")
 
-	userKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
-
-	// 先用 .bind 卡在答题环节
+	// 先用 .bind 挂起一条个人验证码挑战
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", reply)
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "验证码") {
+		t.Fatalf("expected a code prompt, got %q", reply)
 	}
-	if _, ok := identityBindLoadSession(userKey); !ok {
-		t.Fatal("expected a pending user session")
+	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID); !ok {
+		t.Fatal("expected a pending user challenge")
 	}
 
-	// .group cancel 应该把个人会话也清掉，避免卡住无法重新绑定
+	// .group cancel 应该把个人挑战也清掉，避免卡住无法重新绑定
 	before := env.recorder.messageCount()
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"cancel"}})
 	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "已取消") {
 		t.Fatalf("expected a cancel confirmation, got %q", reply)
 	}
-	if _, ok := identityBindLoadSession(userKey); ok {
-		t.Fatal(".group cancel should also clear the user session")
+	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID); ok {
+		t.Fatal(".group cancel should also clear the user challenge")
 	}
 }
 
 func TestIdentityBindCancelWithoutSessionIsHarmless(t *testing.T) {
-	env := newBindTestEnv(t)
+	env := newCodeTestEnv(t)
 	defer env.cleanup()
 
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"cancel"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "没有进行中的绑定问答") {
+	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "没有进行中的绑定") {
 		t.Fatalf("expected a friendly no-session reply, got %q", reply)
-	}
-}
-
-// ---------- 日志题必须是填空，且不能出现假选项 ----------
-
-func TestIdentityBindLogQuestionIsFreeTextWithoutFakeOptions(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-	env.addOldLog(t, "追书人")
-	env.addOldLog(t, "第一话")
-
-	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
-	prompt := waitGroupMessage(t, env)
-	if !strings.Contains(prompt, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", prompt)
-	}
-
-	// 不应该再出现「[其它群]」这种一眼可辨的假干扰项
-	if strings.Contains(prompt, "[其它群]") {
-		t.Fatalf("log question must not contain obviously-fake distractors, got %q", prompt)
-	}
-	if strings.Contains(prompt, "选项：") {
-		t.Fatalf("log question should be free-text, not multiple choice, got %q", prompt)
-	}
-
-	session, ok := identityBindLoadSession(identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionGroup))
-	if !ok {
-		t.Fatal("expected a pending group bind session")
-	}
-	question := session.Questions[0]
-	if question.Kind != identityBindQuestionText {
-		t.Fatalf("expected a free-text question, got kind %v", question.Kind)
-	}
-	if len(question.Options) != 0 {
-		t.Fatalf("free-text question must not carry options, got %v", question.Options)
-	}
-	// 该群真实的两个日志名都应该是可接受答案
-	if len(question.Answers) != 2 {
-		t.Fatalf("expected both real log names as accepted answers, got %v", question.Answers)
-	}
-	for _, want := range []string{"追书人", "第一话"} {
-		found := false
-		for _, got := range question.Answers {
-			if got == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("expected %q to be accepted, got %v", want, question.Answers)
-		}
-	}
-}
-
-func TestIdentityBindLogAnswerAcceptsAnyRealLogName(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-	env.addOldLog(t, "追书人")
-	env.addOldLog(t, "第一话")
-
-	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", reply)
-	}
-
-	// 用其中任意一个真实日志名都应该通过
-	before := env.recorder.messageCount()
-	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "追书人"}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共用同一份日志") {
-		t.Fatalf("expected success with a real log name, got %q", reply)
-	}
-}
-
-// ---------- 答错锁定 ----------
-
-func TestIdentityBindWrongAnswerLocksForFailCooldown(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-	env.addOldCard(t, "调查员甲")
-	env.addOldCard(t, "调查员乙")
-	env.d.Config.IdentityBindFailCooldownSec = 12 * 3600
-
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", reply)
-	}
-	sessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser)
-	session, ok := identityBindLoadSession(sessionKey)
-	if !ok {
-		t.Fatal("expected a pending bind session")
-	}
-	correct := session.Questions[0].Answer + 1
-	wrong := 0
-	for i := 1; i <= len(session.Questions[0].Options); i++ {
-		if i != correct {
-			wrong = i
-			break
-		}
-	}
-
-	before := env.recorder.messageCount()
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(wrong)}})
-	reply := env.recorder.waitNextReply(t, before)
-	if !strings.Contains(reply, "答案不正确") {
-		t.Fatalf("expected a failure reply, got %q", reply)
-	}
-	if !strings.Contains(reply, "12 小时") {
-		t.Fatalf("expected the reply to state the 12h lock, got %q", reply)
-	}
-
-	// 锁定期间不允许再次发起，即使用户给出正确的旧 QQ 号
-	before = env.recorder.messageCount()
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
-	if again := env.recorder.waitNextReply(t, before); !strings.Contains(again, "操作过于频繁") {
-		t.Fatalf("expected the wrong answer to lock further attempts, got %q", again)
-	}
-
-	// 锁定只针对个人绑定，群绑定不受影响
-	if remaining := identityBindFailCooldownRemaining(env.d, env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionGroup); remaining != 0 {
-		t.Fatalf("group binding must not be locked by a failed personal bind, got %v", remaining)
-	}
-}
-
-func TestIdentityBindFailCooldownDefaultsTo12Hours(t *testing.T) {
-	if got := DefaultConfig.IdentityBindFailCooldownSec; got != 12*3600 {
-		t.Fatalf("expected the default fail lock to be 12h, got %d seconds", got)
-	}
-	// 老配置文件缺这个字段（0）时必须补成默认值，否则答错没有惩罚
-	cfg := Config{}
-	cfg.FixIdentityBindConfig()
-	if cfg.IdentityBindFailCooldownSec != DefaultConfig.IdentityBindFailCooldownSec {
-		t.Fatalf("expected missing fail lock to default to %d, got %d",
-			DefaultConfig.IdentityBindFailCooldownSec, cfg.IdentityBindFailCooldownSec)
 	}
 }
 
@@ -1925,67 +1645,6 @@ func TestIdentityBindStatusesAreSeparated(t *testing.T) {
 	if !strings.Contains(userStatus, "全局") {
 		t.Fatalf("user status should explain the binding is global, got %q", userStatus)
 	}
-}
-
-func TestIdentityBindLogCommandBindsOnCorrectAnswer(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-	env.addOldLog(t, "第一话")
-
-	result, handled := runIdentityBindLogCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
-	if !handled || !result.Solved {
-		t.Fatalf("expected .log bind to be handled, got (%+v, %v)", result, handled)
-	}
-	sessionKey := identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionGroup)
-	// 先等到出题消息落地，否则消息计数会算错
-	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("expected a question prompt, got %q", reply)
-	}
-	session, ok := identityBindLoadSession(sessionKey)
-	if !ok {
-		t.Fatal("expected a pending log bind session")
-	}
-	// 日志题是填空题：直接回日志名
-	answer := session.Questions[0].Answers[0]
-	if answer != "第一话" {
-		t.Fatalf("expected the log name as the accepted answer, got %q", answer)
-	}
-
-	before := env.recorder.messageCount()
-	runIdentityBindLogCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", answer}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共用同一份日志") {
-		t.Fatalf("expected a success reply, got %q", reply)
-	}
-	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewGroupID)
-	if !ok {
-		t.Fatal("expected the log binding to be stored")
-	}
-	if record.Old.GroupID != bindTestOldGroupID {
-		t.Fatalf("stored log binding old group = %q, want %q", record.Old.GroupID, bindTestOldGroupID)
-	}
-}
-
-// itoa 避免测试文件再引入 strconv。
-func itoa(v int) string {
-	if v == 0 {
-		return "0"
-	}
-	negative := v < 0
-	if negative {
-		v = -v
-	}
-	var buf [20]byte
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = byte('0' + v%10)
-		v /= 10
-	}
-	if negative {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
 // waitGroupMessage 等待骰娘发出回复并返回其内容。

@@ -63,10 +63,8 @@ var DefaultConfig = Config{
 		// 打开后本地文件走分片上传，可保留文件名；关着时文件名会显示"未命名"。
 		OfficialQQChunkedUploadEnable: false,
 
-		IdentityBindEnable:          false,
-		IdentityBindQuestionCount:   1,
-		IdentityBindCooldownSec:     60,
-		IdentityBindFailCooldownSec: 12 * 3600, // 答错锁 12 小时
+		IdentityBindEnable:      false,
+		IdentityBindCooldownSec: 60,
 
 		// 同一条玩家消息在多久内只记一次日志。默认 5 秒 = 上游原行为，
 		// 只挡「同一个连接重复推送」，不会合并真实发言。
@@ -75,16 +73,13 @@ var DefaultConfig = Config{
 		// 发的两条完全相同的消息会被并成一条，所以默认不开。
 		LogMultiBotDedupWindowSec: 5,
 
-		// 私聊验证码：默认**开启**。
-		// 它由民间 bot 给被声明的旧 QQ 号发私聊，只有真正持有该号的人才能确认，
-		// 从根本上解决抢号；单靠答题是拦不住"知道你旧号又猜得到卡名"的人的。
-		//
-		// 代价：需要民间 bot（OneBot 连接）在线。如果骰主已经放弃民间 bot 运营、
-		// 打算纯用官 bot 做数据迁移，请把它关掉，改用答题方式。
+		// 验证码：默认**开启**。这是防抢号的唯一手段。
+		// 投递通道自动选：民间 bot 能发私聊就用私聊；否则若开了邮箱且 SMTP 配好，
+		// 就寄到 <旧QQ号>@qq.com。两条都不通时会在回复里说明原因。
 		IdentityBindUseVerificationCode: true,
 		IdentityBindCodeLength:          6,
 		IdentityBindCodeExpireSec:       600, // 10 分钟
-		IdentityBindKeepQuiz:            false,
+		IdentityBindUseEmailCode:        false,
 	},
 	RateLimitConfig{
 		RateLimitEnabled:         false,

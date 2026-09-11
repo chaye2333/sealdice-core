@@ -107,8 +107,8 @@ func TestIdentityBindCodeConfigClamps(t *testing.T) {
 	if !DefaultConfig.IdentityBindUseVerificationCode {
 		t.Fatal("verification code should default to ON")
 	}
-	if DefaultConfig.IdentityBindKeepQuiz {
-		t.Fatal("keeping the quiz on top of the code must default to OFF")
+	if DefaultConfig.IdentityBindUseEmailCode {
+		t.Fatal("email channel must default to OFF (needs SMTP configured first)")
 	}
 }
 
@@ -119,7 +119,6 @@ func newCodeTestEnv(t *testing.T) *bindTestEnv {
 	t.Helper()
 	env := newBindTestEnv(t)
 	env.d.Config.IdentityBindUseVerificationCode = true
-	env.d.Config.IdentityBindKeepQuiz = false
 
 	// 民间 bot 端点：OneBot，能处理 QQ:<号>
 	oldRecorder := &recordingAdapter{}
@@ -183,7 +182,7 @@ func TestIdentityBindCodeFlowEndToEnd(t *testing.T) {
 	}
 
 	// 2) 挑战必须已经登记并被投递
-	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestOldUserID)
+	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID)
 	if !ok {
 		t.Fatal("expected a registered code challenge")
 	}
@@ -223,7 +222,7 @@ func TestIdentityBindCodeFlowEndToEnd(t *testing.T) {
 		t.Fatalf("binding Old.UserID = %q, want %q", record.Old.UserID, bindTestOldUserID)
 	}
 	// 挑战应被标记为已完成
-	if c, _ := identityBindLoadCode(identityBindActionUser, bindTestOldUserID); c != nil && c.Status != identityBindCodeUsed {
+	if c, _ := identityBindLoadCode(identityBindActionUser, bindTestNewUserID); c != nil && c.Status != identityBindCodeUsed {
 		t.Fatalf("challenge status = %q, want used", c.Status)
 	}
 }
@@ -238,7 +237,7 @@ func TestIdentityBindCodeCannotBeUsedByWrongPerson(t *testing.T) {
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
 	waitGroupMessage(t, env)
 
-	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestOldUserID)
+	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID)
 	if !ok || challenge.Status != identityBindCodeDelivered {
 		t.Fatalf("expected a delivered challenge, got %+v / %v", challenge, ok)
 	}
@@ -258,7 +257,7 @@ func TestIdentityBindCodeCannotBeUsedByWrongPerson(t *testing.T) {
 		t.Fatal("a third party must not be able to complete the binding with the right code")
 	}
 	// 失败次数要记上
-	c, _ := identityBindLoadCode(identityBindActionUser, bindTestOldUserID)
+	c, _ := identityBindLoadCode(identityBindActionUser, bindTestNewUserID)
 	if c == nil || c.Attempts == 0 {
 		t.Fatalf("expected the attempt to be recorded, got %+v", c)
 	}
@@ -309,7 +308,7 @@ func TestIdentityBindCodeExpiry(t *testing.T) {
 	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
 	waitGroupMessage(t, env)
 
-	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestOldUserID)
+	challenge, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID)
 	if !ok {
 		t.Fatal("expected a challenge")
 	}
@@ -325,38 +324,6 @@ func TestIdentityBindCodeExpiry(t *testing.T) {
 	}
 	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID); ok {
 		t.Fatal("an expired code must not create a binding")
-	}
-}
-
-// TestIdentityBindCodeDisabledFallsBackToQuiz 关掉验证码时，流程必须完全回到答题。
-//
-// 这是给"骰主放弃民间 bot 运营、只想用官 bot 做数据迁移"这条路径准备的开关，
-// 所以必须验证它真的能退回答题，而不是把绑定功能整个弄坏。
-func TestIdentityBindCodeDisabledFallsBackToQuiz(t *testing.T) {
-	env := newBindTestEnv(t)
-	defer env.cleanup()
-	env.addOldCard(t, "调查员甲")
-	env.d.Config.IdentityBindUseVerificationCode = false
-
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
-	reply := waitGroupMessage(t, env)
-	if !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("with the code flow off we should fall back to the quiz, got %q", reply)
-	}
-	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestOldUserID); ok {
-		t.Fatal("no code challenge should be registered when the feature is off")
-	}
-	// 私聊里的数字也不该被消费
-	oldEP := &EndPointInfo{
-		EndPointInfoBase: EndPointInfoBase{ID: "ep-off", Platform: "QQ", ProtocolType: "onebot", Enable: true},
-		Adapter:          &recordingAdapter{},
-	}
-	oldEP.Session = env.d.ImSession
-	ctx, msg := newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
-	ctx.IsPrivate = true
-	msg.MessageType = "private"
-	if identityBindTryConsumeCode(ctx, msg, "123456") {
-		t.Fatal("nothing should be consumed when the feature is off")
 	}
 }
 
@@ -379,7 +346,7 @@ func TestIdentityBindCodeDeliveryFailsWithoutOldBot(t *testing.T) {
 		t.Fatalf("should explain that no OneBot connection is available, got %q", reply)
 	}
 	// 挑战仍然登记着，等民间 bot 上线后会自动重试
-	if c, ok := identityBindLoadCode(identityBindActionUser, bindTestOldUserID); !ok || c.Status != identityBindCodePending {
+	if c, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID); !ok || c.Status != identityBindCodePending {
 		t.Fatalf("challenge should stay pending, got %+v / %v", c, ok)
 	}
 }
@@ -397,7 +364,7 @@ func TestIdentityBindCodeOccupiedOldAccountRejected(t *testing.T) {
 	if !strings.Contains(reply, "已经被绑定") {
 		t.Fatalf("expected the takeover to be rejected, got %q", reply)
 	}
-	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestOldUserID); ok {
+	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestNewUserID); ok {
 		t.Fatal("no challenge should be registered for an already-claimed account")
 	}
 }
@@ -424,7 +391,7 @@ func TestIdentityBindCodeGroupFlowUsesInviter(t *testing.T) {
 		t.Fatalf("the prompt should name the confirmer %q, got %q", bindTestOldUserID, reply)
 	}
 
-	challenge, ok := identityBindLoadCode(identityBindActionGroup, bindTestOldGroupID)
+	challenge, ok := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID)
 	if !ok {
 		t.Fatal("expected a registered group challenge")
 	}
@@ -468,26 +435,8 @@ func TestIdentityBindCodeGroupWithoutInviterExplains(t *testing.T) {
 	if !strings.Contains(reply, "邀请人") {
 		t.Fatalf("should explain the missing inviter, got %q", reply)
 	}
-	if _, ok := identityBindLoadCode(identityBindActionGroup, bindTestOldGroupID); ok {
+	if _, ok := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID); ok {
 		t.Fatal("no challenge should be registered without a confirmer")
-	}
-}
-
-// TestIdentityBindCodeKeepQuizRequiresBoth 打开 KeepQuiz 时，验证码之后仍要答题。
-func TestIdentityBindCodeKeepQuizRequiresBoth(t *testing.T) {
-	env := newCodeTestEnv(t)
-	defer env.cleanup()
-	env.d.Config.IdentityBindKeepQuiz = true
-	env.addOldCard(t, "调查员甲")
-
-	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
-	reply := waitGroupMessage(t, env)
-	if !strings.Contains(reply, "共 1 题") {
-		t.Fatalf("with KeepQuiz on we should still get a quiz, got %q", reply)
-	}
-	// 答题会话存在；此时不该有验证码挑战
-	if _, ok := identityBindLoadCode(identityBindActionUser, bindTestOldUserID); ok {
-		t.Fatal("with KeepQuiz on, the quiz flow should run first")
 	}
 }
 
@@ -496,23 +445,25 @@ func TestIdentityBindCodeCleanupRemovesFinished(t *testing.T) {
 	resetIdentityBindGlobals()
 	identityBindPutCode(&identityBindCodeChallenge{
 		Action:     identityBindActionUser,
+		New:        identityBindEndpoint{UserID: "OpenQQ:1-a"},
 		Old:        identityBindEndpoint{UserID: "QQ:1"},
 		Status:     identityBindCodeUsed,
 		FinishedAt: time.Now().Add(-2 * identityBindCodeKeepRecordFor).Unix(),
 	})
 	identityBindPutCode(&identityBindCodeChallenge{
 		Action:    identityBindActionUser,
+		New:       identityBindEndpoint{UserID: "OpenQQ:1-b"},
 		Old:       identityBindEndpoint{UserID: "QQ:2"},
 		Status:    identityBindCodePending,
 		ExpiresAt: time.Now().Add(-time.Minute).Unix(),
 	})
 	identityBindCleanupCodes()
 
-	if _, ok := identityBindLoadCode(identityBindActionUser, "QQ:1"); ok {
+	if _, ok := identityBindLoadCode(identityBindActionUser, "OpenQQ:1-a"); ok {
 		t.Fatal("a long-finished challenge should be cleaned up")
 	}
 	// 过期的先被标记，再留一段时间用于排查
-	c, ok := identityBindLoadCode(identityBindActionUser, "QQ:2")
+	c, ok := identityBindLoadCode(identityBindActionUser, "OpenQQ:1-b")
 	if !ok {
 		t.Fatal("a just-expired challenge should be kept briefly for diagnosis")
 	}

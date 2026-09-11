@@ -3,6 +3,8 @@ package dice
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"gopkg.in/gomail.v2"
@@ -69,6 +71,55 @@ func (d *Dice) SendMail(body string, m MailCode, noticeTypes ...NoticeType) erro
 	return nil
 }
 
+// SMTP 默认端口与加密方式。
+//
+// 为什么不能继续硬编码 25：国内绝大多数云服务器（阿里云/腾讯云等）**封锁 25 端口**，
+// 于是无论骰主怎么配，都只会拿到 `dial tcp <ip>:25: i/o timeout`。
+// 各大邮箱都支持加密端口，所以默认改用 465(SSL)——QQ 邮箱 / 163 / Gmail 都支持，
+// 而且不会被云厂商拦。
+const (
+	mailDefaultSMTPPort = 465
+	// mailSMTPImplicitSSLPort 用隐式 SSL 的端口（其余走 STARTTLS）。
+	mailSMTPImplicitSSLPort = 465
+)
+
+// parseMailSMTP 解析 SMTP 地址，允许两种写法：
+//
+//	smtp.qq.com       -> host=smtp.qq.com, port=465（默认）
+//	smtp.qq.com:587   -> host=smtp.qq.com, port=587
+//	[::1]:465         -> IPv6 字面量也支持
+//
+// 骰主填了端口就用骰主填的；没填就用 465。
+func parseMailSMTP(raw string) (host string, port int) {
+	host = strings.TrimSpace(raw)
+	port = mailDefaultSMTPPort
+	if host == "" {
+		return host, port
+	}
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		if n, errConv := strconv.Atoi(p); errConv == nil && n > 0 && n <= 65535 {
+			return h, n
+		}
+		return host, port
+	}
+	return host, port
+}
+
+// newMailDialer 按端口选择加密方式构造 dialer。
+//
+// 这个版本的 gomail 没有 StartTLSPolicy 字段：它在非 SSL 分支里会自己检查
+// 服务器是否支持 STARTTLS 并自动升级（opportunistic）。所以：
+//   - 465  → 隐式 SSL（必须显式打开，否则会拿明文去连，握手失败）
+//   - 其它 → 交给 gomail 自动 STARTTLS
+func newMailDialer(smtpAddr, from, password string) *gomail.Dialer {
+	host, port := parseMailSMTP(smtpAddr)
+	d := gomail.NewDialer(host, port, from, password)
+	if port == mailSMTPImplicitSSLPort {
+		d.SSL = true
+	}
+	return d
+}
+
 func (d *Dice) SendMailRow(subject string, to []string, content string, attachments []string) {
 	m := gomail.NewMessage()
 	// NOTE(Xiangze Li): 按理说应当统一用DiceFotmatTmpl, 但是那样还得有一个MsgContext, 好复杂
@@ -92,7 +143,7 @@ func (d *Dice) SendMailRow(subject string, to []string, content string, attachme
 		}
 	}
 
-	dialer := gomail.NewDialer(d.Config.MailSMTP, 25, d.Config.MailFrom, d.Config.MailPassword)
+	dialer := newMailDialer(d.Config.MailSMTP, d.Config.MailFrom, d.Config.MailPassword)
 	if err := dialer.DialAndSend(m); err != nil {
 		d.Logger.Error(err)
 	} else {
