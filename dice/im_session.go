@@ -882,6 +882,18 @@ type MsgContext struct {
 	// 由 DiceFormatTmpl 在渲染最终模板时置位，发送层消费一次。
 	OfficialQQStatusBarPending bool `json:"-" yaml:"-"`
 
+	// DataUserID / DataGroupID 是「数据层」身份：如果当前身份参与过身份绑定，
+	// 这里就是归一后的 ID（官方身份↔旧QQ号、官方群↔旧群），否则与真实 ID 相同。
+	//
+	// 约定（非常重要）：
+	//   - 读写属性、角色卡、.sn 模板、日志 等玩家数据 → 用 Data*ID
+	//   - 权限判定、昵称展示、@ 目标、回复对象        → 用真实 ID（Player/Group）
+	//
+	// 两者绝不能混用：如果权限也走 Data*ID，一个普通玩家绑定到旧群管理员号之后
+	// 就能借到旧号的权限，属于提权漏洞。
+	DataUserID  string `json:"-" yaml:"-"`
+	DataGroupID string `json:"-" yaml:"-"`
+
 	deckDepth           int                                         // 抽牌递归深度
 	DeckPools           map[*DeckInfo]map[string]*ShuffleRandomPool // 不放回抽取的缓存
 	diceExprOverwrite   string                                      // 默认骰表达式覆盖

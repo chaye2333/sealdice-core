@@ -91,7 +91,7 @@ func officialQQCharacterAttributeLine(ctx *MsgContext) string {
 	if ctx == nil || ctx.Player == nil {
 		return ""
 	}
-	tmpl := strings.TrimSpace(ctx.Player.AutoSetNameTemplate)
+	tmpl := identityBindPlayerNameTemplate(ctx)
 	if tmpl == "" {
 		return ""
 	}
@@ -127,12 +127,20 @@ func officialQQCharacterStatusBar(ctx *MsgContext) string {
 	if !isOfficialQQEndpoint(ctx.EndPoint) {
 		return ""
 	}
+	// 做过身份绑定时，角色名也取绑定另一侧（旧QQ号）的，这样状态栏和角色卡数据一致。
 	name := strings.TrimSpace(ctx.Player.Name)
+	if bound := identityBindReadPlayer(ctx); bound != nil && bound != ctx.Player {
+		if boundName := strings.TrimSpace(bound.Name); boundName != "" {
+			name = boundName
+		}
+	}
 	if name == "" {
 		return ""
 	}
-	// .sn none / .sn off 会把模板清空，此时不显示状态栏
-	if strings.TrimSpace(ctx.Player.AutoSetNameTemplate) == "" {
+	// .sn none / .sn off 会把模板清空，此时不显示状态栏。
+	// 这里用 identityBindPlayerNameTemplate：官方侧自己没设模板时会回退到绑定另一侧
+	// （旧群旧号）的模板，从而直接沿用迁移前设好的名片格式。
+	if identityBindPlayerNameTemplate(ctx) == "" {
 		return ""
 	}
 

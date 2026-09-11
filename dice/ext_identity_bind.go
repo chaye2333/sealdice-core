@@ -30,6 +30,10 @@ const (
 	// identityBindStoreFilename 绑定关系落盘文件名，位于 data/<骰子名>/ 下。
 	identityBindStoreFilename = "identity-bindings.json"
 
+	// identityBindStoreVersion 落盘格式版本。
+	// v2 起索引改为「新旧 ID 双向」，旧文件仍然能读（Key 字段被忽略后重建）。
+	identityBindStoreVersion = 2
+
 	// identityBindSessionTTL 一次问答会话的有效期。
 	identityBindSessionTTL = 10 * time.Minute
 
@@ -344,25 +348,35 @@ func (s *identityBindStore) ensureLoaded(d *Dice) {
 		return
 	}
 	for _, record := range payload.Records {
-		key := identityBindRecordKeyFromRecord(record)
-		if key == "" {
+		keys := identityBindRecordKeys(record)
+		if len(keys) == 0 {
 			continue
 		}
-		s.byKey[key] = record
+		// 老版本文件里 Key 形如 "user|QQ:123"，这里忽略它，一律按新旧 ID 重建索引。
+		record.Key = identityBindRecordKey(record)
+		for _, key := range keys {
+			s.byKey[key] = record
+		}
 	}
 }
 
 // saveLocked 落盘，调用方必须已持有写锁。
 func (s *identityBindStore) saveLocked(d *Dice) error {
+	// 一条绑定在索引里有两份，落盘时要按记录去重。
 	records := make([]*identityBindRecord, 0, len(s.byKey))
+	seen := map[*identityBindRecord]bool{}
 	for _, record := range s.byKey {
+		if record == nil || seen[record] {
+			continue
+		}
+		seen[record] = true
 		records = append(records, record)
 	}
 	sort.Slice(records, func(i, j int) bool {
-		return identityBindRecordKeyFromRecord(records[i]) < identityBindRecordKeyFromRecord(records[j])
+		return identityBindRecordKey(records[i]) < identityBindRecordKey(records[j])
 	})
 	payload := identityBindStoreData{
-		Version: 1,
+		Version: identityBindStoreVersion,
 		SavedAt: time.Now().Unix(),
 		Records: records,
 	}
@@ -389,77 +403,115 @@ func (s *identityBindStore) saveLocked(d *Dice) error {
 	return nil
 }
 
-func identityBindRecordKey(action identityBindAction, receiverID string) string {
-	return string(action) + "|" + receiverID
+// isOfficialQQID 判断一个 ID 是否来自 QQ 官方机器人。
+//
+// 这里刻意**不看 EndPoint**，只看 ID 前缀：绑定查询必须能从两侧都能命中，
+// 如果依赖「当前端点是不是官方」，旧号（民间 bot）那一侧就永远查不到记录，
+// 双向共享也就无从谈起。
+func isOfficialQQID(id string) bool {
+	return strings.HasPrefix(id, officialQQUserIDPrefix) || strings.HasPrefix(id, officialQQGroupIDPrefix)
 }
 
-func identityBindRecordKeyFromRecord(record *identityBindRecord) string {
+// identityBindRecordEndpointID 取一条记录在指定类型下的「新身份」ID。
+func identityBindRecordEndpointID(record *identityBindRecord) string {
 	if record == nil {
 		return ""
 	}
-	if record.Key != "" {
-		return record.Key
+	if record.Action == identityBindActionGroup {
+		return record.New.GroupID
 	}
-	// 兜底：兼容手写或早期版本产生的文件。
-	if record.Action == identityBindActionUser {
-		if record.New.UserID == "" {
-			return ""
-		}
-		return identityBindUserKey(record.New.UserID)
-	}
-	if record.New.GroupID == "" {
+	return record.New.UserID
+}
+
+// identityBindRecordOldID 取一条记录在指定类型下的「旧身份」ID。
+func identityBindRecordOldID(record *identityBindRecord) string {
+	if record == nil {
 		return ""
 	}
-	return identityBindGroupKey(record.New.GroupID)
+	if record.Action == identityBindActionGroup {
+		return record.Old.GroupID
+	}
+	return record.Old.UserID
 }
 
-// identityBindGroupKey 群日志绑定的键：绑定挂在「接收方所在的当前群」上。
-func identityBindGroupKey(groupID string) string {
-	return identityBindRecordKey(identityBindActionGroup, groupID)
+// identityBindRecordKey 一条记录的主键，固定用「新身份」。
+// 老版本按 "user|QQ:123" 存过 Key，这里一律重新推导，不做兼容读取。
+func identityBindRecordKey(record *identityBindRecord) string {
+	return identityBindRecordEndpointID(record)
 }
 
-// identityBindUserKey 用户身份绑定的键：官方 QQ 的 MemberOpenID 本身就按群独立。
-func identityBindUserKey(userID string) string {
-	return identityBindRecordKey(identityBindActionUser, userID)
+// identityBindRecordKeys 一条记录要建立的全部索引键：新旧两侧都要能查到。
+func identityBindRecordKeys(record *identityBindRecord) []string {
+	ids := []string{identityBindRecordEndpointID(record), identityBindRecordOldID(record)}
+	keys := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		keys = append(keys, id)
+	}
+	return keys
 }
 
-// put 写入/覆盖一条绑定并落盘。
+// put 写入/覆盖一条绑定（新旧两个 ID 都建索引）并落盘。
 func (s *identityBindStore) put(d *Dice, record *identityBindRecord) error {
 	if record == nil {
 		return errors.New("绑定内容为空")
 	}
-	key := identityBindRecordKeyFromRecord(record)
-	if key == "" {
+	keys := identityBindRecordKeys(record)
+	if len(keys) == 0 {
 		return errors.New("绑定内容缺失关键 ID")
 	}
-	record.Key = key
+	record.Key = identityBindRecordKey(record)
 	s.ensureLoaded(d)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.byKey == nil {
 		s.byKey = map[string]*identityBindRecord{}
 	}
-	s.byKey[key] = record
+	for _, key := range keys {
+		s.byKey[key] = record
+	}
 	return s.saveLocked(d)
 }
 
-// delete 删除一条绑定并落盘，返回是否真的删掉了。
-func (s *identityBindStore) delete(d *Dice, key string) (bool, error) {
+// delete 按记录删除（新旧两个索引一起清掉）并落盘，返回是否真的删掉了。
+func (s *identityBindStore) delete(d *Dice, record *identityBindRecord) (bool, error) {
+	if record == nil {
+		return false, nil
+	}
+	keys := identityBindRecordKeys(record)
+	if len(keys) == 0 {
+		return false, nil
+	}
 	s.ensureLoaded(d)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.byKey[key]; !ok {
+	removed := false
+	for _, key := range keys {
+		if _, ok := s.byKey[key]; ok {
+			delete(s.byKey, key)
+			removed = true
+		}
+	}
+	if !removed {
 		return false, nil
 	}
-	delete(s.byKey, key)
 	return true, s.saveLocked(d)
 }
 
-func (s *identityBindStore) get(d *Dice, key string) (*identityBindRecord, bool) {
+// find 按任意一侧的 ID 查绑定。这是双向共享的入口：
+// 传官方 ID 得到旧身份，传旧 ID 得到官方身份，两者拿到的是同一条记录。
+func (s *identityBindStore) find(d *Dice, id string) (*identityBindRecord, bool) {
+	if strings.TrimSpace(id) == "" {
+		return nil, false
+	}
 	s.ensureLoaded(d)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	record, ok := s.byKey[key]
+	record, ok := s.byKey[id]
 	if !ok || record == nil {
 		return nil, false
 	}
@@ -467,16 +519,56 @@ func (s *identityBindStore) get(d *Dice, key string) (*identityBindRecord, bool)
 	return &copied, true
 }
 
-// list 返回所有绑定，用于 .bind list 展示。
+// lookupRecord 按任意一侧的 ID 查绑定记录，并确认记录类型匹配。
+func (s *identityBindStore) lookupRecord(d *Dice, id string, action identityBindAction) (*identityBindRecord, bool) {
+	record, ok := s.find(d, id)
+	if !ok || record.Action != action {
+		return nil, false
+	}
+	return record, true
+}
+
+// lookupUser 查用户绑定，返回**旧 QQ 号**。
+//
+// 无论传进来的是官方 ID 还是旧 QQ 号，返回的都是旧 QQ 号——
+// 也就是「数据应该挂在哪个 key 上」的唯一答案。
+func (s *identityBindStore) lookupUser(d *Dice, userID string) (string, bool) {
+	record, ok := s.lookupRecord(d, userID, identityBindActionUser)
+	if !ok {
+		return "", false
+	}
+	oldID := strings.TrimSpace(record.Old.UserID)
+	if oldID == "" {
+		return "", false
+	}
+	return oldID, true
+}
+
+// lookupGroup 查群绑定，返回**旧群 ID**。
+func (s *identityBindStore) lookupGroup(d *Dice, groupID string) (string, bool) {
+	record, ok := s.lookupRecord(d, groupID, identityBindActionGroup)
+	if !ok {
+		return "", false
+	}
+	oldID := strings.TrimSpace(record.Old.GroupID)
+	if oldID == "" {
+		return "", false
+	}
+	return oldID, true
+}
+
+// list 返回所有绑定（已按记录去重，因为一条绑定有两个索引键），用于 .bind list 展示。
 func (s *identityBindStore) list(d *Dice) []*identityBindRecord {
 	s.ensureLoaded(d)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	records := make([]*identityBindRecord, 0, len(s.byKey))
+	seen := map[*identityBindRecord]bool{}
 	for _, record := range s.byKey {
-		if record == nil {
+		if record == nil || seen[record] {
 			continue
 		}
+		seen[record] = true
 		copied := *record
 		records = append(records, &copied)
 	}
@@ -484,49 +576,82 @@ func (s *identityBindStore) list(d *Dice) []*identityBindRecord {
 	return records
 }
 
-// ---------- 解析（回退读取） ----------
+// ---------- 解析（双向身份归一） ----------
+//
+// 这一层是「双向共享」的核心：不管消息来自官方 bot 还是民间 bot，只要这个身份参与过
+// 绑定，就都会被归一成同一对 (群ID, 用户ID)，于是两边读写的永远是同一份数据。
+//
+// 注意：归一化只用于「数据寻址」。权限、昵称、@ 目标、回复对象一律仍用真实身份，
+// 否则会出现「在官方群是普通玩家，绑到旧群管理员号就拿到了管理员权限」的提权漏洞。
+
+// identityCanonicalUserID 把任意一侧的用户 ID 归一成数据层应使用的 ID。
+//
+// 归一的目标固定是**旧身份**（迁移前的 QQ 号）。这一点很关键：
+//   - 旧号那一侧本来就什么都不用改，历史数据原地不动、继续可用；
+//   - 官方那一侧改到旧号的名下，于是「两边算出来的 key 完全一样」。
+//
+// 如果反过来把官方 ID 当规范，旧账号的全部历史数据（属性、角色卡、日志）
+// 都会瞬间读不到，正是这个功能要避免的事。
+//
+// 无绑定时原样返回。
+func identityCanonicalUserID(d *Dice, userID string) string {
+	if d == nil || strings.TrimSpace(userID) == "" {
+		return userID
+	}
+	oldID, ok := identityBindStoreOf(d).lookupUser(d, userID)
+	if !ok || oldID == "" {
+		return userID
+	}
+	return oldID
+}
+
+// identityCanonicalGroupID 把任意一侧的群 ID 归一成数据层应使用的 ID（同样是旧群）。
+// 无绑定时原样返回。
+func identityCanonicalGroupID(d *Dice, groupID string) string {
+	if d == nil || strings.TrimSpace(groupID) == "" {
+		return groupID
+	}
+	oldID, ok := identityBindStoreOf(d).lookupGroup(d, groupID)
+	if !ok || oldID == "" {
+		return groupID
+	}
+	return oldID
+}
 
 // identityBindResolveGroup 解析当前群应该读取哪一份数据。
+//
+// 与旧实现的关键差别：
+//   - 不再要求当前端点是官方 QQ，旧号侧同样能查到（这是双向共享的前提）；
+//   - 归一目标固定是旧群，所以「官方群 → 旧群」和「旧群 → 旧群（原地不动）」都成立。
 func identityBindResolveGroup(ctx *MsgContext) (*GroupInfo, bool) {
 	if ctx == nil || ctx.Dice == nil || ctx.Group == nil || ctx.Session == nil {
 		return nil, false
 	}
-	if !identityBindSupported(ctx.EndPoint) {
+	targetID := identityCanonicalGroupID(ctx.Dice, ctx.Group.GroupID)
+	if targetID == "" || targetID == ctx.Group.GroupID {
 		return nil, false
 	}
-	record, ok := identityBindStoreOf(ctx.Dice).get(ctx.Dice, identityBindGroupKey(ctx.Group.GroupID))
-	if !ok || record.Action != identityBindActionGroup {
+	// 旧群/目标群可能已经不在内存里（机器人没再访问过），此时不能凭空造一个，
+	// 否则会读不到数据还报错，静默回退到当前群。
+	target, exists := ctx.Session.ServiceAtNew.Load(targetID)
+	if !exists || target == nil {
 		return nil, false
 	}
-	oldGroupID := record.Old.GroupID
-	if oldGroupID == "" || oldGroupID == ctx.Group.GroupID {
-		return nil, false
-	}
-	oldGroup, exists := ctx.Session.ServiceAtNew.Load(oldGroupID)
-	if !exists || oldGroup == nil {
-		// 旧群没有内存记录时不能凭空造一个，回退到当前群，避免读不到数据还报错。
-		return nil, false
-	}
-	return oldGroup, true
+	return target, true
 }
 
-// identityBindResolveUserID 解析当前用户应该使用哪个旧 ID 去读取数据。
+// identityBindResolveUserID 解析当前用户应该使用哪个 ID 去读写数据。
+//
+// 官方身份会解析成旧 QQ 号；旧身份解析结果就是它自己（返回 bound=false）。
 func identityBindResolveUserID(ctx *MsgContext) (string, bool) {
 	if ctx == nil || ctx.Dice == nil || ctx.Player == nil {
 		return "", false
 	}
-	if !identityBindSupported(ctx.EndPoint) {
+	targetID := identityCanonicalUserID(ctx.Dice, ctx.Player.UserID)
+	if targetID == "" || targetID == ctx.Player.UserID {
 		return "", false
 	}
-	record, ok := identityBindStoreOf(ctx.Dice).get(ctx.Dice, identityBindUserKey(ctx.Player.UserID))
-	if !ok || record.Action != identityBindActionUser {
-		return "", false
-	}
-	oldUserID := record.Old.UserID
-	if oldUserID == "" || oldUserID == ctx.Player.UserID {
-		return "", false
-	}
-	return oldUserID, true
+	return targetID, true
 }
 
 // identityBindReadGroup 返回用于读取历史数据的群对象，以及是否命中绑定。
@@ -542,12 +667,12 @@ func identityBindReadGroup(ctx *MsgContext) (*GroupInfo, bool) {
 }
 
 // identityBindReadPlayer 返回用于「读取」历史数据的玩家对象。
-// 权限、昵称展示等仍然使用 ctx.Player（真实新身份）。
+// 权限、昵称展示等仍然使用 ctx.Player（真实身份）。
 func identityBindReadPlayer(ctx *MsgContext) *GroupPlayerInfo {
 	if ctx == nil || ctx.Dice == nil {
 		return nil
 	}
-	oldUserID, bound := identityBindResolveUserID(ctx)
+	targetUserID, bound := identityBindResolveUserID(ctx)
 	if !bound {
 		return ctx.Player
 	}
@@ -555,37 +680,97 @@ func identityBindReadPlayer(ctx *MsgContext) *GroupPlayerInfo {
 	if readGroup == nil {
 		return ctx.Player
 	}
-	player := readGroup.PlayerGet(ctx.Dice.DBOperator, oldUserID)
+	player := readGroup.PlayerGet(ctx.Dice.DBOperator, targetUserID)
 	if player == nil {
-		// 旧身份在本群还没有记录时，不能伪造数据，回退到当前玩家。
+		// 目标身份在本群还没有记录时，不能伪造数据，回退到当前玩家。
 		return ctx.Player
 	}
 	return player
 }
 
-// identityBindAttrTarget 计算属性读写应该使用的 群ID / 用户ID。
-// 返回 bound=false 时表示没有绑定，调用方按原逻辑处理。
-func identityBindAttrTarget(ctx *MsgContext) (groupID string, userID string, bound bool) {
-	if ctx == nil || ctx.Group == nil || ctx.Player == nil {
-		return "", "", false
+// identityBindDataUserID 取数据层用户 ID。
+//
+// 优先用 GetPlayerInfoBySenderRaw 预先填好的 ctx.DataUserID（那条路径覆盖所有平台）；
+// 如果它被代骰之类的逻辑改过（与 ctx.Player.UserID 不一致），则以当前的 ctx.Player
+// 重新解析一次，避免「换了玩家对象但 DataUserID 还是旧值」这种错配。
+func identityBindDataUserID(ctx *MsgContext) string {
+	if ctx == nil || ctx.Player == nil {
+		return ""
 	}
-	oldUserID, userBound := identityBindResolveUserID(ctx)
-	readGroup, groupBound := identityBindResolveGroup(ctx)
-	if !userBound && !groupBound {
-		return "", "", false
+	// 必须先判 DataUserID 非空，再比较：空串与空串相等，顺序写反会导致
+	// 未填写的 ctx 直接返回空字符串，静默丢掉所有数据寻址。
+	if ctx.DataUserID != "" && ctx.DataUserID == identityCanonicalUserID(ctx.Dice, ctx.Player.UserID) {
+		return ctx.DataUserID
 	}
-	groupID = ctx.Group.GroupID
-	if groupBound && readGroup != nil {
-		groupID = readGroup.GroupID
+	return identityCanonicalUserID(ctx.Dice, ctx.Player.UserID)
+}
+
+// identityBindDataGroupID 取数据层群 ID，解析不出时回退到真实群 ID。
+func identityBindDataGroupID(ctx *MsgContext) string {
+	if ctx == nil || ctx.Group == nil {
+		return ""
 	}
-	userID = ctx.Player.UserID
-	if userBound {
-		userID = oldUserID
+	if ctx.DataGroupID != "" && ctx.DataGroupID == identityCanonicalGroupID(ctx.Dice, ctx.Group.GroupID) {
+		return ctx.DataGroupID
 	}
-	if groupID == ctx.Group.GroupID && userID == ctx.Player.UserID {
-		return "", "", false
+	return identityCanonicalGroupID(ctx.Dice, ctx.Group.GroupID)
+}
+
+// identityBindPlayerNameTemplate 取当前应该生效的 .sn 名片模板。
+//
+// 采用「只读回退」策略（方案 A）：自己这份模板为空时，才去绑定另一侧取；
+// 写入永远写在使用者自己的身份上。这样官方群的 .sn 不会去改旧群的群名片
+// （旧群的 .sn 是会真的调用平台接口改群名片的，两边语义不同，不该互相影响）。
+func identityBindPlayerNameTemplate(ctx *MsgContext) string {
+	if ctx == nil || ctx.Player == nil {
+		return ""
 	}
-	return groupID, userID, true
+	if tmpl := strings.TrimSpace(ctx.Player.AutoSetNameTemplate); tmpl != "" {
+		return tmpl
+	}
+	if ctx.Dice == nil {
+		return ""
+	}
+	// 自身没有模板，看绑定另一侧有没有。
+	if player := identityBindReadPlayer(ctx); player != nil && player != ctx.Player {
+		if tmpl := strings.TrimSpace(player.AutoSetNameTemplate); tmpl != "" {
+			return tmpl
+		}
+	}
+	// 兜底：绑定的目标群当前不在内存里（机器人很久没去过）时，
+	// 上面那条路径取不到玩家记录，这里在各群里按目标 ID 再找一次。
+	targetUserID, bound := identityBindResolveUserID(ctx)
+	if !bound {
+		return ""
+	}
+	if player := identityBindFindPlayerAnyGroup(ctx, targetUserID); player != nil {
+		return strings.TrimSpace(player.AutoSetNameTemplate)
+	}
+	return ""
+}
+
+// identityBindFindPlayerAnyGroup 在内存中的各个群里找某个用户的玩家记录，
+// 只返回真正带 .sn 模板的那一个。用于「绑定的目标群当前不在内存里」时的兜底查询。
+func identityBindFindPlayerAnyGroup(ctx *MsgContext, userID string) *GroupPlayerInfo {
+	if ctx == nil || ctx.Dice == nil || ctx.Session == nil || userID == "" {
+		return nil
+	}
+	var found *GroupPlayerInfo
+	ctx.Session.ServiceAtNew.Range(func(_ string, group *GroupInfo) bool {
+		if group == nil {
+			return true
+		}
+		player := group.PlayerGet(ctx.Dice.DBOperator, userID)
+		if player == nil {
+			return true
+		}
+		if strings.TrimSpace(player.AutoSetNameTemplate) != "" {
+			found = player
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // ---------- 会话与冷却 ----------
@@ -926,21 +1111,25 @@ func identityBindSplitTextAnswer(raw string, questionCount int) []string {
 // ---------- .bind 指令 ----------
 
 func identityBindUserHelp() string {
-	return `.bind <旧QQ号> // 绑定你的个人身份，之后你的角色卡/属性都从旧 QQ 号读取
+	return `.bind <旧QQ号> // 绑定你的个人身份，之后你的角色卡/属性与旧 QQ 号共用同一份
 .bind <选项序号> // 在问答过程中提交答案，例如 .bind 132
 .bind cancel // 取消进行中的问答
 .bind reset // 同上，顺便清掉群绑定的问答
 .bind status // 查看自己的绑定
 .bind list // 查看所有绑定记录，需要管理权限
+.bind doctor // 自检所有绑定，需要管理权限
 .unbind // 解除自己的个人绑定
 
 个人绑定与群无关、全局生效：在任何官方群里绑定一次即可。
 旧群号只是可选参数（.bind <旧QQ号> <旧群号>），填了也只会用于展示，不影响验证。
 
-群绑定（把整个群指向旧群，日志读取随之前移，需要管理权限）：
-.group bind <旧群号>
+注意：个人绑定只管「用户维度」。要让整个群的数据（含日志）也共通，
+还需要再做一次群绑定：
+
+.group bind <旧群号> // 发起群绑定，需要管理权限
 .group unbind
 .group status
+.group doctor // 自检所有绑定
 .group cancel`
 }
 
@@ -998,6 +1187,15 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 			return solved
 		}
 		ReplyToSender(ctx, msg, identityBindFormatList(d))
+		return solved
+	}
+
+	if cmdArgs.IsArgEqual(1, "doctor") || cmdArgs.IsArgEqual(1, "检查") {
+		if ctx.PrivilegeLevel < 50 {
+			ReplyToSender(ctx, msg, "你不具备管理权限")
+			return solved
+		}
+		ReplyToSender(ctx, msg, identityBindDoctorReport(d, ctx))
 		return solved
 	}
 
@@ -1072,8 +1270,9 @@ func identityBindCancelSession(ctx *MsgContext, msg *Message, clearAll bool) Cmd
 
 // identityBindStartUserSession 发起个人身份绑定。
 //
-// 注意：个人身份绑定是**全局跨群通用**的——官方 QQ 的 MemberOpenID 本身就按群独立，
-// 但绑定的目标是"这个人的旧 QQ 号"，与旧群无关。角色卡是按 owner_id（旧 QQ 号）
+// 注意：个人身份绑定是**全局跨群通用**的——官方 QQ 的 MemberOpenID 已经做到跨群一致
+// （见 formatDiceIDOfficialQQMemberOpenID，它刻意忽略 GroupOpenID），
+// 绑定的目标是"这个人的旧 QQ 号"，与旧群无关。角色卡是按 owner_id（旧 QQ 号）
 // 查询的，所以不需要旧群号。旧群号只是可选参数，用来展示更友好的提示。
 func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs, sessionKey, oldUserID string) CmdExecuteResult {
 	d := ctx.Dice
@@ -1084,7 +1283,15 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 		return solved
 	}
 
-	if existing, ok := identityBindStoreOf(d).get(d, identityBindUserKey(ctx.Player.UserID)); ok {
+	// 双向索引之后，同一个旧 QQ 号只能属于一个人。
+	// 不加这个检查的话，后绑定的人会把先绑定的人的数据「抢」过去。
+	if existing, ok := identityBindStoreOf(d).find(d, oldUserID); ok && existing.Action == identityBindActionUser {
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"该旧账号 %s 已经被绑定过了，无法重复绑定。\n如果你认为这是误绑，请联系管理员处理。", oldUserID))
+		return solved
+	}
+
+	if existing, ok := identityBindStoreOf(d).find(d, ctx.Player.UserID); ok {
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"你已经绑定到 %s 了，如需更换请先发送 `.unbind`。", existing.Old.UserID))
 		return solved
@@ -1189,7 +1396,6 @@ func identityBindVerifyUserAnswers(ctx *MsgContext, msg *Message, sessionKey str
 
 	record := &identityBindRecord{
 		Action:  identityBindActionUser,
-		Key:     identityBindUserKey(session.New.UserID),
 		New:     session.New,
 		Old:     session.Old,
 		Created: time.Now().Unix(),
@@ -1218,11 +1424,11 @@ func identityBindVerifyUserAnswers(ctx *MsgContext, msg *Message, sessionKey str
 // 只展示「个人身份绑定」的信息；群绑定请用 .group status 查看，两者是独立的。
 func identityBindFormatUserStatus(d *Dice, ctx *MsgContext) string {
 	lines := []string{
-		"【个人身份绑定】把你自己指向迁移前的旧 QQ 号，之后你的角色卡/属性都从旧身份读取。",
-		"作用范围: 全局（与群无关，绑定一次所有官方群通用）",
+		"【个人身份绑定】把你自己指向迁移前的旧 QQ 号。绑定后官方身份与旧 QQ 号共用同一套数据（角色卡/属性）。",
+		"作用范围: 用户维度，全局（与群无关，绑定一次所有官方群通用）",
 		fmt.Sprintf("当前身份: %s", ctx.Player.UserID),
 	}
-	if record, ok := identityBindStoreOf(d).get(d, identityBindUserKey(ctx.Player.UserID)); ok {
+	if record, ok := identityBindStoreOf(d).lookupRecord(d, ctx.Player.UserID, identityBindActionUser); ok {
 		lines = append(lines, fmt.Sprintf("已绑定旧QQ号: %s", record.Old.UserID))
 		if record.Old.UserName != "" {
 			lines = append(lines, fmt.Sprintf("旧群内昵称: %s", record.Old.UserName))
@@ -1230,18 +1436,21 @@ func identityBindFormatUserStatus(d *Dice, ctx *MsgContext) string {
 		if record.Old.GroupID != "" {
 			lines = append(lines, fmt.Sprintf("绑定时填写的旧群: %s", record.Old.GroupID))
 		}
+		lines = append(lines, fmt.Sprintf("数据存放位置: %s（旧号名下，数据未做任何搬移）", record.Old.UserID))
 		lines = append(lines, fmt.Sprintf("绑定时间: %s", time.Unix(record.Created, 0).Format("2006-01-02 15:04")))
 		lines = append(lines, "解除方式: .unbind")
 	} else {
 		lines = append(lines, "尚未绑定旧QQ号")
 		lines = append(lines, "发起绑定: .bind <旧QQ号>")
 	}
-	// 顺带提示本群的群绑定状态，避免两个功能混淆
+	// 顺带提示本群的群绑定状态，避免两个功能混淆。
+	// 这里要说清「两个维度」：个人绑定管用户，群绑定管群，两者都做才会完全共用同一份数据。
 	if ctx.Group != nil {
-		if record, ok := identityBindStoreOf(d).get(d, identityBindGroupKey(ctx.Group.GroupID)); ok {
-			lines = append(lines, fmt.Sprintf("（本群群绑定: 旧群 %s，用 .group status 查看）", record.Old.GroupID))
+		if record, ok := identityBindStoreOf(d).lookupRecord(d, ctx.Group.GroupID, identityBindActionGroup); ok {
+			lines = append(lines, fmt.Sprintf("（本群群绑定: 旧群 %s，群维度已打通）", record.Old.GroupID))
 		} else {
-			lines = append(lines, "（本群未做群绑定，群绑定用 .group bind <旧群号>）")
+			lines = append(lines, "（本群未做群绑定：用户维度已打通，但群维度没有，因此本群仍读本群自己的数据）")
+			lines = append(lines, "（要让本群与旧群完全共用同一份数据，请另外执行 .group bind <旧群号>）")
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -1259,11 +1468,103 @@ func identityBindFormatList(d *Dice) string {
 			kind = "日志"
 		}
 		lines = append(lines, fmt.Sprintf("[%s] %s → %s (%s)",
-			kind, record.New.UserID, record.Old.UserID,
+			kind, identityBindRecordEndpointID(record), identityBindRecordOldID(record),
 			time.Unix(record.Created, 0).Format("2006-01-02 15:04"),
 		))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// identityBindDoctorReport 生成绑定自检报告。
+//
+// 为什么需要它：绑定失败时绝大多数情况是「静默回退」——比如绑定的目标群
+// 已经不在内存里（机器人很久没去过那个群），此时读取会悄悄退回当前群，
+// 表现就是「绑定成功了但数据没变」，从表面完全看不出原因。
+// 这个报告把这些隐式条件显式列出来。
+func identityBindDoctorReport(d *Dice, ctx *MsgContext) string {
+	store := identityBindStoreOf(d)
+	records := store.list(d)
+
+	lines := []string{
+		"【绑定自检】",
+		fmt.Sprintf("绑定总开关: %s", identityBindBoolText(identityBindEnabled(d))),
+		fmt.Sprintf("绑定记录数: %d", len(records)),
+	}
+	if ctx != nil && ctx.Group != nil {
+		lines = append(lines, fmt.Sprintf("当前群: %s", ctx.Group.GroupID))
+	}
+
+	if len(records) == 0 {
+		lines = append(lines, "没有任何绑定记录，无需检查。")
+		return strings.Join(lines, "\n")
+	}
+
+	userCount, groupCount, problemCount := 0, 0, 0
+	for _, record := range records {
+		switch record.Action {
+		case identityBindActionUser:
+			userCount++
+		case identityBindActionGroup:
+			groupCount++
+		}
+
+		kind := "身份"
+		newID := identityBindRecordEndpointID(record)
+		oldID := identityBindRecordOldID(record)
+		if record.Action == identityBindActionGroup {
+			kind = "群"
+		}
+
+		var issues []string
+		if newID == "" {
+			issues = append(issues, "缺少官方侧 ID（记录损坏）")
+		}
+		if oldID == "" {
+			issues = append(issues, "缺少旧侧 ID（记录损坏）")
+		}
+		// 关键检查：目标群是否在内存里。不在内存里时读取会静默回退。
+		if record.Action == identityBindActionGroup && oldID != "" {
+			if ctx == nil || ctx.Session == nil {
+				issues = append(issues, "无法检查目标群（没有会话上下文）")
+			} else if _, ok := ctx.Session.ServiceAtNew.Load(oldID); !ok {
+				issues = append(issues, "目标旧群不在内存里，读取会静默回退到当前群（让骰子去那个群发一条消息即可恢复）")
+			}
+		}
+
+		head := fmt.Sprintf("%s绑定: %s → %s", kind, newID, oldID)
+		if len(issues) == 0 {
+			lines = append(lines, head+"  [正常]")
+			continue
+		}
+		problemCount++
+		lines = append(lines, head+"  [!]")
+		for _, issue := range issues {
+			lines = append(lines, "    - "+issue)
+		}
+	}
+
+	lines = append(lines,
+		"",
+		fmt.Sprintf("统计: 个人绑定 %d 条，群绑定 %d 条，异常 %d 条", userCount, groupCount, problemCount),
+	)
+	if problemCount == 0 {
+		lines = append(lines, "结论: 所有绑定看起来都正常。")
+	} else {
+		lines = append(lines, "结论: 存在异常项，请按上面的提示处理。")
+	}
+	lines = append(lines,
+		"",
+		"提醒: 完整的双向共通需要「个人绑定 + 群绑定」同时生效——",
+		"个人绑定负责用户维度，群绑定负责群维度，缺一个就会有一边读不到数据。",
+	)
+	return strings.Join(lines, "\n")
+}
+
+func identityBindBoolText(v bool) string {
+	if v {
+		return "已开启"
+	}
+	return "已关闭"
 }
 
 // identityBindRunUnbind 处理 .unbind。
@@ -1276,11 +1577,17 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 		return solved
 	}
 
-	key := identityBindUserKey(ctx.Player.UserID)
+	// 用当前身份查绑定；群绑定看群，个人绑定看用户。
+	lookupID := ctx.Player.UserID
 	if action == identityBindActionGroup {
-		key = identityBindGroupKey(ctx.Group.GroupID)
+		lookupID = ctx.Group.GroupID
 	}
-	deleted, err := identityBindStoreOf(d).delete(d, key)
+	record, ok := identityBindStoreOf(d).find(d, lookupID)
+	if !ok || record.Action != action {
+		ReplyToSender(ctx, msg, "没有找到属于你的绑定记录。")
+		return solved
+	}
+	deleted, err := identityBindStoreOf(d).delete(d, record)
 	if err != nil {
 		ReplyToSender(ctx, msg, fmt.Sprintf("解除绑定失败: %v", err))
 		return solved
@@ -1301,18 +1608,20 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 // ---------- .log bind / .log unbind ----------
 
 func identityBindLogHelp() string {
-	return `【群绑定】把当前官方群指向迁移前的旧群，之后本群的日志读取
-（.log list / .log get / .log stat / .log export）都从旧群取。
+	return `【群绑定】把当前官方群指向迁移前的旧群。绑定后本群与旧群共用同一份群维度数据：
+日志状态（.log on / new / off）与日志内容都记在同一份记录里，两边都能读到。
 
 .group bind <旧群号> // 发起群绑定（需要管理权限）
 .group bind <选项序号> // 在问答过程中提交答案
 .group cancel // 取消进行中的问答（同时清掉个人绑定的问答）
 .group unbind // 解除当前群的绑定（需要管理权限）
 .group status // 查看当前群的绑定
+.group doctor // 自检所有绑定（需要管理权限）
 
 说明：
-* 群绑定只影响「日志读取」；写入（.log new / on / end）仍然记在当前群。
-* 群绑定与个人身份绑定（.bind）完全独立，可以同时使用，互不影响。
+* 群绑定负责「群维度」，个人身份绑定（.bind）负责「用户维度」。
+  两个都做，官方身份与旧号才会完全共用同一套数据；只做一个会有半边读不到。
+* 数据不做任何搬移，规范位置固定在旧群 / 旧号名下，.unbind 后立刻恢复原状。
 * 兼容写法：.log bind / .log unbind / .log bindstatus 与上面等价。`
 }
 
@@ -1320,19 +1629,28 @@ func identityBindLogHelp() string {
 // 只展示「群绑定」的信息；个人身份绑定请用 .bind status 查看，两者是独立的。
 func identityBindGroupStatus(d *Dice, ctx *MsgContext) string {
 	lines := []string{
-		"【群绑定】把整个群指向迁移前的旧群，之后本群的日志读取（.log list / get / stat / export）都从旧群取。",
+		"【群绑定】把整个群指向迁移前的旧群。绑定后本群与旧群共用同一份群维度数据（日志、群配置）。",
 		fmt.Sprintf("当前群: %s", ctx.Group.GroupID),
 	}
-	if record, ok := identityBindStoreOf(d).get(d, identityBindGroupKey(ctx.Group.GroupID)); ok {
+	if record, ok := identityBindStoreOf(d).lookupRecord(d, ctx.Group.GroupID, identityBindActionGroup); ok {
 		lines = append(lines, fmt.Sprintf("已绑定旧群: %s", record.Old.GroupID))
 		if record.Old.GroupName != "" {
 			lines = append(lines, fmt.Sprintf("旧群名称: %s", record.Old.GroupName))
 		}
+		lines = append(lines, fmt.Sprintf("数据存放位置: %s（旧群名下，数据未做任何搬移）", record.Old.GroupID))
 		lines = append(lines, fmt.Sprintf("绑定时间: %s", time.Unix(record.Created, 0).Format("2006-01-02 15:04")))
 		lines = append(lines, "解除方式: .group unbind")
 	} else {
 		lines = append(lines, "尚未绑定旧群")
 		lines = append(lines, "发起绑定: .group bind <旧群号>")
+	}
+	// 说明两个维度的关系，避免「绑定成功了但数据没通」这种困惑。
+	if ctx.Player != nil {
+		if _, ok := identityBindStoreOf(d).lookupRecord(d, ctx.Player.UserID, identityBindActionUser); ok {
+			lines = append(lines, "（你的个人身份绑定已生效：两个维度都打通了，本群与旧群完全共用同一份数据）")
+		} else {
+			lines = append(lines, "（群维度已打通，但你还没有做个人身份绑定：请再用 .bind <旧QQ号> 打通用户维度）")
+		}
 	}
 	lines = append(lines, "（个人身份绑定与群绑定互相独立，用 .bind status 查看个人绑定）")
 	return strings.Join(lines, "\n")
@@ -1372,6 +1690,16 @@ func runIdentityBindGroupCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs
 	// .group status 查看当前群绑定
 	if sub == "status" || sub == "bindstatus" {
 		ReplyToSender(ctx, msg, identityBindGroupStatus(ctx.Dice, ctx))
+		return solved
+	}
+
+	// .group doctor 自检（需要管理权限）
+	if sub == "doctor" || sub == "检查" {
+		if ctx.PrivilegeLevel < 50 {
+			ReplyToSender(ctx, msg, "你不具备管理权限")
+			return solved
+		}
+		ReplyToSender(ctx, msg, identityBindDoctorReport(ctx.Dice, ctx))
 		return solved
 	}
 
@@ -1509,7 +1837,14 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		return solved
 	}
 
-	if existing, ok := identityBindStoreOf(d).get(d, identityBindGroupKey(ctx.Group.GroupID)); ok {
+	// 双向索引之后，同一个旧群也只能绑定一次。
+	if existing, ok := identityBindStoreOf(d).find(d, oldGroupID); ok && existing.Action == identityBindActionGroup {
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"旧群 %s 已经被绑定到另一个群了，无法重复绑定。", oldGroupID))
+		return solved
+	}
+
+	if existing, ok := identityBindStoreOf(d).find(d, ctx.Group.GroupID); ok {
 		ReplyToSender(ctx, msg, fmt.Sprintf("本群已经绑定到 %s 了，如需更换请先发送 `.group unbind`。", existing.Old.GroupID))
 		return solved
 	}
@@ -1584,7 +1919,6 @@ func identityBindVerifyLogAnswers(ctx *MsgContext, msg *Message, sessionKey stri
 
 	record := &identityBindRecord{
 		Action:  identityBindActionGroup,
-		Key:     identityBindGroupKey(session.New.GroupID),
 		New:     session.New,
 		Old:     session.Old,
 		Created: time.Now().Unix(),
@@ -1597,9 +1931,20 @@ func identityBindVerifyLogAnswers(ctx *MsgContext, msg *Message, sessionKey stri
 	identityBindClearSession(sessionKey)
 
 	ReplyToSender(ctx, msg, fmt.Sprintf(
-		"日志绑定成功！当前群现在会读取旧群 %s 的日志记录。\n如需解除请发送 `.group unbind`。",
+		"群绑定成功！当前群与旧群 %s 现在共用同一份日志：\n"+
+			"  · 双方的消息都记进同一份记录，两边都能读到\n"+
+			"  · 玩家身份那一半还需要本人执行 .bind <旧QQ号>\n"+
+			"如需解除请发送 `.group unbind`。",
 		session.Old.GroupID,
 	))
+	// 目标群不在内存里时读取会静默回退，这里主动提醒一次，省得上线后排查半天。
+	if _, exists := ctx.Session.ServiceAtNew.Load(session.Old.GroupID); !exists {
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"注意：旧群 %s 目前不在骰子的内存里，日志读取会先回退到本群。\n"+
+				"让骰子去旧群收到一条消息即可恢复（也可以用 `.group doctor` 复查）。",
+			session.Old.GroupID,
+		))
+	}
 	ctx.Notice(fmt.Sprintf(
 		"日志绑定成功: 群 <%s>(%s) 已绑定到旧群 %s，操作者 <%s>(%s)",
 		ctx.Group.GroupName, ctx.Group.GroupID, session.Old.GroupID, msg.Sender.Nickname, ctx.Player.UserID,
@@ -1608,27 +1953,78 @@ func identityBindVerifyLogAnswers(ctx *MsgContext, msg *Message, sessionKey stri
 	return solved
 }
 
+// identityBindLogWriteGroupID 计算日志「写入」应该使用的群 ID。
+//
+// 与读取一样归一到旧群：做了群绑定之后，官方群和旧群要把消息记进同一份日志，
+// 否则两边各记各的，谁也看不到对方那半段对话。
+//
+// 与 identityBindLogReadGroupID 的差别：写入不检查目标群有没有历史日志
+// （新日志本来就可能一条都还没有）。
+func identityBindLogWriteGroupID(ctx *MsgContext, fallback string) string {
+	if ctx == nil || ctx.Dice == nil {
+		return fallback
+	}
+	current := fallback
+	if current == "" && ctx.Group != nil {
+		current = ctx.Group.GroupID
+	}
+	if current == "" {
+		return fallback
+	}
+	target := identityCanonicalGroupID(ctx.Dice, current)
+	if target == "" {
+		return fallback
+	}
+	return target
+}
+
 // identityBindLogReadGroupID 计算日志「读取」应该使用的群 ID。
-// 当前群绑定了旧群时返回旧群 ID，否则原样返回。
-// 只用于 list / get / stat / export 这类读取操作，写入（on / new / end）仍然使用当前群。
+//
+// 双向共享之后，两侧都会归一：官方群归一成旧群（历史日志在旧群），
+// 旧群归一成官方群（新产生的日志在官方群）。归一到的目标群必须确实有日志记录，
+// 否则保留调用方给的 fallback，避免「绑了之后旧群突然一条日志都看不到」。
+//
+// 只用于 list / get / stat / export 这类读取操作，写入（on / new / end）仍然使用真实当前群。
 func identityBindLogReadGroupID(ctx *MsgContext, fallback string) string {
 	if ctx == nil || ctx.Dice == nil {
 		return fallback
 	}
-	group, bound := identityBindResolveGroup(ctx)
-	if !bound || group == nil || group.GroupID == "" {
+	current := fallback
+	if current == "" && ctx.Group != nil {
+		current = ctx.Group.GroupID
+	}
+	if current == "" {
 		return fallback
 	}
-	return group.GroupID
+	target := identityCanonicalGroupID(ctx.Dice, current)
+	if target == "" || target == current {
+		return fallback
+	}
+	if !identityBindGroupHasLogs(ctx.Dice, target) {
+		return fallback
+	}
+	return target
+}
+
+// identityBindGroupHasLogs 判断某个群里是否真的存在日志记录。
+func identityBindGroupHasLogs(d *Dice, groupID string) bool {
+	if d == nil || groupID == "" {
+		return false
+	}
+	items, err := service.LogGetList(d.DBOperator, groupID)
+	if err != nil {
+		return false
+	}
+	return len(items) > 0
 }
 
 // identityBindStatusSuffix 追加到 .log 状态输出的绑定提示。
 func identityBindStatusSuffix(ctx *MsgContext) string {
-	if ctx == nil || ctx.Dice == nil || ctx.Group == nil || !identityBindSupported(ctx.EndPoint) {
+	if ctx == nil || ctx.Dice == nil || ctx.Group == nil {
 		return ""
 	}
-	record, ok := identityBindStoreOf(ctx.Dice).get(ctx.Dice, identityBindGroupKey(ctx.Group.GroupID))
-	if !ok {
+	record, ok := identityBindStoreOf(ctx.Dice).find(ctx.Dice, ctx.Group.GroupID)
+	if !ok || record.Action != identityBindActionGroup {
 		return ""
 	}
 	return fmt.Sprintf("\n日志绑定: 读取旧群 %s", record.Old.GroupID)

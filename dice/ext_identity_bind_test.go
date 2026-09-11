@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	ds "github.com/sealdice/dicescript"
+
+	"sealdice-core/dice/service"
 	"sealdice-core/model"
 	"sealdice-core/utils/constant"
 )
@@ -185,6 +188,520 @@ func (env *bindTestEnv) addOldLog(t *testing.T, name string) {
 	}
 }
 
+// ---------- 双向共享（阶段2）测试 ----------
+
+// bindUserForTest 直接往存储里塞一条个人绑定，返回官方侧和旧侧的两个 ctx。
+// 用于测试「绑定之后两侧看到的是同一份数据」。
+func bindUserForTest(t *testing.T, env *bindTestEnv) (officialCtx, oldCtx *MsgContext) {
+	t.Helper()
+
+	record := &identityBindRecord{
+		Action: identityBindActionUser,
+		New:    identityBindEndpoint{Platform: "QQ", Protocol: "official", GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
+		Old:    identityBindEndpoint{Platform: "QQ", Protocol: "onebot", GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
+	}
+	if err := identityBindStoreOf(env.d).put(env.d, record); err != nil {
+		t.Fatalf("put user binding: %v", err)
+	}
+
+	// 官方侧 bot 的 ctx
+	officialCtx, _ = newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
+	// 民间 bot 的 ctx（同一个海豹实例里的另一个连接方式）
+	oldEP := &EndPointInfo{EndPointInfoBase: EndPointInfoBase{
+		ID:           "ep-onebot",
+		Platform:     "QQ",
+		ProtocolType: "onebot",
+		UserID:       "QQ:9999",
+	}}
+	oldCtx, _ = newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
+	return officialCtx, oldCtx
+}
+
+// TestIdentityBindSharesCharacterCardBothWays 双向共享的核心验收：
+// 官方身份建的卡，旧号能看到；旧号建的卡，官方身份也能看到。
+func TestIdentityBindSharesCharacterCardBothWays(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	officialCtx, oldCtx := bindUserForTest(t, env)
+
+	am := env.d.AttrsManager
+
+	// 官方身份建一张卡
+	created, errCreate := am.CharNew(identityBindDataUserID(officialCtx), "官方侧建的卡", "coc7")
+	if errCreate != nil {
+		t.Fatalf("CharNew from official side: %v", errCreate)
+	}
+	if created.OwnerId != bindTestOldUserID {
+		t.Fatalf("card owner = %q, want the canonical (old) id %q", created.OwnerId, bindTestOldUserID)
+	}
+
+	// 旧号侧必须能看到（owner_id 被归一到了旧 QQ 号）
+	list, err := am.GetCharacterList(identityBindDataUserID(oldCtx))
+	if err != nil {
+		t.Fatalf("GetCharacterList from old side: %v", err)
+	}
+	if !containsIdentityBindName(list, "官方侧建的卡") {
+		t.Fatalf("old side should see the card created by the official side, got %+v", list)
+	}
+	// 而且两边算出来的 owner 必须是同一个
+	if got, want := identityBindDataUserID(officialCtx), identityBindDataUserID(oldCtx); got != want {
+		t.Fatalf("both sides must resolve to the same owner id, got %q vs %q", got, want)
+	}
+	if got := identityBindDataUserID(officialCtx); got != bindTestOldUserID {
+		t.Fatalf("official side data user id = %q, want the old id %q", got, bindTestOldUserID)
+	}
+
+	// 反过来：旧号侧建卡，官方侧能看到
+	if _, errCreate2 := am.CharNew(identityBindDataUserID(oldCtx), "旧侧建的卡", "dnd5e"); errCreate2 != nil {
+		t.Fatalf("CharNew from old side: %v", errCreate2)
+	}
+	list, err = am.GetCharacterList(identityBindDataUserID(officialCtx))
+	if err != nil {
+		t.Fatalf("GetCharacterList from official side: %v", err)
+	}
+	if !containsIdentityBindName(list, "旧侧建的卡") {
+		t.Fatalf("official side should see the card created by the old side, got %+v", list)
+	}
+}
+
+func containsIdentityBindName(items []*model.AttributesItemModel, name string) bool {
+	for _, item := range items {
+		if item != nil && item.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestIdentityBindSharesAttributesAcrossBots 属性要两边共享：
+// 一侧改完，另一侧读到的必须是改后的值。
+//
+// 注意需要**个人绑定 + 群绑定同时存在**：个人绑定只把用户维度指过去，
+// 群维度由群绑定负责，两者合起来才会得到一模一样的 (群ID, 用户ID)。
+func TestIdentityBindSharesAttributesAcrossBots(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	officialCtx, oldCtx := bindUserForTest(t, env)
+	bindGroupForTest(t, env)
+
+	am := env.d.AttrsManager
+
+	// 官方侧写入
+	attrs, err := am.LoadByCtx(officialCtx)
+	if err != nil {
+		t.Fatalf("LoadByCtx(official): %v", err)
+	}
+	attrs.Store("生命值", ds.NewIntVal(12))
+	attrs.SaveToDB(am.db)
+
+	// 旧号侧读到的应该是同一个对象/同一个值
+	fromOld, err := am.LoadByCtx(oldCtx)
+	if err != nil {
+		t.Fatalf("LoadByCtx(old): %v", err)
+	}
+	if fromOld != attrs {
+		t.Fatalf("both sides must load the very same attribute item, got %q vs %q", fromOld.ID, attrs.ID)
+	}
+	if got := fromOld.Load("生命值"); !ds.ValueEqual(got, ds.NewIntVal(12), false) {
+		t.Fatalf("old side reads 生命值 = %+v, want 12", got)
+	}
+
+	// 旧号侧改，官方侧也要看到
+	fromOld.Store("生命值", ds.NewIntVal(3))
+	fromOld.SaveToDB(am.db)
+	again, err := am.LoadByCtx(officialCtx)
+	if err != nil {
+		t.Fatalf("LoadByCtx(official, again): %v", err)
+	}
+	if got := again.Load("生命值"); !ds.ValueEqual(got, ds.NewIntVal(3), false) {
+		t.Fatalf("official side reads 生命值 = %+v, want 3 after the old side changed it", got)
+	}
+}
+
+// TestIdentityBindUserBindingAloneDoesNotBridgeGroups 只有个人绑定、没有群绑定时，
+// 跨群不应该被"假装"打通——否则官方号在别的群里会读到不相干的旧群数据。
+// 这是刻意的语义：用户维度归用户绑定管，群维度归群绑定管。
+func TestIdentityBindUserBindingAloneDoesNotBridgeGroups(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	officialCtx, oldCtx := bindUserForTest(t, env)
+
+	// 用户维度已归一
+	if got := identityBindDataUserID(officialCtx); got != bindTestOldUserID {
+		t.Fatalf("data user id = %q, want %q", got, bindTestOldUserID)
+	}
+	// 群维度保持各自真实群
+	if got := identityBindDataGroupID(officialCtx); got != bindTestNewGroupID {
+		t.Fatalf("official data group id = %q, want its own group %q", got, bindTestNewGroupID)
+	}
+	if got := identityBindDataGroupID(oldCtx); got != bindTestOldGroupID {
+		t.Fatalf("old data group id = %q, want its own group %q", got, bindTestOldGroupID)
+	}
+
+	am := env.d.AttrsManager
+	attrs, err := am.LoadByCtx(officialCtx)
+	if err != nil {
+		t.Fatalf("LoadByCtx(official): %v", err)
+	}
+	attrs.Store("生命值", ds.NewIntVal(12))
+	attrs.SaveToDB(am.db)
+
+	// 旧群那份不应该被写入（因为没有群绑定）
+	fromOld, err := am.LoadByCtx(oldCtx)
+	if err != nil {
+		t.Fatalf("LoadByCtx(old): %v", err)
+	}
+	if got := fromOld.Load("生命值"); got != nil {
+		t.Fatalf("without a group binding the two groups must stay separate, got %+v", got)
+	}
+}
+
+// TestIdentityBindDataIDsFallBackWithoutBinding 没有绑定时，Data*ID 必须等于真实 ID，
+// 也就是行为与改动前完全一致（防止改坏非绑定场景）。
+func TestIdentityBindDataIDsFallBackWithoutBinding(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+
+	ctx, _ := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
+	// 刻意不设置 Data*ID，模拟绕过 GetPlayerInfoBySenderRaw 的路径
+	if got := identityBindDataUserID(ctx); got != bindTestNewUserID {
+		t.Fatalf("unbound data user id = %q, want %q", got, bindTestNewUserID)
+	}
+	if got := identityBindDataGroupID(ctx); got != bindTestNewGroupID {
+		t.Fatalf("unbound data group id = %q, want %q", got, bindTestNewGroupID)
+	}
+	ctx.DataUserID = bindTestNewUserID
+	ctx.DataGroupID = bindTestNewGroupID
+	if got := identityBindDataUserID(ctx); got != bindTestNewUserID {
+		t.Fatalf("data user id with explicit fill = %q, want %q", got, bindTestNewUserID)
+	}
+}
+
+// TestIdentityBindDataIDsRecoverFromDelegation 代骰等逻辑会把 ctx.Player 换成别人，
+// 这时 Data*ID 如果还是旧值就会造成错配，必须能按当前 Player 重新解析。
+func TestIdentityBindDataIDsRecoverFromDelegation(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	officialCtx, _ := bindUserForTest(t, env)
+
+	// 先按官方身份填好
+	officialCtx.DataUserID = identityBindDataUserID(officialCtx)
+	if officialCtx.DataUserID != bindTestOldUserID {
+		t.Fatalf("setup: data user id = %q, want %q", officialCtx.DataUserID, bindTestOldUserID)
+	}
+
+	// 模拟代骰：Player 被换成另一个没有绑定的人，但 DataUserID 忘了更新
+	officialCtx.Player = &GroupPlayerInfo{UserID: "OpenQQ:100-someone-else"}
+	if got := identityBindDataUserID(officialCtx); got != "OpenQQ:100-someone-else" {
+		t.Fatalf("stale DataUserID must be re-resolved, got %q", got)
+	}
+}
+
+// bindGroupForTest 给「官方群 → 旧群」建立群绑定。
+func bindGroupForTest(t *testing.T, env *bindTestEnv) {
+	t.Helper()
+	record := &identityBindRecord{
+		Action: identityBindActionGroup,
+		New:    identityBindEndpoint{Platform: "QQ", Protocol: "official", GroupID: bindTestNewGroupID},
+		Old:    identityBindEndpoint{Platform: "QQ", Protocol: "onebot", GroupID: bindTestOldGroupID},
+	}
+	if err := identityBindStoreOf(env.d).put(env.d, record); err != nil {
+		t.Fatalf("put group binding: %v", err)
+	}
+}
+
+// TestIdentityBindGroupRedirectsAttributes 群绑定之后，属性读写的群维度也要归一。
+func TestIdentityBindGroupRedirectsAttributes(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	bindGroupForTest(t, env)
+
+	ctx, _ := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
+	if got := identityBindDataGroupID(ctx); got != bindTestOldGroupID {
+		t.Fatalf("data group id = %q, want the old group %q", got, bindTestOldGroupID)
+	}
+	if got := identityBindDataUserID(ctx); got != bindTestNewUserID {
+		t.Fatalf("group binding must not change the user id, got %q", got)
+	}
+
+	// 在归一后的群维度上写属性，旧群的 ctx 必须读到
+	am := env.d.AttrsManager
+	attrs, err := am.LoadByCtx(ctx)
+	if err != nil {
+		t.Fatalf("LoadByCtx: %v", err)
+	}
+	attrs.Store("意志", ds.NewIntVal(55))
+	attrs.SaveToDB(am.db)
+
+	oldEP := &EndPointInfo{EndPointInfoBase: EndPointInfoBase{
+		ID: "ep-onebot", Platform: "QQ", ProtocolType: "onebot", UserID: "QQ:9999",
+	}}
+	oldCtx, _ := newQuitCommandTestContext(t, env.d, oldEP, bindTestNewUserID, bindTestOldGroupID, "旧群")
+	fromOld, err := am.LoadByCtx(oldCtx)
+	if err != nil {
+		t.Fatalf("LoadByCtx(old group): %v", err)
+	}
+	if got := fromOld.Load("意志"); !ds.ValueEqual(got, ds.NewIntVal(55), false) {
+		t.Fatalf("old group reads 意志 = %+v, want 55", got)
+	}
+}
+
+// TestIdentityBindSnTemplateFallsBackToOtherSide 方案 A：
+// 自己没设 .sn 时读另一侧的模板；自己设过就以自己的为准。
+func TestIdentityBindSnTemplateFallsBackToOtherSide(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	officialCtx, oldCtx := bindUserForTest(t, env)
+
+	// 旧号设过模板，官方侧没设 → 官方侧应该读到旧号的模板
+	oldCtx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{生命值}"
+	if got := identityBindPlayerNameTemplate(officialCtx); got != "{$t玩家_RAW} HP{生命值}" {
+		t.Fatalf("official side should inherit the old template, got %q", got)
+	}
+
+	// 官方侧一旦自己设了，就以自己的为准（不会反过来被旧群覆盖）
+	officialCtx.Player.AutoSetNameTemplate = "{$t玩家_RAW} SAN{理智}"
+	if got := identityBindPlayerNameTemplate(officialCtx); got != "{$t玩家_RAW} SAN{理智}" {
+		t.Fatalf("own template must win, got %q", got)
+	}
+	// 旧群侧的模板不受影响，即官方侧写入没有污染旧群
+	if got := identityBindPlayerNameTemplate(oldCtx); got != "{$t玩家_RAW} HP{生命值}" {
+		t.Fatalf("old side template must stay untouched, got %q", got)
+	}
+}
+
+// TestIdentityBindSnTemplateOffIsHonoured 旧号显式 .sn off（空模板）不能被当成"没设置"而回退。
+// 这里断言的是「两侧都空 → 结果为空」，不会凭空从别处继承出模板。
+func TestIdentityBindSnTemplateEmptyWhenBothSidesEmpty(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	officialCtx, oldCtx := bindUserForTest(t, env)
+
+	officialCtx.Player.AutoSetNameTemplate = ""
+	oldCtx.Player.AutoSetNameTemplate = ""
+	if got := identityBindPlayerNameTemplate(officialCtx); got != "" {
+		t.Fatalf("expected an empty template, got %q", got)
+	}
+}
+
+// ---------- 日志双向共通（阶段3）测试 ----------
+
+// logBindTestEnv 建一个带日志表的绑定测试环境，并把官方群和旧群都放进内存。
+//
+// 注意：它已经建好了绑定和两边的 ctx，调用方用 officialCtxForTest/oldCtxForTest 取，
+// 不要再次调用 bindUserForTest，否则会用空群对象覆盖掉内存里的 group（丢掉日志状态）。
+func logBindTestEnv(t *testing.T) *bindTestEnv {
+	t.Helper()
+	env := newBindTestEnv(t)
+	if err := env.operator.GetLogDB(constant.WRITE).AutoMigrate(&model.LogInfo{}, &model.LogOneItem{}); err != nil {
+		t.Fatalf("AutoMigrate logs: %v", err)
+	}
+	return env
+}
+
+// groupForTest 从内存取群对象。
+func groupForTest(t *testing.T, env *bindTestEnv, groupID string) *GroupInfo {
+	t.Helper()
+	group, ok := env.d.ImSession.ServiceAtNew.Load(groupID)
+	if !ok || group == nil {
+		t.Fatalf("group %q missing from ServiceAtNew", groupID)
+	}
+	return group
+}
+
+// logShareTestEnv 建好「个人绑定 + 群绑定」并返回两边的 ctx。
+// 注意：绑定必须在建 ctx 之前放好，而且不能再重复调用 bindUserForTest，
+// 否则会用新的空群对象覆盖内存里的 group，把日志状态弄丢。
+func logShareTestEnv(t *testing.T) (env *bindTestEnv, officialCtx, oldCtx *MsgContext) {
+	t.Helper()
+	env = logBindTestEnv(t)
+	officialCtx, oldCtx = bindUserForTest(t, env)
+	bindGroupForTest(t, env)
+	return env, officialCtx, oldCtx
+}
+
+// TestIdentityBindLogStateIsShared 群绑定之后，两边必须读到同一份日志状态。
+//
+// 这是「双向共通」最容易出错的一环：日志状态本来挂在各自的 GroupInfo 上，
+// 官方群 .log on 之后旧群不知道，于是官方群记的日志在旧群一条都看不到。
+func TestIdentityBindLogStateIsShared(t *testing.T) {
+	env, officialCtx, oldCtx := logShareTestEnv(t)
+	defer env.cleanup()
+
+	// 官方群对象和旧群对象都必须已经从内存里拿到
+	newGroup := groupForTest(t, env, bindTestNewGroupID)
+	oldGroup := groupForTest(t, env, bindTestOldGroupID)
+
+	// 在旧群上开启日志（模拟民间 bot 那边 .log on）
+	logID, err := service.LogGetOrCreate(env.d.DBOperator, bindTestOldGroupID, "跑团记录")
+	if err != nil {
+		t.Fatalf("LogGetOrCreate: %v", err)
+	}
+	oldGroup.SetLogState(logID, "跑团记录", true)
+
+	// 旧群自己的上下文：目标就是自己，不应该被"改道"
+	if got, bound := identityBindReadGroup(oldCtx); bound || got != oldGroup {
+		t.Fatalf("old group context should stay on itself, got %v / bound=%v", got, bound)
+	}
+	// 官方群的上下文：必须解析到旧群那份状态
+	fromOfficial, bound := identityBindReadGroup(officialCtx)
+	if !bound || fromOfficial != oldGroup {
+		t.Fatalf("official group context should resolve to the old group, got %v / %v", fromOfficial, bound)
+	}
+	state := getGroupLogState(fromOfficial)
+	if !state.On || state.Name != "跑团记录" || state.ID != logID {
+		t.Fatalf("official side reads log state %+v, want on/跑团记录/%d", state, logID)
+	}
+	// 旧群对象上的状态同样可见——两边读的是同一个对象，这就是"共通"
+	if oldState := getGroupLogState(oldGroup); oldState.Name != "跑团记录" || !oldState.On {
+		t.Fatalf("old side reads log state %+v, want the same one", oldState)
+	}
+	// 官方群自己对象上是空的——状态只存在于归一后的群里
+	if own := getGroupLogState(newGroup); own.On {
+		t.Fatalf("official group object should not hold its own log state, got %+v", own)
+	}
+}
+
+// TestIdentityBindLogWriteGoesToCanonicalGroup 玩家发言和骰子发言必须写进同一份日志。
+//
+// 玩家发言走 ctx.Group.GroupID（已归一），骰子发言走 msg.GroupID（真实群），
+// 两条路径如果不统一，日志会裂成「玩家一条、骰子一条」两份文件。
+func TestIdentityBindLogWriteGoesToCanonicalGroup(t *testing.T) {
+	env, officialCtx, _ := logShareTestEnv(t)
+	defer env.cleanup()
+
+	// 玩家发言：归一后的群
+	if got := identityBindDataGroupID(officialCtx); got != bindTestOldGroupID {
+		t.Fatalf("player message group = %q, want %q", got, bindTestOldGroupID)
+	}
+	// 骰子发言：官方群发出来的消息，也必须落到旧群那份日志里
+	if got := identityBindLogWriteGroupID(officialCtx, bindTestNewGroupID); got != bindTestOldGroupID {
+		t.Fatalf("dice message group = %q, want %q", got, bindTestOldGroupID)
+	}
+	// 旧群自己发消息时不该被改道
+	if got := identityBindLogWriteGroupID(officialCtx, bindTestOldGroupID); got != bindTestOldGroupID {
+		t.Fatalf("old group message group = %q, want %q", got, bindTestOldGroupID)
+	}
+
+	// 完全没有群绑定时必须原样返回（防止改坏非绑定场景）
+	unboundCtx := &MsgContext{Dice: env.d, Group: &GroupInfo{GroupID: "OpenQQ-Group:999-unbound"}}
+	if got := identityBindLogWriteGroupID(unboundCtx, "OpenQQ-Group:999-unbound"); got != "OpenQQ-Group:999-unbound" {
+		t.Fatalf("unbound group = %q, want unchanged", got)
+	}
+	// ctx 缺群时用 fallback；这里刻意用一个没绑定的群，验证不会被别的绑定串改
+	unboundGroupID := "OpenQQ-Group:999-unbound"
+	if got := identityBindLogWriteGroupID(&MsgContext{Dice: env.d}, unboundGroupID); got != unboundGroupID {
+		t.Fatalf("nil group = %q, want fallback unchanged", got)
+	}
+}
+
+// TestIdentityBindLogReadPrefersGroupWithHistory 读取时优先取「确实有日志」的那一侧。
+// 官方向旧看（旧群有历史），旧群看自己；谁都不会因为归一而突然读不到东西。
+func TestIdentityBindLogReadPrefersGroupWithHistory(t *testing.T) {
+	env, officialCtx, oldCtx := logShareTestEnv(t)
+	defer env.cleanup()
+
+	// 一开始两边都没有日志：读取保持原样，不能强行改道
+	if got := identityBindLogReadGroupID(officialCtx, bindTestNewGroupID); got != bindTestNewGroupID {
+		t.Fatalf("with no logs anywhere, read group = %q, want unchanged", got)
+	}
+
+	// 给旧群写一条日志
+	if ok := LogAppend(&MsgContext{Dice: env.d}, bindTestOldGroupID, 0, "旧群记录", &model.LogOneItem{
+		Nickname: "tester", IMUserID: "user", Message: "line",
+	}); !ok {
+		t.Fatal("LogAppend to old group failed")
+	}
+
+	// 官方群读取时应该改道到旧群
+	if got := identityBindLogReadGroupID(officialCtx, bindTestNewGroupID); got != bindTestOldGroupID {
+		t.Fatalf("official read group = %q, want the old group %q", got, bindTestOldGroupID)
+	}
+	// 旧群读取时目标就是自己，不需要改道
+	if got := identityBindLogReadGroupID(oldCtx, bindTestOldGroupID); got != bindTestOldGroupID {
+		t.Fatalf("old read group = %q, want %q", got, bindTestOldGroupID)
+	}
+}
+
+// ---------- 自检（阶段4）测试 ----------
+
+// TestIdentityBindDoctorReportsHealthyBindings 正常绑定时自检应该报「正常」。
+func TestIdentityBindDoctorReportsHealthyBindings(t *testing.T) {
+	env, officialCtx, _ := logShareTestEnv(t)
+	defer env.cleanup()
+
+	report := identityBindDoctorReport(env.d, officialCtx)
+	if !strings.Contains(report, "绑定记录数: 2") {
+		t.Fatalf("expected 2 bindings in the report, got:\n%s", report)
+	}
+	if !strings.Contains(report, "[正常]") {
+		t.Fatalf("expected a healthy marker, got:\n%s", report)
+	}
+	if !strings.Contains(report, "异常 0 条") {
+		t.Fatalf("expected zero problems, got:\n%s", report)
+	}
+	if !strings.Contains(report, "所有绑定看起来都正常") {
+		t.Fatalf("expected a healthy conclusion, got:\n%s", report)
+	}
+}
+
+// TestIdentityBindDoctorDetectsMissingOldGroup 目标旧群不在内存里时必须被指出来。
+// 这是最容易踩的坑：绑定成功但数据没变，因为读取静默回退了。
+func TestIdentityBindDoctorDetectsMissingOldGroup(t *testing.T) {
+	env, officialCtx, _ := logShareTestEnv(t)
+	defer env.cleanup()
+
+	// 把旧群从内存里摘掉，模拟「机器人很久没去过旧群」
+	env.d.ImSession.ServiceAtNew.Delete(bindTestOldGroupID)
+
+	report := identityBindDoctorReport(env.d, officialCtx)
+	if !strings.Contains(report, "不在内存里") {
+		t.Fatalf("expected the missing old group to be reported, got:\n%s", report)
+	}
+	if !strings.Contains(report, "异常 1 条") {
+		t.Fatalf("expected exactly one problem, got:\n%s", report)
+	}
+	if !strings.Contains(report, "存在异常项") {
+		t.Fatalf("expected a failure conclusion, got:\n%s", report)
+	}
+}
+
+// TestIdentityBindDoctorHandlesEmptyStore 没有任何绑定时不能报错。
+func TestIdentityBindDoctorHandlesEmptyStore(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+
+	ctx, _ := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
+	report := identityBindDoctorReport(env.d, ctx)
+	if !strings.Contains(report, "绑定记录数: 0") {
+		t.Fatalf("expected an empty report, got:\n%s", report)
+	}
+	if !strings.Contains(report, "没有任何绑定记录") {
+		t.Fatalf("expected an empty-store note, got:\n%s", report)
+	}
+}
+
+// TestIdentityBindDoctorFlagsCorruptRecord 缺 ID 的坏记录必须被标出来，而不是静默忽略。
+func TestIdentityBindDoctorFlagsCorruptRecord(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+
+	// 手工塞一条只有官方侧 ID 的记录（模拟文件被改坏）
+	broken := &identityBindRecord{
+		Action: identityBindActionUser,
+		New:    identityBindEndpoint{UserID: bindTestNewUserID},
+	}
+	if err := identityBindStoreOf(env.d).put(env.d, broken); err != nil {
+		t.Fatalf("put broken record: %v", err)
+	}
+
+	ctx, _ := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
+	report := identityBindDoctorReport(env.d, ctx)
+	if !strings.Contains(report, "缺少旧侧 ID") {
+		t.Fatalf("expected the corrupt record to be flagged, got:\n%s", report)
+	}
+}
+
 // ---------- 纯函数测试 ----------
 
 func TestIdentityBindNormalizeOldIDs(t *testing.T) {
@@ -339,7 +856,6 @@ func TestIdentityBindStorePersistsAndReloads(t *testing.T) {
 
 	record := &identityBindRecord{
 		Action:  identityBindActionUser,
-		Key:     identityBindUserKey(bindTestNewUserID),
 		New:     identityBindEndpoint{Platform: "QQ", Protocol: "official", GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
 		Old:     identityBindEndpoint{Platform: "QQ", Protocol: "onebot", GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
 		Created: 123,
@@ -356,7 +872,7 @@ func TestIdentityBindStorePersistsAndReloads(t *testing.T) {
 	// 新实例重新加载
 	fresh := &Dice{BaseConfig: BaseConfig{DataDir: dir}}
 	fresh.IdentityBindStore = &identityBindStore{}
-	got, ok := identityBindStoreOf(fresh).get(fresh, identityBindUserKey(bindTestNewUserID))
+	got, ok := identityBindStoreOf(fresh).find(fresh, bindTestNewUserID)
 	if !ok {
 		t.Fatal("expected binding to be reloaded from disk")
 	}
@@ -365,18 +881,28 @@ func TestIdentityBindStorePersistsAndReloads(t *testing.T) {
 	}
 
 	// 删除后不再可见
-	deleted, err := identityBindStoreOf(fresh).delete(fresh, identityBindUserKey(bindTestNewUserID))
+	toDelete, found := identityBindStoreOf(fresh).find(fresh, bindTestNewUserID)
+	if !found {
+		t.Fatal("expected to find the record before deleting")
+	}
+	deleted, err := identityBindStoreOf(fresh).delete(fresh, toDelete)
 	if err != nil || !deleted {
 		t.Fatalf("delete = (%v, %v), want (true, nil)", deleted, err)
 	}
 	reloaded := &Dice{BaseConfig: BaseConfig{DataDir: dir}}
 	reloaded.IdentityBindStore = &identityBindStore{}
-	if _, ok := identityBindStoreOf(reloaded).get(reloaded, identityBindUserKey(bindTestNewUserID)); ok {
+	if _, ok := identityBindStoreOf(reloaded).find(reloaded, bindTestNewUserID); ok {
 		t.Fatal("expected binding to stay deleted after reload")
+	}
+	// 另一侧的索引也必须一起清掉，否则民间 bot 侧会指向一条已经不存在的绑定
+	if _, ok := identityBindStoreOf(reloaded).find(reloaded, bindTestOldUserID); ok {
+		t.Fatal("expected the reverse index entry to be removed as well")
 	}
 }
 
-func TestIdentityBindResolveIgnoresNonOfficialPlatforms(t *testing.T) {
+// TestIdentityBindSymmetricResolve 双向共享的核心断言：
+// 同一对绑定，两侧解析出来的数据 key 必须完全一致，且规范 key 固定是旧身份。
+func TestIdentityBindSymmetricResolve(t *testing.T) {
 	dir := t.TempDir()
 	d := &Dice{
 		BaseConfig:        BaseConfig{DataDir: dir},
@@ -384,7 +910,6 @@ func TestIdentityBindResolveIgnoresNonOfficialPlatforms(t *testing.T) {
 	}
 	record := &identityBindRecord{
 		Action:  identityBindActionUser,
-		Key:     identityBindUserKey(bindTestNewUserID),
 		New:     identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
 		Old:     identityBindEndpoint{GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
 		Created: 123,
@@ -393,25 +918,150 @@ func TestIdentityBindResolveIgnoresNonOfficialPlatforms(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 
-	ctx := &MsgContext{
-		Dice: d,
-		Group: &GroupInfo{
-			GroupID: bindTestNewGroupID,
-		},
-		Player:   &GroupPlayerInfo{UserID: bindTestNewUserID},
-		EndPoint: &EndPointInfo{EndPointInfoBase: EndPointInfoBase{Platform: "QQ", ProtocolType: "onebot"}},
+	// 官方身份 → 旧身份
+	if got := identityCanonicalUserID(d, bindTestNewUserID); got != bindTestOldUserID {
+		t.Fatalf("canonical(official) = %q, want %q", got, bindTestOldUserID)
 	}
-	if _, bound := identityBindResolveUserID(ctx); bound {
-		t.Fatal("OneBot endpoint must not resolve to a bound identity")
+	// 旧身份 → 还是旧身份（原地不动，旧账号的历史数据不需要搬家）
+	if got := identityCanonicalUserID(d, bindTestOldUserID); got != bindTestOldUserID {
+		t.Fatalf("canonical(old) = %q, want %q (must stay put)", got, bindTestOldUserID)
 	}
-	if _, _, bound := identityBindAttrTarget(ctx); bound {
-		t.Fatal("OneBot endpoint must not redirect attribute reads")
+	// 未绑定的 ID 原样返回
+	if got := identityCanonicalUserID(d, "QQ:999999"); got != "QQ:999999" {
+		t.Fatalf("canonical(unbound) = %q, want unchanged", got)
+	}
+	// 两侧必须收敛到同一个 key，否则数据还是两份
+	if identityCanonicalUserID(d, bindTestNewUserID) != identityCanonicalUserID(d, bindTestOldUserID) {
+		t.Fatal("both sides must converge to the same data key")
 	}
 
-	ctx.EndPoint.ProtocolType = "official"
-	oldUserID, bound := identityBindResolveUserID(ctx)
-	if !bound || oldUserID != bindTestOldUserID {
-		t.Fatalf("official endpoint resolve = (%q, %v), want %s", oldUserID, bound, bindTestOldUserID)
+	// 群也一样
+	groupRecord := &identityBindRecord{
+		Action:  identityBindActionGroup,
+		New:     identityBindEndpoint{GroupID: bindTestNewGroupID},
+		Old:     identityBindEndpoint{GroupID: bindTestOldGroupID},
+		Created: 124,
+	}
+	if err := identityBindStoreOf(d).put(d, groupRecord); err != nil {
+		t.Fatalf("put group: %v", err)
+	}
+	if got := identityCanonicalGroupID(d, bindTestNewGroupID); got != bindTestOldGroupID {
+		t.Fatalf("canonical group(official) = %q, want %q", got, bindTestOldGroupID)
+	}
+	if got := identityCanonicalGroupID(d, bindTestOldGroupID); got != bindTestOldGroupID {
+		t.Fatalf("canonical group(old) = %q, want %q (must stay put)", got, bindTestOldGroupID)
+	}
+}
+
+// TestIdentityBindResolveWorksFromOldEndpoint 旧号侧的端点也必须能解析出绑定。
+// 这条曾经是反的（只有官方端点才解析），导致双向共享不成立。
+func TestIdentityBindResolveWorksFromOldEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	d := &Dice{
+		BaseConfig:        BaseConfig{DataDir: dir},
+		IdentityBindStore: &identityBindStore{},
+	}
+	record := &identityBindRecord{
+		Action:  identityBindActionUser,
+		New:     identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
+		Old:     identityBindEndpoint{GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
+		Created: 123,
+	}
+	if err := identityBindStoreOf(d).put(d, record); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// 官方端点：归一成旧身份
+	officialCtx := &MsgContext{
+		Dice:     d,
+		Group:    &GroupInfo{GroupID: bindTestNewGroupID},
+		Player:   &GroupPlayerInfo{UserID: bindTestNewUserID},
+		EndPoint: &EndPointInfo{EndPointInfoBase: EndPointInfoBase{Platform: "QQ", ProtocolType: "official"}},
+	}
+	if got := identityBindDataUserID(officialCtx); got != bindTestOldUserID {
+		t.Fatalf("official data user id = %q, want %q", got, bindTestOldUserID)
+	}
+
+	// 旧端点：同样归一成旧身份，而且必须是同一个值（这就是「数据共通」）
+	oldCtx := &MsgContext{
+		Dice:     d,
+		Group:    &GroupInfo{GroupID: bindTestOldGroupID},
+		Player:   &GroupPlayerInfo{UserID: bindTestOldUserID},
+		EndPoint: &EndPointInfo{EndPointInfoBase: EndPointInfoBase{Platform: "QQ", ProtocolType: "onebot"}},
+	}
+	if got := identityBindDataUserID(oldCtx); got != bindTestOldUserID {
+		t.Fatalf("old data user id = %q, want %q", got, bindTestOldUserID)
+	}
+	if identityBindDataUserID(oldCtx) != identityBindDataUserID(officialCtx) {
+		t.Fatal("both endpoints must resolve to the same data user id")
+	}
+}
+
+// TestIdentityBindIsOfficialQQID 判方向只看 ID 前缀，不看端点。
+func TestIdentityBindIsOfficialQQID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"OpenQQ:100-member", true},
+		{"OpenQQ-Group:100-group", true},
+		{"QQ:123456", false},
+		{"QQ-Group:789", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isOfficialQQID(c.id); got != c.want {
+			t.Fatalf("isOfficialQQID(%q) = %v, want %v", c.id, got, c.want)
+		}
+	}
+}
+
+// TestIdentityBindUniquenessBlocksTakeover 同一个旧账号不能被第二个人绑定。
+//
+// 引入双向索引之后，旧号侧也指向官方 ID，所以「谁先绑谁得」必须显式拦住，
+// 否则后来者一绑就把前面那个人的数据（属性、角色卡、日志）全部接管过去。
+func TestIdentityBindUniquenessBlocksTakeover(t *testing.T) {
+	env := newBindTestEnv(t)
+	defer env.cleanup()
+	env.addOldCard(t, "调查员甲")
+
+	// 第一个人正常绑定成功
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001", "1001"}})
+	questionReply := waitGroupMessage(t, env)
+	if !strings.Contains(questionReply, "共 1 题") {
+		t.Fatalf("expected a question prompt, got %q", questionReply)
+	}
+	session, ok := identityBindLoadSession(identityBindSessionKey(env.ctx.EndPoint.ID, bindTestNewUserID, identityBindActionUser))
+	if !ok {
+		t.Fatal("expected a pending bind session for the first user")
+	}
+	beforeAnswer := env.recorder.messageCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{itoa(session.Questions[0].Answer + 1)}})
+	if reply := env.recorder.waitNextReply(t, beforeAnswer); !strings.Contains(reply, "绑定成功") {
+		t.Fatalf("expected the first bind to succeed, got %q", reply)
+	}
+
+	// 第二个人用不同的官方身份，试图绑定同一个旧号
+	secondUserID := "OpenQQ:100-second-member"
+	secondCtx, secondMsg := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, secondUserID, bindTestNewGroupID, "新群")
+	before := env.recorder.messageCount()
+	runIdentityBindCommand(secondCtx, secondMsg, &CmdArgs{Args: []string{"2001", "1001"}})
+	reply := env.recorder.waitNextReply(t, before)
+	if !strings.Contains(reply, "已经被绑定") {
+		t.Fatalf("expected the second bind to be rejected as already claimed, got %q", reply)
+	}
+
+	// 关键：第一个人的绑定必须原封不动，没有被顶掉或改写
+	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID)
+	if !ok {
+		t.Fatal("expected the original binding to still exist")
+	}
+	if record.New.UserID != bindTestNewUserID {
+		t.Fatalf("binding owner changed to %s, want %s", record.New.UserID, bindTestNewUserID)
+	}
+	// 第二个人不应该留下任何会话
+	if _, ok := identityBindLoadSession(identityBindSessionKey(env.ctx.EndPoint.ID, secondUserID, identityBindActionUser)); ok {
+		t.Fatal("rejected user must not get a bind session")
 	}
 }
 
@@ -499,7 +1149,7 @@ func TestIdentityBindCommandFullFlowBindsOnCorrectAnswer(t *testing.T) {
 		t.Fatalf("expected a success reply, got %q", reply)
 	}
 
-	record, ok := identityBindStoreOf(env.d).get(env.d, identityBindUserKey(bindTestNewUserID))
+	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewUserID)
 	if !ok {
 		t.Fatal("expected the binding to be stored")
 	}
@@ -545,7 +1195,7 @@ func TestIdentityBindCommandWrongAnswerFailsAndClearsSession(t *testing.T) {
 	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "答案不正确") {
 		t.Fatalf("expected a failure reply, got %q", reply)
 	}
-	if _, ok := identityBindStoreOf(env.d).get(env.d, identityBindUserKey(bindTestNewUserID)); ok {
+	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewUserID); ok {
 		t.Fatal("a failed verification must not create a binding")
 	}
 	if _, ok := identityBindLoadSession(sessionKey); ok {
@@ -581,7 +1231,6 @@ func TestIdentityBindUnbindRemovesBinding(t *testing.T) {
 
 	record := &identityBindRecord{
 		Action:  identityBindActionUser,
-		Key:     identityBindUserKey(bindTestNewUserID),
 		New:     identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
 		Old:     identityBindEndpoint{GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
 		Created: 1,
@@ -594,7 +1243,7 @@ func TestIdentityBindUnbindRemovesBinding(t *testing.T) {
 	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "已解除绑定") {
 		t.Fatalf("expected an unbind reply, got %q", reply)
 	}
-	if _, ok := identityBindStoreOf(env.d).get(env.d, identityBindUserKey(bindTestNewUserID)); ok {
+	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewUserID); ok {
 		t.Fatal("expected the binding to be removed")
 	}
 }
@@ -671,20 +1320,20 @@ func TestIdentityBindGroupCommandAndUserBindAreIndependent(t *testing.T) {
 	}
 	before = env.recorder.messageCount()
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", groupSession.Questions[0].Answers[0]}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "日志绑定成功") {
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共用同一份日志") {
 		t.Fatalf("expected the group bind to succeed, got %q", reply)
 	}
 
 	// 3) 两条绑定必须同时存在，且键互不覆盖
 	store := identityBindStoreOf(env.d)
-	userRecord, ok := store.get(env.d, identityBindUserKey(bindTestNewUserID))
+	userRecord, ok := store.find(env.d, bindTestNewUserID)
 	if !ok {
 		t.Fatal("user binding disappeared after group bind")
 	}
 	if userRecord.Action != identityBindActionUser || userRecord.Old.UserID != bindTestOldUserID {
 		t.Fatalf("unexpected user binding record: %+v", userRecord)
 	}
-	groupRecord, ok := store.get(env.d, identityBindGroupKey(bindTestNewGroupID))
+	groupRecord, ok := store.find(env.d, bindTestNewGroupID)
 	if !ok {
 		t.Fatal("group binding was not stored")
 	}
@@ -703,7 +1352,6 @@ func TestIdentityBindGroupUnbindKeepsUserBind(t *testing.T) {
 
 	if err := store.put(env.d, &identityBindRecord{
 		Action: identityBindActionUser,
-		Key:    identityBindUserKey(bindTestNewUserID),
 		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
 		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
 	}); err != nil {
@@ -711,7 +1359,6 @@ func TestIdentityBindGroupUnbindKeepsUserBind(t *testing.T) {
 	}
 	if err := store.put(env.d, &identityBindRecord{
 		Action: identityBindActionGroup,
-		Key:    identityBindGroupKey(bindTestNewGroupID),
 		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
 		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID},
 	}); err != nil {
@@ -723,10 +1370,10 @@ func TestIdentityBindGroupUnbindKeepsUserBind(t *testing.T) {
 	if reply := waitGroupMessage(t, env); !strings.Contains(reply, "已解除") {
 		t.Fatalf("expected an unbind reply, got %q", reply)
 	}
-	if _, ok := store.get(env.d, identityBindGroupKey(bindTestNewGroupID)); ok {
+	if _, ok := store.find(env.d, bindTestNewGroupID); ok {
 		t.Fatal("group binding should be gone")
 	}
-	if _, ok := store.get(env.d, identityBindUserKey(bindTestNewUserID)); !ok {
+	if _, ok := store.find(env.d, bindTestNewUserID); !ok {
 		t.Fatal("user binding must survive .group unbind")
 	}
 }
@@ -736,7 +1383,6 @@ func TestIdentityBindGroupStatusShowsBinding(t *testing.T) {
 	defer env.cleanup()
 	if err := identityBindStoreOf(env.d).put(env.d, &identityBindRecord{
 		Action: identityBindActionGroup,
-		Key:    identityBindGroupKey(bindTestNewGroupID),
 		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
 		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID, GroupName: "旧群"},
 	}); err != nil {
@@ -804,7 +1450,7 @@ func TestIdentityBindUserBindWithoutOldGroup(t *testing.T) {
 		t.Fatalf("expected the bind to succeed without an old group id, got %q", reply)
 	}
 
-	record, ok := identityBindStoreOf(env.d).get(env.d, identityBindUserKey(bindTestNewUserID))
+	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewUserID)
 	if !ok {
 		t.Fatal("expected the binding to be stored")
 	}
@@ -964,7 +1610,7 @@ func TestIdentityBindLogAnswerAcceptsAnyRealLogName(t *testing.T) {
 	// 用其中任意一个真实日志名都应该通过
 	before := env.recorder.messageCount()
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "追书人"}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "日志绑定成功") {
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共用同一份日志") {
 		t.Fatalf("expected success with a real log name, got %q", reply)
 	}
 }
@@ -1058,7 +1704,6 @@ func TestIdentityBindStatusesAreSeparated(t *testing.T) {
 
 	if err := store.put(env.d, &identityBindRecord{
 		Action: identityBindActionUser,
-		Key:    identityBindUserKey(bindTestNewUserID),
 		New:    identityBindEndpoint{GroupID: bindTestNewGroupID, UserID: bindTestNewUserID},
 		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID, UserID: bindTestOldUserID},
 	}); err != nil {
@@ -1116,10 +1761,10 @@ func TestIdentityBindLogCommandBindsOnCorrectAnswer(t *testing.T) {
 
 	before := env.recorder.messageCount()
 	runIdentityBindLogCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", answer}})
-	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "日志绑定成功") {
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "共用同一份日志") {
 		t.Fatalf("expected a success reply, got %q", reply)
 	}
-	record, ok := identityBindStoreOf(env.d).get(env.d, identityBindGroupKey(bindTestNewGroupID))
+	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestNewGroupID)
 	if !ok {
 		t.Fatal("expected the log binding to be stored")
 	}

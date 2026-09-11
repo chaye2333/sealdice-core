@@ -2374,7 +2374,7 @@ func (d *Dice) registerCoreCommands() {
 				if tryIndex {
 					index, err := strconv.ParseInt(name, 10, 64)
 					if err == nil && index > 0 {
-						items, _ := am.GetCharacterList(ctx.Player.UserID)
+						items, _ := am.GetCharacterList(identityBindDataUserID(ctx))
 						if index <= int64(len(items)) {
 							item := items[index-1]
 							return item.Name
@@ -2399,7 +2399,9 @@ func (d *Dice) registerCoreCommands() {
 			}
 
 			getBindingId := func() string {
-				id, _ := am.CharGetBindingId(ctx.Group.GroupID, ctx.Player.UserID)
+				// 「当前用的是哪张卡」也是 per-group 玩家数据，绑定后要和另一侧共用同一份，
+				// 否则两边会各自记住不同的卡。
+				id, _ := am.CharGetBindingId(identityBindDataGroupID(ctx), identityBindDataUserID(ctx))
 				return id
 			}
 
@@ -2413,7 +2415,7 @@ func (d *Dice) registerCoreCommands() {
 
 			switch val1 {
 			case "list", "lst":
-				list := lo.Must(am.GetCharacterList(ctx.Player.UserID))
+				list := lo.Must(am.GetCharacterList(identityBindDataUserID(ctx)))
 				bindingId := getBindingId()
 
 				var newChars []string
@@ -2449,9 +2451,9 @@ func (d *Dice) registerCoreCommands() {
 				name := getNicknameRaw(true, false)
 
 				VarSetValueStr(ctx, "$t角色名", name)
-				if !am.CharCheckExists(ctx.Player.UserID, name) {
-					item := lo.Must(am.CharNew(ctx.Player.UserID, name, ctx.Group.System))
-					lo.Must0(am.CharBind(item.Id, ctx.Group.GroupID, ctx.Player.UserID))
+				if !am.CharCheckExists(identityBindDataUserID(ctx), name) {
+					item := lo.Must(am.CharNew(identityBindDataUserID(ctx), name, ctx.Group.System))
+					lo.Must0(am.CharBind(item.Id, identityBindDataGroupID(ctx), identityBindDataUserID(ctx)))
 					setCurPlayerName(name) // 修改当前角色名
 
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "核心:角色管理_新建"))
@@ -2472,12 +2474,12 @@ func (d *Dice) registerCoreCommands() {
 					b = a
 					charId = getBindingId()
 				} else {
-					charId, _ = am.CharIdGetByName(ctx.Player.UserID, a)
+					charId, _ = am.CharIdGetByName(identityBindDataUserID(ctx), a)
 				}
 
 				if a != "" && b != "" {
 					if charId != "" {
-						if !am.CharCheckExists(ctx.Player.UserID, b) {
+						if !am.CharCheckExists(identityBindDataUserID(ctx), b) {
 							attrs := lo.Must(am.LoadById(charId))
 							attrs.Name = b
 							if charId == getBindingId() {
@@ -2502,12 +2504,12 @@ func (d *Dice) registerCoreCommands() {
 				VarSetValueStr(ctx, "$t角色名", name)
 				if name != "" {
 					VarSetValueStr(ctx, "$t角色名", name)
-					charId := lo.Must(am.CharIdGetByName(ctx.Player.UserID, name))
+					charId := lo.Must(am.CharIdGetByName(identityBindDataUserID(ctx), name))
 
 					if charId == "" {
 						ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "核心:角色管理_绑定_失败"))
 					} else {
-						lo.Must0(am.CharBind(charId, ctx.Group.GroupID, ctx.Player.UserID))
+						lo.Must0(am.CharBind(charId, identityBindDataGroupID(ctx), identityBindDataUserID(ctx)))
 						setCurPlayerName(name)
 						ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "核心:角色管理_绑定_成功"))
 					}
@@ -2517,7 +2519,7 @@ func (d *Dice) registerCoreCommands() {
 					if charId == "" {
 						ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "核心:角色管理_绑定_并未绑定"))
 					} else {
-						lo.Must0(am.CharBind("", ctx.Group.GroupID, ctx.Player.UserID))
+						lo.Must0(am.CharBind("", identityBindDataGroupID(ctx), identityBindDataUserID(ctx)))
 						attrs := lo.Must(am.LoadById(charId))
 
 						name := attrs.Name
@@ -2534,8 +2536,8 @@ func (d *Dice) registerCoreCommands() {
 				name := getNicknameRaw(false, true)
 				VarSetValueStr(ctx, "$t角色名", name)
 
-				charId := lo.Must(am.CharIdGetByName(ctx.Player.UserID, name))
-				attrsCur := lo.Must(d.AttrsManager.Load(ctx.Group.GroupID, ctx.Player.UserID))
+				charId := lo.Must(am.CharIdGetByName(identityBindDataUserID(ctx), name))
+				attrsCur := lo.Must(d.AttrsManager.Load(identityBindDataGroupID(ctx), identityBindDataUserID(ctx)))
 
 				if attrsCur == nil {
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "核心:角色管理_角色不存在"))
@@ -2562,9 +2564,9 @@ func (d *Dice) registerCoreCommands() {
 			case "save":
 				name := getNickname()
 
-				if !am.CharCheckExists(ctx.Player.UserID, name) {
-					newItem, _ := am.CharNew(ctx.Player.UserID, name, ctx.Group.System)
-					attrs := lo.Must(am.Load(ctx.Group.GroupID, ctx.Player.UserID))
+				if !am.CharCheckExists(identityBindDataUserID(ctx), name) {
+					newItem, _ := am.CharNew(identityBindDataUserID(ctx), name, ctx.Group.System)
+					attrs := lo.Must(am.Load(identityBindDataGroupID(ctx), identityBindDataUserID(ctx)))
 
 					if newItem != nil {
 						attrsNew, err := am.LoadById(newItem.Id)
@@ -2590,7 +2592,7 @@ func (d *Dice) registerCoreCommands() {
 				} else {
 					VarSetValueStr(ctx, "$t角色名", name)
 
-					charId, _ := am.CharIdGetByName(ctx.Player.UserID, name)
+					charId, _ := am.CharIdGetByName(identityBindDataUserID(ctx), name)
 					if charId == "" {
 						// 可能有点过于谨慎，因为已经判断过了，还是留着吧
 						ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "核心:角色管理_角色不存在"))
@@ -2599,7 +2601,7 @@ func (d *Dice) registerCoreCommands() {
 
 					bindingGroups := am.CharGetBindingGroupIdList(charId)
 					if len(bindingGroups) == 0 {
-						attrs := lo.Must(am.Load(ctx.Group.GroupID, ctx.Player.UserID))
+						attrs := lo.Must(am.Load(identityBindDataGroupID(ctx), identityBindDataUserID(ctx)))
 						attrsExisting := lo.Must(am.LoadById(charId))
 
 						attrsExisting.Clear()
@@ -2622,7 +2624,7 @@ func (d *Dice) registerCoreCommands() {
 				if name == "" {
 					charId = getBindingId()
 				} else {
-					charId, _ = am.CharIdGetByName(ctx.Player.UserID, name)
+					charId, _ = am.CharIdGetByName(identityBindDataUserID(ctx), name)
 				}
 
 				var lst []string
@@ -2631,7 +2633,8 @@ func (d *Dice) registerCoreCommands() {
 				}
 
 				for _, i := range lst {
-					if i == ctx.Group.GroupID {
+					// 卡片的绑定关系是按「数据层群 ID」记录的，所以这里要用归一后的群 ID 比对。
+					if i == identityBindDataGroupID(ctx) {
 						ctx.Player.Name = msg.Sender.Nickname
 						ctx.Player.UpdatedAtTime = time.Now().Unix()
 						if ctx.Group != nil {
@@ -2639,8 +2642,8 @@ func (d *Dice) registerCoreCommands() {
 						}
 
 						// TODO: 其他群的设置sn的怎么办？先不管了。。
-						if ctx.Player.AutoSetNameTemplate != "" {
-							_, _ = SetPlayerGroupCardByTemplate(ctx, ctx.Player.AutoSetNameTemplate)
+						if tmpl := identityBindPlayerNameTemplate(ctx); tmpl != "" {
+							_, _ = SetPlayerGroupCardByTemplate(ctx, tmpl)
 						}
 					}
 				}
@@ -2658,7 +2661,7 @@ func (d *Dice) registerCoreCommands() {
 				}
 				VarSetValueStr(ctx, "$t角色名", name)
 
-				charId, _ := am.CharIdGetByName(ctx.Player.UserID, name)
+				charId, _ := am.CharIdGetByName(identityBindDataUserID(ctx), name)
 				if charId == "" {
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "核心:角色管理_角色不存在"))
 					return CmdExecuteResult{Matched: true, Solved: true}

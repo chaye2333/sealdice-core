@@ -31,18 +31,17 @@ func (am *AttrsManager) Stop() {
 	am.wg.Wait()
 }
 
-// LoadByCtx 获取当前角色，如有绑定，则获取绑定的角色，若无绑定，获取群内默认卡
+// LoadByCtx 获取当前角色。
+//
+// 做过身份绑定时（QQ 官方身份 ↔ 迁移前的旧 QQ 号），这里返回**归一身份**的角色卡，
+// 因此两侧 bot 读写的是同一张卡：官方 bot 改属性，民间 bot 立刻能看到，反之亦然。
+// 没有绑定时行为与改动前完全一致。
 func (am *AttrsManager) LoadByCtx(ctx *MsgContext) (*AttributesItem, error) {
 	// 如果是兼容性测试环境，跳过绑定查询以避免不必要的数据库操作
 	if ctx.IsCompatibilityTest {
 		return am.LoadByIdDirect(ctx.Group.GroupID, ctx.Player.UserID)
 	}
-	// QQ 官方机器人做过身份绑定时，读取旧身份在旧群里的角色卡。
-	// 这里只影响「读取」，写入仍然落在当前真实身份上。
-	if groupID, userID, bound := identityBindAttrTarget(ctx); bound {
-		return am.Load(groupID, userID)
-	}
-	return am.Load(ctx.Group.GroupID, ctx.Player.UserID)
+	return am.Load(identityBindDataGroupID(ctx), identityBindDataUserID(ctx))
 }
 
 func (am *AttrsManager) Load(groupId string, userId string) (*AttributesItem, error) {

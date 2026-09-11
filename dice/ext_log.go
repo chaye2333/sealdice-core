@@ -214,6 +214,18 @@ func RegisterBuiltinExtLog(self *Dice) {
 		Help:      "日志指令:\n" + helpLog,
 		Solve: func(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
 			group := ctx.Group
+			// stateGroup 是「日志状态存在哪个群对象上」。
+			//
+			// 做了群绑定之后，官方群和旧群必须共用同一份日志状态（开没开、叫什么名字、
+			// logID 是多少），否则两边会各自开一份日志、互相看不到。
+			// 这里把状态统一挂在归一后的群上，读写天然同步。
+			//
+			// 注意不能把 group 整个换掉：group.IsActive / MarkDirty 属于「当前群自己」的
+			// 状态，换掉会让 .bot on 检测错群。
+			stateGroup := group
+			if readGroup, bound := identityBindReadGroup(ctx); bound && readGroup != nil {
+				stateGroup = readGroup
+			}
 			cmdArgs.ChopPrefixToArgsWith("on", "off", "del", "rm", "masterget",
 				"get", "end", "halt", "list", "new", "stat", "export", "bind", "unbind", "bindstatus")
 
@@ -227,7 +239,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 
 			if len(cmdArgs.Args) == 0 {
 				onText := "关闭"
-				state := getGroupLogState(group)
+				state := getGroupLogState(stateGroup)
 				if state.On {
 					onText = "开启"
 				}
@@ -310,7 +322,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 
 				// 如果日志已经开启，报错返回
-				currentState := getGroupLogState(group)
+				currentState := getGroupLogState(stateGroup)
 				if currentState.On {
 					VarSetValueStr(ctx, "$t记录名称", currentState.Name)
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_开启_失败_未结束的记录"))
@@ -343,7 +355,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 							ctx.Dice.Logger.Errorf("日志开启失败: group=%s name=%s err=%v", group.GroupID, name, err)
 							return CmdExecuteResult{Matched: true, Solved: true}
 						}
-						group.SetLogState(logID, name, true)
+						stateGroup.SetLogState(logID, name, true)
 						group.MarkDirty(ctx.Dice)
 						ctx.Dice.Logger.Infof("日志状态切换: 群=%s 开启日志 name=%s id=%d", group.GroupID, name, logID)
 
@@ -359,7 +371,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 				return CmdExecuteResult{Matched: true, Solved: true}
 			} else if cmdArgs.IsArgEqual(1, "off") {
-				state := getGroupLogState(group)
+				state := getGroupLogState(stateGroup)
 				if state.Name != "" && state.On {
 					group.SetLogOn(false)
 					group.MarkDirty(ctx.Dice)
@@ -432,7 +444,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				getAndUpload(identityBindLogReadGroupID(ctx, group.GroupID), logName)
 				return CmdExecuteResult{Matched: true, Solved: true}
 			} else if cmdArgs.IsArgEqual(1, "end") {
-				state := getGroupLogState(group)
+				state := getGroupLogState(stateGroup)
 				if state.Name == "" {
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_关闭_失败"))
 					return CmdExecuteResult{Matched: true, Solved: true}
@@ -459,7 +471,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				group.MarkDirty(ctx.Dice)
 				return CmdExecuteResult{Matched: true, Solved: true}
 			} else if cmdArgs.IsArgEqual(1, "halt") {
-				state := getGroupLogState(group)
+				state := getGroupLogState(stateGroup)
 				if len(state.Name) > 0 {
 					lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, state.Name)
 					VarSetValueInt64(ctx, "$t当前记录条数", lines)
@@ -507,7 +519,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 
 				name := cmdArgs.GetArgN(2)
-				currentState := getGroupLogState(group)
+				currentState := getGroupLogState(stateGroup)
 				if currentState.Name != "" && name == "" {
 					VarSetValueStr(ctx, "$t记录名称", currentState.Name)
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_新建_失败_未结束的记录"))
@@ -533,7 +545,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					ctx.Dice.Logger.Errorf("日志新建失败: group=%s name=%s err=%v", group.GroupID, name, err)
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
-				group.SetLogState(logID, name, true)
+				stateGroup.SetLogState(logID, name, true)
 				group.MarkDirty(ctx.Dice)
 				ctx.Dice.Logger.Infof("日志状态切换: 群=%s 新建并开启日志 name=%s id=%d", group.GroupID, name, logID)
 
@@ -836,6 +848,12 @@ func RegisterBuiltinExtLog(self *Dice) {
 			val := cmdArgs.GetArgN(1)
 			valLower := strings.ToLower(val)
 
+			// currentSnTemplate 是「当前实际生效」的模板：自己设过就用自己那份，
+			// 没设过则回退到绑定另一侧（例如官方号沿用旧 QQ 号设好的名片格式）。
+			// 注意这里只用于**读取**；写入仍然落在 ctx.Player 上，避免官方侧的
+			// .sn 去改动旧群的群名片。
+			currentSnTemplate := identityBindPlayerNameTemplate(ctx)
+
 			handleOverlong := func(ctx *MsgContext, msg *Message, card string) CmdExecuteResult {
 				ReplyToSender(ctx, msg, fmt.Sprintf(
 					"尝试将群名片修改为 %q 失败，名片长度超过限制。\n请尝试缩短角色名或使用 .sn expr 自定义名片格式。",
@@ -920,7 +938,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					}
 					ReplyToSender(ctx, msg, "玩家自设内容为空，已自动关闭此功能")
 				} else {
-					last := ctx.Player.AutoSetNameTemplate
+					last := currentSnTemplate
 					ctx.Player.AutoSetNameTemplate = t
 					text, err := SetPlayerGroupCardByTemplate(ctx, ctx.Player.AutoSetNameTemplate)
 					if err != nil && !errors.Is(err, ErrGroupCardOverlong) {
@@ -1028,7 +1046,10 @@ func RegisterBuiltinExtLog(self *Dice) {
 
 			if IsCurGroupBotOnByID(ctx.Session, ctx.EndPoint, msg.MessageType, msg.GroupID) {
 				session := ctx.Session
-				groupInfo, ok := session.ServiceAtNew.Load(msg.GroupID)
+				// 玩家发言（OnMessageReceived）已经写到归一后的群了，骰子自己的发言
+				// 也必须写同一个群，否则日志会裂成「玩家一条、骰子一条」两份文件。
+				groupID := identityBindLogWriteGroupID(ctx, msg.GroupID)
+				groupInfo, ok := session.ServiceAtNew.Load(groupID)
 				if !ok {
 					ctx.Dice.Logger.Warn("ServiceAtNew ext_log加载groupInfo异常")
 					return
@@ -1059,7 +1080,15 @@ func RegisterBuiltinExtLog(self *Dice) {
 		OnMessageReceived: func(ctx *MsgContext, msg *Message) {
 			// 处理日志
 			if ctx.Group != nil {
-				logState := ensureGroupLogState(ctx, ctx.Group)
+				// 群绑定之后，官方群和旧群共用同一份日志状态与日志记录。
+				// 状态挂在归一后的群对象上，记录也写进归一后的群，
+				// 这样「一边 .log on，另一边立刻跟着记」。
+				groupID := identityBindLogWriteGroupID(ctx, ctx.Group.GroupID)
+				logGroup := ctx.Group
+				if stateGroup, bound := identityBindReadGroup(ctx); bound && stateGroup != nil {
+					logGroup = stateGroup
+				}
+				logState := ensureGroupLogState(ctx, logGroup)
 				if logState.On && logState.Name != "" {
 					// 去重，用于同群多骰情况
 					if !groupMsgInfoCheckOk(msg.RawID) {
@@ -1079,25 +1108,36 @@ func RegisterBuiltinExtLog(self *Dice) {
 						RawMsgID:  msg.RawID,
 					}
 
-					LogAppend(ctx, ctx.Group.GroupID, logState.ID, logState.Name, &a)
+					LogAppend(ctx, groupID, logState.ID, logState.Name, &a)
 				}
 			}
 		},
 		OnMessageDeleted: func(ctx *MsgContext, msg *Message) {
-			if ctx.Group != nil {
-				if getGroupLogOn(ctx.Group) {
-					LogDeleteByID(ctx, ctx.Group.GroupID, msg.RawID)
-					// ctx.Session.Parent.Logger.Infof("删除日志 %s %s", ctx.Group.GroupId, msg.RawId.(string))
-				}
+			if ctx.Group == nil {
+				return
+			}
+			// 日志状态挂在归一后的群对象上，所以开关判断也必须用那个对象，
+			// 否则官方群里删消息时会被当成「没开日志」而漏删。
+			logGroup := ctx.Group
+			if stateGroup, bound := identityBindReadGroup(ctx); bound && stateGroup != nil {
+				logGroup = stateGroup
+			}
+			if getGroupLogOn(logGroup) {
+				// 日志条目是按归一后的群存的，删除也必须用同一个群 ID 才找得到。
+				LogDeleteByID(ctx, identityBindLogWriteGroupID(ctx, ctx.Group.GroupID), msg.RawID)
+				// ctx.Session.Parent.Logger.Infof("删除日志 %s %s", ctx.Group.GroupId, msg.RawId.(string))
 			}
 		},
 		OnMessageEdit: func(ctx *MsgContext, msg *Message) {
 			if ctx.Group == nil {
 				return
 			}
-
-			if getGroupLogOn(ctx.Group) {
-				LogEditByID(ctx, ctx.Group.GroupID, msg.Message, msg.RawID)
+			logGroup := ctx.Group
+			if stateGroup, bound := identityBindReadGroup(ctx); bound && stateGroup != nil {
+				logGroup = stateGroup
+			}
+			if getGroupLogOn(logGroup) {
+				LogEditByID(ctx, identityBindLogWriteGroupID(ctx, ctx.Group.GroupID), msg.Message, msg.RawID)
 			}
 		},
 		GetDescText: GetExtensionDesc,

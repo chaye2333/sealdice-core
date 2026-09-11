@@ -345,7 +345,37 @@ func GetPlayerInfoBySenderRaw(ctx *MsgContext, msg *MessageWrapper) (*GroupInfo,
 		p.ValueMapTemp = &ds.ValueMap{}
 	}
 	p.InGroup = true
+	identityBindFillDataIDs(ctx, groupInfo, msg.Sender.UserID)
 	return groupInfo, p
+}
+
+// identityBindFillDataIDs 填充 MsgContext 里的「数据层身份」。
+//
+// 放在这里是因为所有平台的所有消息最终都会经过 GetPlayerInfoBySender /
+// GetPlayerInfoBySenderRaw，这是全项目唯一的身份入口，不需要改 9 个平台适配器。
+// 没有绑定时 Data*ID 就等于真实 ID，行为与改动前完全一致。
+func identityBindFillDataIDs(ctx *MsgContext, groupInfo *GroupInfo, userID string) {
+	if ctx == nil {
+		return
+	}
+	ctx.DataUserID = userID
+	ctx.DataGroupID = ""
+	if groupInfo != nil {
+		ctx.DataGroupID = groupInfo.GroupID
+	}
+	if ctx.Dice == nil {
+		return
+	}
+	if userID != "" {
+		if canonical := identityCanonicalUserID(ctx.Dice, userID); canonical != "" {
+			ctx.DataUserID = canonical
+		}
+	}
+	if groupInfo != nil {
+		if canonical := identityCanonicalGroupID(ctx.Dice, groupInfo.GroupID); canonical != "" {
+			ctx.DataGroupID = canonical
+		}
+	}
 }
 
 type MessageWrapper struct {

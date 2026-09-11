@@ -2597,6 +2597,12 @@ func formatDiceIDOfficialQQChannel(guildID, channelID string) string {
 
 const officialQQUserIDPrefix = "OpenQQ:"
 
+// officialQQGroupIDPrefix 官方 QQ 群 ID 前缀。
+// 群 ID 形如 "OpenQQ-Group:<UIN>-<GroupOpenID>"，注意它并不是
+// officialQQUserIDPrefix + "Group:"（那是 "OpenQQ:Group:"）而是 "OpenQQ-Group:"，
+// 所以必须单独定义，不能靠拼接推导。
+const officialQQGroupIDPrefix = "OpenQQ-Group:"
+
 func formatDiceIDOfficialQQ(uin string) string {
 	return fmt.Sprintf("%s%s", officialQQUserIDPrefix, uin)
 }
