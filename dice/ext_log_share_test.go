@@ -329,6 +329,103 @@ func TestLogBoundGetUsesSharedStateName(t *testing.T) {
 	}
 }
 
+// TestLogBoundListShowsOnlyCanonicalGroup 记录一个**有代价的行为**：
+// 两边各自都有日志时，绑群之后只看得到归一后（旧群）那一份，
+// 官方群原来自己的日志列表会被"藏起来"。
+//
+// 注意：藏起来 ≠ 删掉。官方群的那些 logs/log_items 行原封不动留在库里，
+// 解绑或回退到官方主线后就又能看到。
+func TestLogBoundListShowsOnlyCanonicalGroup(t *testing.T) {
+	// 注意顺序：必须**先让两边各自有日志**，再建立群绑定。
+	// （绑群时会清掉真实群上的残留日志状态，之后再 .log new 会把状态写到归一后的群去。）
+	env := logShareEnvWithoutBinding(t)
+	defer env.cleanup()
+
+	oldEP := &EndPointInfo{
+		EndPointInfoBase: EndPointInfoBase{
+			ID: "ep-onebot", Platform: "QQ", ProtocolType: "onebot",
+			UserID: "QQ:900000", Nickname: "OldBot", Enable: true,
+		},
+		Adapter: &recordingAdapter{},
+	}
+	oldEP.Session = env.d.ImSession
+	env.d.ImSession.EndPoints = append(env.d.ImSession.EndPoints, oldEP)
+	oldCtx, _ := newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
+	groupForTest(t, env, bindTestOldGroupID).Active = true
+
+	// ① 官方群自己的日志（含一条真实文本）
+	officialCtx, _ := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
+	groupForTest(t, env, bindTestNewGroupID).Active = true
+	runLog(t, env, officialCtx, "new", "官方群自己的记录")
+	officialState := getGroupLogState(groupForTest(t, env, bindTestNewGroupID))
+	if officialState.ID == 0 {
+		t.Fatalf("official .log new failed: %+v", officialState)
+	}
+	if ok := LogAppend(&MsgContext{Dice: env.d}, bindTestNewGroupID, officialState.ID, officialState.Name,
+		&model.LogOneItem{Nickname: "tester", IMUserID: "user", Message: "官方群的话"}); !ok {
+		t.Fatal("LogAppend on the official group failed")
+	}
+
+	// ② 旧群自己的日志（含一条真实文本）
+	runLog(t, env, oldCtx, "new", "旧群记录")
+	oldState := getGroupLogState(groupForTest(t, env, bindTestOldGroupID))
+	if oldState.ID == 0 {
+		t.Fatalf("civilian .log new failed: %+v", oldState)
+	}
+	if ok := LogAppend(&MsgContext{Dice: env.d}, bindTestOldGroupID, oldState.ID, oldState.Name,
+		&model.LogOneItem{Nickname: "tester", IMUserID: "user", Message: "旧群的话"}); !ok {
+		t.Fatal("LogAppend on the old group failed")
+	}
+
+	// ③ 现在才建立群绑定
+	bindGroupForTest(t, env)
+	identityBindResetRealGroupLogState(officialCtx, groupForTest(t, env, bindTestNewGroupID))
+
+	// 读取改道到旧群
+	resolved := identityBindLogReadGroupID(officialCtx, bindTestNewGroupID)
+	if resolved != bindTestOldGroupID {
+		t.Fatalf("read group = %q, want the old group", resolved)
+	}
+
+	// `.log list` 只会列归一后那一份：官方群自己的记录名不在里面
+	// （`service.LogGetList` 就是"这个群有哪些日志"的权威来源）
+	listed, errList := service.LogGetList(env.d.DBOperator, resolved)
+	if errList != nil {
+		t.Fatalf("LogGetList: %v", errList)
+	}
+	names := map[string]bool{}
+	for _, n := range listed {
+		names[n] = true
+	}
+	if !names["旧群记录"] {
+		t.Fatalf("the shared list should contain the old group's log, got %v", names)
+	}
+	if names["官方群自己的记录"] {
+		t.Fatalf("KNOWN COST: the official group's own log is hidden after binding, but it leaked into the list: %v", names)
+	}
+	// 反向确认：官方群自己的日志行确实还挂在官方群名下（所以它只是被藏起来）
+	if own, errOwn := service.LogGetList(env.d.DBOperator, bindTestNewGroupID); errOwn != nil {
+		t.Fatalf("LogGetList(official): %v", errOwn)
+	} else if len(own) != 1 || own[0] != "官方群自己的记录" {
+		t.Fatalf("the official group should still own its own log, got %v", own)
+	}
+
+	// 但数据没被删：两边各自的 logs 行都还在
+	if rows := logInfoRowsFor(t, env, "官方群自己的记录"); len(rows) != 1 || rows[0].GroupID != bindTestNewGroupID {
+		t.Fatalf("the official group's log row must be preserved untouched, got %+v", rows)
+	}
+	if rows := logInfoRowsFor(t, env, "旧群记录"); len(rows) != 1 || rows[0].GroupID != bindTestOldGroupID {
+		t.Fatalf("the old group's log row must be intact, got %+v", rows)
+	}
+	// 两边的文本也都在
+	if lines, ok := service.LogLinesCountGet(env.d.DBOperator, bindTestNewGroupID, "官方群自己的记录"); !ok || lines != 1 {
+		t.Fatalf("official group's text lost: count=%d ok=%v", lines, ok)
+	}
+	if lines, ok := service.LogLinesCountGet(env.d.DBOperator, bindTestOldGroupID, "旧群记录"); !ok || lines != 1 {
+		t.Fatalf("old group's text lost: count=%d ok=%v", lines, ok)
+	}
+}
+
 // logInfoRowsFor 按名字取 logs 表的行，用于检查 group_id 有没有写错。
 func logInfoRowsFor(t *testing.T, env *bindTestEnv, name string) []model.LogInfo {
 	t.Helper()
