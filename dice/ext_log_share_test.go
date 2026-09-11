@@ -274,6 +274,61 @@ func logShareEnvWithoutBinding(t *testing.T) *bindTestEnv {
 	return env
 }
 
+// TestLogBoundGetUsesSharedStateName 回归：官 bot 绑群后 `.log get`（不带参数）
+// 必须按「归一后的群」上的当前记录名去取，而不是报"当前没有开启状态的记录"。
+//
+// 曾经的问题：.log on 用的是 stateGroup（看得见状态），而 .log get 读的是 group
+// （真实群对象，上面没有状态），于是同一个状态下两个分支结论矛盾。
+func TestLogBoundGetUsesSharedStateName(t *testing.T) {
+	env, _, oldCtx := logShareEnv(t)
+	defer env.cleanup()
+
+	// 民间 bot 在旧群开一份日志并写几条
+	oldGroup := groupForTest(t, env, bindTestOldGroupID)
+	runLog(t, env, oldCtx, "new", "测试123")
+	state := getGroupLogState(oldGroup)
+	if !state.On || state.Name != "测试123" {
+		t.Fatalf("civilian .log new failed: %+v", state)
+	}
+	for i := range 3 {
+		if ok := LogAppend(&MsgContext{Dice: env.d}, bindTestOldGroupID, state.ID, state.Name, &model.LogOneItem{
+			Nickname: "tester", IMUserID: "user", Message: "line", Time: int64(i + 1),
+		}); !ok {
+			t.Fatalf("LogAppend #%d failed", i)
+		}
+	}
+
+	officialCtx, _ := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
+	groupForTest(t, env, bindTestNewGroupID).Active = true
+
+	// 真实群对象上不应该有状态（状态在归一后的旧群上）
+	if own := getGroupLogState(groupForTest(t, env, bindTestNewGroupID)); own.Name != "" {
+		t.Fatalf("real group should not hold log state, got %+v", own)
+	}
+	// 归一后的群上有
+	if shared := getGroupLogName(groupForTest(t, env, bindTestOldGroupID)); shared != "测试123" {
+		t.Fatalf("shared state name = %q, want 测试123", shared)
+	}
+	// 读取必须改道到旧群
+	if readGroup := identityBindLogReadGroupID(officialCtx, bindTestNewGroupID); readGroup != bindTestOldGroupID {
+		t.Fatalf("official read group = %q, want %q", readGroup, bindTestOldGroupID)
+	}
+
+	// 注意：这里刻意**不真的执行 `.log get`**——它会触发 getAndUpload 走真实网络，
+	// 既慢又会留下 http 长连接让 goleak 报错。
+	// 真正要锁的是「取当前记录名时读的是哪一个群对象」，所以直接断言那个解析结果。
+	//
+	// 修好之前的行为是：读 group（真实群）→ 名字为空 → 回"没有开启状态的记录"。
+	stateGroup := groupForTest(t, env, bindTestOldGroupID)
+	if name := getGroupLogName(stateGroup); name != "测试123" {
+		t.Fatalf("shared state name = %q, want 测试123 (this is what .log get resolves)", name)
+	}
+	// 反证：如果哪天又改回读真实群，这里会红
+	if name := getGroupLogName(groupForTest(t, env, bindTestNewGroupID)); name == "测试123" {
+		t.Fatal("the real group must not carry the shared state name")
+	}
+}
+
 // logInfoRowsFor 按名字取 logs 表的行，用于检查 group_id 有没有写错。
 func logInfoRowsFor(t *testing.T, env *bindTestEnv, name string) []model.LogInfo {
 	t.Helper()

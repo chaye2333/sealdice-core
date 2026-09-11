@@ -474,7 +474,9 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 
 				VarSetValueStr(ctx, "$t记录名称", name)
-				if name == getGroupLogName(group) {
+				// 「正在进行的记录」也要按归一后的群判断，否则群绑定之后
+				// 会把正在记录的那一份当成普通记录删掉。
+				if name == getGroupLogName(stateGroup) {
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_删除_失败_正在进行"))
 				} else {
 					err := service.LogDelete(ctx.Dice.DBOperator, group.GroupID, name)
@@ -508,7 +510,9 @@ func RegisterBuiltinExtLog(self *Dice) {
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
 
-				logName := getGroupLogName(group)
+				// 当前记录名要从**归一后的群**上读：群绑定之后状态挂在旧群，
+				// 真实群对象上是空的，读 group 会误判成"没有开启状态的记录"。
+				logName := getGroupLogName(stateGroup)
 				if newName := cmdArgs.GetArgN(2); newName != "" {
 					logName = newName
 				}
@@ -688,7 +692,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
 
-				logName := getGroupLogName(group)
+				logName := getGroupLogName(stateGroup)
 				if newName := cmdArgs.GetArgN(2); newName != "" {
 					logName = newName
 				}
