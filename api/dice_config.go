@@ -513,6 +513,16 @@ func DiceConfigSet(c echo.Context) error {
 			}
 		}
 	}
+	if val, ok := jsonMap["logMultiBotDedupWindowSec"]; ok {
+		switch v := val.(type) {
+		case float64:
+			config.LogMultiBotDedupWindowSec = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				config.LogMultiBotDedupWindowSec = parsed
+			}
+		}
+	}
 	config.FixIdentityBindConfig()
 
 	if val, ok := jsonMap["playerNameWrapEnable"]; ok {

@@ -702,6 +702,119 @@ func TestIdentityBindDoctorFlagsCorruptRecord(t *testing.T) {
 	}
 }
 
+// TestLogDedupWindowClamps 同群多 bot 的日志去重窗口必须可配置且被收敛到合法范围。
+func TestLogDedupWindowClamps(t *testing.T) {
+	cases := []struct {
+		name string
+		d    *Dice
+		want int64
+	}{
+		{"nil dice falls back to default", nil, logDedupDefaultWindowSec},
+		{"zero falls back to default", &Dice{}, logDedupDefaultWindowSec},
+		{"explicit value is honoured", &Dice{Config: Config{BaseConfig: BaseConfig{LogMultiBotDedupWindowSec: 30}}}, 30},
+		{"absurd value is clamped", &Dice{Config: Config{BaseConfig: BaseConfig{LogMultiBotDedupWindowSec: 999999}}}, logDedupWindowMaxSec},
+	}
+	for _, c := range cases {
+		if got := logDedupWindowSec(c.d); got != c.want {
+			t.Fatalf("%s: logDedupWindowSec = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestLogCrossBotDedupIsOptIn 关键的安全性断言：
+// 默认配置下「跨连接去重」必须是关闭的，行为与上游完全一致，
+// 否则同一个人在 5 秒内发的两条相同消息会被并成一条永久日志。
+func TestLogCrossBotDedupIsOptIn(t *testing.T) {
+	if DefaultConfig.LogMultiBotDedupWindowSec != logDedupDefaultWindowSec {
+		t.Fatalf("default window = %d, want %d (= upstream behaviour)",
+			DefaultConfig.LogMultiBotDedupWindowSec, logDedupDefaultWindowSec)
+	}
+	if logCrossBotDedupEnabled(nil) {
+		t.Fatal("cross-bot dedup must be OFF when there is no config")
+	}
+	if logCrossBotDedupEnabled(&Dice{}) {
+		t.Fatal("cross-bot dedup must be OFF with an empty config")
+	}
+	if logCrossBotDedupEnabled(&Dice{Config: Config{BaseConfig: BaseConfig{LogMultiBotDedupWindowSec: 5}}}) {
+		t.Fatal("cross-bot dedup must be OFF at the default window")
+	}
+	// 显式调大后才启用
+	if !logCrossBotDedupEnabled(&Dice{Config: Config{BaseConfig: BaseConfig{LogMultiBotDedupWindowSec: 30}}}) {
+		t.Fatal("cross-bot dedup should turn ON once the window is raised")
+	}
+}
+
+// TestIdentityBindSnWriteDoesNotTouchOtherSide
+// 方案 A 的写入隔离：官方侧写自己的 .sn，不能改到旧群那一份。
+func TestIdentityBindSnWriteDoesNotTouchOtherSide(t *testing.T) {
+	env, officialCtx, oldCtx := logShareTestEnv(t)
+	defer env.cleanup()
+
+	// 旧群原本设有模板
+	oldCtx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{生命值}"
+
+	// 官方侧改成别的（模拟 .sn coc）
+	officialCtx.Player.AutoSetNameTemplate = "{$t玩家_RAW} SAN{理智}"
+
+	// 旧群那份必须原封不动
+	if got := strings.TrimSpace(oldCtx.Player.AutoSetNameTemplate); got != "{$t玩家_RAW} HP{生命值}" {
+		t.Fatalf("old side template was modified by the official side: %q", got)
+	}
+	// 官方侧生效的是自己那份（自己设过就以自己为准）
+	if got := identityBindPlayerNameTemplate(officialCtx); got != "{$t玩家_RAW} SAN{理智}" {
+		t.Fatalf("official side effective template = %q", got)
+	}
+	// 旧群侧生效的还是旧群那份
+	if got := identityBindPlayerNameTemplate(oldCtx); got != "{$t玩家_RAW} HP{生命值}" {
+		t.Fatalf("old side effective template = %q", got)
+	}
+}
+
+// TestIdentityBindLogOffTogglesSharedState 官方群执行 .log off，必须关掉归一后的那份状态。
+//
+// 这是实现上的一个坑：状态挂在 GroupInfo 上，如果只把「读状态」改成读归一后的群，
+// 却仍然在真实群对象上 SetLogOn/ClearLogState，就会出现「关不掉」——
+// 官方群 .log off 之后旧群那边日志还在记。
+func TestIdentityBindLogOffTogglesSharedState(t *testing.T) {
+	env, officialCtx, _ := logShareTestEnv(t)
+	defer env.cleanup()
+
+	oldGroup := groupForTest(t, env, bindTestOldGroupID)
+	newGroup := groupForTest(t, env, bindTestNewGroupID)
+
+	// 旧群上开着日志
+	logID, err := service.LogGetOrCreate(env.d.DBOperator, bindTestOldGroupID, "跑团记录")
+	if err != nil {
+		t.Fatalf("LogGetOrCreate: %v", err)
+	}
+	oldGroup.SetLogState(logID, "跑团记录", true)
+
+	// 取已注册的 log 扩展（Dice.Init 时已经注册过，不能再注册一次）
+	ext := env.d.ExtFind("log", false)
+	if ext == nil {
+		t.Fatal("log extension is not registered")
+	}
+	logCmd, ok := ext.CmdMap["log"]
+	if !ok || logCmd == nil {
+		t.Fatal(".log command is not registered")
+	}
+
+	// 通过官方群的上下文执行 .log off。
+	// 注意 RawArgs 必须一起给：ChopPrefixToArgsWith 会用它切片，缺了会 panic。
+	logCmd.Solve(officialCtx,
+		&Message{MessageType: "group", GroupID: bindTestNewGroupID},
+		&CmdArgs{Args: []string{"off"}, RawArgs: "off"})
+
+	// 归一后的那份状态必须被关掉
+	if state := getGroupLogState(oldGroup); state.On {
+		t.Fatalf("official .log off did not turn off the shared state: %+v", state)
+	}
+	// 官方群自己的对象本来就不持有状态，不该被写上
+	if own := getGroupLogState(newGroup); own.On || own.Name != "" {
+		t.Fatalf("official group object must stay stateless, got %+v", own)
+	}
+}
+
 // ---------- 纯函数测试 ----------
 
 func TestIdentityBindNormalizeOldIDs(t *testing.T) {

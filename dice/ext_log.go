@@ -27,6 +27,38 @@ import (
 
 var ErrGroupCardOverlong = errors.New("群名片长度超过限制")
 
+// logDedupWindowMaxSec 「同一条消息只记一次」的最大窗口，防止误填一个巨大的值。
+const logDedupWindowMaxSec = 600
+
+// logDedupDefaultWindowSec 默认窗口，与上游原实现保持一致（5 秒）。
+const logDedupDefaultWindowSec = 5
+
+// logExtDice 由 ext_log 注册时赋值，供闭包读取配置（RegisterExtension 的回调签名里没有 Dice）。
+var logExtDice *Dice
+
+// logDedupWindowSec 取「同一条消息只记一次」的窗口秒数，并收敛到合法范围。
+func logDedupWindowSec(d *Dice) int64 {
+	sec := int64(0)
+	if d != nil {
+		sec = d.Config.LogMultiBotDedupWindowSec
+	}
+	if sec <= 0 {
+		sec = logDedupDefaultWindowSec
+	}
+	if sec > logDedupWindowMaxSec {
+		sec = logDedupWindowMaxSec
+	}
+	return sec
+}
+
+// logCrossBotDedupEnabled 是否启用「跨连接去重」。
+//
+// 只有窗口被显式调大（> 5 秒）才启用，也就是使用者明确表示
+// 「同一个群里我会同时挂多个 bot」。默认关闭，行为与上游一致。
+func logCrossBotDedupEnabled(d *Dice) bool {
+	return logDedupWindowSec(d) > logDedupDefaultWindowSec
+}
+
 func getGroupLogState(group *GroupInfo) GroupLogState {
 	if group == nil {
 		return GroupLogState{}
@@ -133,22 +165,37 @@ func RegisterBuiltinExtLog(self *Dice) {
 		privateCommandListenMu.Unlock()
 	}
 
-	// 避免群信息重复记录
+	// 避免群信息重复记录。
+	//
+	// 【默认行为 = 上游原样】窗口 5 秒、按 msg.RawID 去重。这是最保守的做法：
+	// 只挡「同一个连接把同一条消息重复推送」，不会误伤任何真实发言。
+	//
+	// 只有当你把 logMultiBotDedupWindowSec 显式调大（> 5）时，才切换成
+	// 「跨连接去重」模式：窗口按配置放宽，并且改用「群+人+正文」作为判定键。
+	// 原因：同一个群里同时挂官方 bot 和民间 bot 时，同一条玩家消息会被两个连接
+	// 各收一次，而各自的 msg.RawID 完全不同，按 RawID 根本挡不住。
+	//
+	// ⚠️ 跨连接模式的代价：同一个人在窗口内发的两条**内容完全相同**的消息会被并成一条
+	// （例如连打两个「1」）。日志是永久记录，所以这个模式必须由使用者主动开启。
+	// 一般人不会同时开两个 bot，那就保持默认，什么都不用管。
 	groupMsgInfo := SyncMap[any, int64]{}
 	groupMsgInfoLastClean := int64(0)
+	groupMsgInfoWindow := func() int64 {
+		return logDedupWindowSec(logExtDice)
+	}
 	groupMsgInfoClean := func() {
 		// 清理过久的消息
 		now := time.Now().Unix()
-
-		if now-groupMsgInfoLastClean < 60 {
-			// 60s清理一次
+		window := groupMsgInfoWindow()
+		if now-groupMsgInfoLastClean < window {
+			// 一个窗口清理一次即可
 			return
 		}
 
 		groupMsgInfoLastClean = now
 		var toDelete []any
 		groupMsgInfo.Range(func(key any, t int64) bool {
-			if now-t > 5 { // 5秒内如果有此消息，那么不记录
+			if now-t > window {
 				toDelete = append(toDelete, key)
 			}
 			return true
@@ -168,7 +215,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 		t, exists := groupMsgInfo.Load(_k)
 		if exists {
 			now := time.Now().Unix()
-			return now-t > 5 // 5秒内如果有此消息，那么不记录
+			return now-t > groupMsgInfoWindow()
 		}
 		return true
 	}
@@ -177,6 +224,35 @@ func RegisterBuiltinExtLog(self *Dice) {
 		if _k != nil {
 			groupMsgInfo.Store(_k, time.Now().Unix())
 		}
+	}
+
+	// logDedupKey 生成「同一条消息」的判定键。
+	//
+	// 默认（窗口为 5 秒）直接用 msg.RawID，与上游行为一致：
+	// 只去重同一连接内的重复推送，绝不合并真实发言。
+	// 只有显式调大窗口后才换成「群+人+正文」，用来跨连接去重。
+	logDedupKey := func(ctx *MsgContext, msg *Message) any {
+		if msg == nil {
+			return nil
+		}
+		if !logCrossBotDedupEnabled(logExtDice) {
+			// 保守路径：RawID 为空时退回内容键，否则一条都记不上。
+			if msg.RawID != nil {
+				return msg.RawID
+			}
+		}
+		groupID := msg.GroupID
+		userID := msg.Sender.UserID
+		if ctx != nil && ctx.Group != nil && groupID == "" {
+			groupID = ctx.Group.GroupID
+		}
+		if ctx != nil && ctx.Player != nil && userID == "" {
+			userID = ctx.Player.UserID
+		}
+		if groupID == "" && userID == "" && msg.Message == "" {
+			return msg.RawID
+		}
+		return groupID + "\x00" + userID + "\x00" + msg.Message
 	}
 
 	// 获取logname，第一项是默认名字
@@ -356,7 +432,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 							return CmdExecuteResult{Matched: true, Solved: true}
 						}
 						stateGroup.SetLogState(logID, name, true)
-						group.MarkDirty(ctx.Dice)
+						stateGroup.MarkDirty(ctx.Dice)
 						ctx.Dice.Logger.Infof("日志状态切换: 群=%s 开启日志 name=%s id=%d", group.GroupID, name, logID)
 
 						VarSetValueStr(ctx, "$t记录名称", name)
@@ -373,8 +449,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 			} else if cmdArgs.IsArgEqual(1, "off") {
 				state := getGroupLogState(stateGroup)
 				if state.Name != "" && state.On {
-					group.SetLogOn(false)
-					group.MarkDirty(ctx.Dice)
+					stateGroup.SetLogOn(false)
+					stateGroup.MarkDirty(ctx.Dice)
 					ctx.Dice.Logger.Infof("日志状态切换: 群=%s 暂停日志 name=%s id=%d", group.GroupID, state.Name, state.ID)
 					lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, state.Name)
 					VarSetValueStr(ctx, "$t记录名称", state.Name)
@@ -458,8 +534,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 				//	 text = strings.TrimRightFunc(DiceFormatTmpl(ctx, "日志:记录_关闭_失败"), unicode.IsSpace) + "\n" + text
 				// }
 				ReplyToSender(ctx, msg, text)
-				group.SetLogOn(false)
-				group.MarkDirty(ctx.Dice)
+				stateGroup.SetLogOn(false)
+				stateGroup.MarkDirty(ctx.Dice)
 				ctx.Dice.Logger.Infof("日志状态切换: 群=%s 结束日志 name=%s id=%d，准备上传", group.GroupID, state.Name, state.ID)
 
 				time.Sleep(time.Duration(0.3 * float64(time.Second)))
@@ -467,8 +543,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 				uploadGroupID := group.GroupID
 				uploadName := state.Name
 				go getAndUpload(uploadGroupID, uploadName)
-				group.ClearLogState()
-				group.MarkDirty(ctx.Dice)
+				stateGroup.ClearLogState()
+				stateGroup.MarkDirty(ctx.Dice)
 				return CmdExecuteResult{Matched: true, Solved: true}
 			} else if cmdArgs.IsArgEqual(1, "halt") {
 				state := getGroupLogState(stateGroup)
@@ -479,8 +555,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 				text := DiceFormatTmpl(ctx, "日志:记录_结束")
 				ReplyToSender(ctx, msg, text)
-				group.ClearLogState()
-				group.MarkDirty(ctx.Dice)
+				stateGroup.ClearLogState()
+				stateGroup.MarkDirty(ctx.Dice)
 				ctx.Dice.Logger.Infof("日志状态切换: 群=%s 强制终止当前日志", group.GroupID)
 				return CmdExecuteResult{Matched: true, Solved: true}
 			} else if cmdArgs.IsArgEqual(1, "list") {
@@ -546,7 +622,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
 				stateGroup.SetLogState(logID, name, true)
-				group.MarkDirty(ctx.Dice)
+				stateGroup.MarkDirty(ctx.Dice)
 				ctx.Dice.Logger.Infof("日志状态切换: 群=%s 新建并开启日志 name=%s id=%d", group.GroupID, name, logID)
 
 				ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_新建"))
@@ -1008,6 +1084,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 		AutoActive: true,
 		Official:   true,
 		OnLoad: func() {
+			// 回调签名里没有 Dice，这里留给上面的去重闭包读配置用。
+			logExtDice = self
 			_ = os.MkdirAll(filepath.Join(self.BaseConfig.DataDir, "log-exports"), 0o755)
 		},
 		OnMessageSend: func(ctx *MsgContext, msg *Message, flag string) {
@@ -1090,11 +1168,13 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 				logState := ensureGroupLogState(ctx, logGroup)
 				if logState.On && logState.Name != "" {
-					// 去重，用于同群多骰情况
-					if !groupMsgInfoCheckOk(msg.RawID) {
+					// 去重：默认按 msg.RawID（与上游一致）；只有在显式调大
+					// logMultiBotDedupWindowSec 之后才改为按「群+人+正文」跨连接去重。
+					dedupKey := logDedupKey(ctx, msg)
+					if !groupMsgInfoCheckOk(dedupKey) {
 						return
 					}
-					groupMsgInfoSet(msg.RawID)
+					groupMsgInfoSet(dedupKey)
 
 					// <2022-02-15 09:54:14.0> [摸鱼king]: 有的 但我不知道
 					a := model.LogOneItem{

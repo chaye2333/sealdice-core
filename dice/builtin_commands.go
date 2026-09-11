@@ -719,7 +719,8 @@ func (d *Dice) registerCoreCommands() {
 				// 注意：这里刻意保持硬编码，不走「核心:骰子名字」文案模板。
 				// 那个模板是玩家侧骰娘名字（例如会被 .sn / 掷骰文案引用），
 				// 而这里是程序自身的标题，两者语义不同，不应互相影响。
-				text := "鲸鱼娘与海豹娘 " + VERSION.String() + "\n"
+				text := "鲸娘与豹 " + VERSION.String() + "\n"
+				text += "该fork版本主要是适配官bot的功能，代码鲸鱼写的。" + "\n"
 				text += "官网: sealdice.com" + "\n"
 				text += "海豹群: 524364253" + "\n"
 				text += DiceFormatTmpl(ctx, "核心:骰子帮助文本_附加说明")

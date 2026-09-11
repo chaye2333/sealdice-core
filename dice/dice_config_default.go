@@ -61,6 +61,13 @@ var DefaultConfig = Config{
 		IdentityBindQuestionCount:   1,
 		IdentityBindCooldownSec:     60,
 		IdentityBindFailCooldownSec: 12 * 3600, // 答错锁 12 小时
+
+		// 同一条玩家消息在多久内只记一次日志。默认 5 秒 = 上游原行为，
+		// 只挡「同一个连接重复推送」，不会合并真实发言。
+		// 只有同群同时挂官方 bot 和民间 bot 时，才需要把它调大（例如 30），
+		// 此时才会启用「按 群+人+正文 跨连接去重」——代价是同一人窗口内
+		// 发的两条完全相同的消息会被并成一条，所以默认不开。
+		LogMultiBotDedupWindowSec: 5,
 	},
 	RateLimitConfig{
 		RateLimitEnabled:         false,

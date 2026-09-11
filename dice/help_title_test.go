@@ -30,8 +30,8 @@ func TestHelpFirstLineIsHardcodedAndIndependentFromDiceName(t *testing.T) {
 	}
 
 	reply := waitGroupMessage(t, env)
-	firstLine, _, _ := strings.Cut(reply, "\n")
-	if !strings.HasPrefix(firstLine, "鲸鱼娘与海豹娘 ") {
+	firstLine, rest, _ := strings.Cut(reply, "\n")
+	if !strings.HasPrefix(firstLine, "鲸娘与豹 ") {
 		t.Fatalf(".help 第一行应为固定的标题，实际为 %q", firstLine)
 	}
 	if !strings.Contains(firstLine, VERSION.String()) {
@@ -40,5 +40,9 @@ func TestHelpFirstLineIsHardcodedAndIndependentFromDiceName(t *testing.T) {
 	// 关键：不能被「核心:骰子名字」影响
 	if strings.Contains(firstLine, customDiceName) {
 		t.Fatalf(".help 第一行不应跟随「核心:骰子名字」变化，实际为 %q", firstLine)
+	}
+	// fork 说明必须留在帮助里，方便使用者知道自己在跑哪个版本
+	if !strings.Contains(rest, "该fork版本主要是适配官bot的功能，代码鲸鱼写的。") {
+		t.Fatalf(".help 应包含 fork 说明，实际为:\n%s", reply)
 	}
 }

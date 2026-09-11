@@ -114,6 +114,12 @@ func (c *Config) FixIdentityBindConfig() {
 	if c.IdentityBindFailCooldownSec > identityBindMaxCooldownSec {
 		c.IdentityBindFailCooldownSec = identityBindMaxCooldownSec
 	}
+	if c.LogMultiBotDedupWindowSec <= 0 {
+		c.LogMultiBotDedupWindowSec = DefaultConfig.LogMultiBotDedupWindowSec
+	}
+	if c.LogMultiBotDedupWindowSec > logDedupWindowMaxSec {
+		c.LogMultiBotDedupWindowSec = logDedupWindowMaxSec
+	}
 }
 
 // migrateOld2Version1 旧格式设置项的迁移
@@ -246,6 +252,17 @@ type BaseConfig struct {
 	// IdentityBindFailCooldownSec 答案答错后的锁定时长（秒），默认 12 小时。
 	// 目的是防止用穷举的方式猜别人的角色卡名 / 日志名。
 	IdentityBindFailCooldownSec int64 `json:"identityBindFailCooldownSec" yaml:"identityBindFailCooldownSec"`
+
+	// LogMultiBotDedupWindowSec 同一条玩家消息在多久内只记一次日志（秒）。
+	//
+	// 默认 5 秒，与上游原实现完全一致：只去重「同一个连接重复推送的同一条消息」，
+	// 不会误伤任何真实发言。
+	//
+	// 只有同群同时挂官方 bot 和民间 bot 时才需要调大（例如 30）：两个连接各自收到
+	// 同一条消息，而它们的 msg.RawID 完全不同，5 秒的 RawID 去重挡不住。
+	// 调大后会切换成按「群+人+正文」跨连接去重，代价是同一人在窗口内发的两条
+	// 完全相同的消息会被并成一条。日志是永久记录，所以这个模式必须主动开启。
+	LogMultiBotDedupWindowSec int64 `json:"logMultiBotDedupWindowSec" yaml:"logMultiBotDedupWindowSec"`
 }
 
 type RateLimitConfig struct {
