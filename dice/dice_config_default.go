@@ -74,12 +74,12 @@ var DefaultConfig = Config{
 		LogMultiBotDedupWindowSec: 5,
 
 		// 验证码：默认**开启**。这是防抢号的唯一手段。
-		// 投递通道自动选：民间 bot 能发私聊就用私聊；否则若开了邮箱且 SMTP 配好，
-		// 就寄到 <旧QQ号>@qq.com。两条都不通时会在回复里说明原因。
+		// 通道自动判断：民间 bot 能发私聊就用私聊；「邮箱通知」配全了则邮箱也可用。
+		// 两条都可用时按下面这个开关决定先后（默认先私聊）。
 		IdentityBindUseVerificationCode: true,
 		IdentityBindCodeLength:          6,
 		IdentityBindCodeExpireSec:       600, // 10 分钟
-		IdentityBindUseEmailCode:        false,
+		IdentityBindPreferEmailCode:     false,
 	},
 	RateLimitConfig{
 		RateLimitEnabled:         false,

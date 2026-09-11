@@ -279,9 +279,10 @@ type BaseConfig struct {
 	// 这是防抢号的唯一手段：答题只能拦住不知道你信息的人，拦不住"知道你旧 QQ 号
 	// 又猜得到你卡名"的人。验证码发给被声明的旧账号，只有真正持有它的人才能确认。
 	//
-	// 投递通道（自动选择，无需手工切换）：
-	//  1. 民间 bot（OneBot）能发私聊 → 私聊验证码；
-	//  2. 否则若开了 IdentityBindUseEmailCode 且邮件配置完整 → 寄 QQ 邮箱验证码。
+	// 投递通道（**自动判断，不需要额外开关**）：
+	//   · 民间 bot（OneBot）在线可发私聊 → 私聊通道可用
+	//   · 「邮箱通知」配全了（发件邮箱 / 密钥 / SMTP）→ 邮箱通道可用（寄 QQ 邮箱）
+	//   两条都可用时按 IdentityBindPreferEmailCode 决定先后。
 	//
 	// 关掉它 = 放弃防抢号，仅在骰主完全无法提供任何通道时才考虑。
 	IdentityBindUseVerificationCode bool `json:"identityBindUseVerificationCode" yaml:"identityBindUseVerificationCode"`
@@ -289,15 +290,16 @@ type BaseConfig struct {
 	IdentityBindCodeLength int64 `json:"identityBindCodeLength" yaml:"identityBindCodeLength"`
 	// IdentityBindCodeExpireSec 验证码有效期（秒），60~3600，默认 600（10 分钟）。
 	IdentityBindCodeExpireSec int64 `json:"identityBindCodeExpireSec" yaml:"identityBindCodeExpireSec"`
-	// IdentityBindUseEmailCode 民间 bot 发不出私聊时，改寄「QQ 邮箱」验证码。
+	// IdentityBindPreferEmailCode 两条通道都可用时，是否优先用邮箱。
 	//
-	// 用途：骰主放弃民间 bot 运营、只留官方 bot 时，私聊通道不可用，
-	// 此时用邮箱验证码代替（前提是骰主已经配好 mailEnable/mailFrom/mailPassword/mailSmtp）。
-	//
-	// 地址规则：旧 QQ 号 → <QQ号>@qq.com（与海豹现有邮件通知逻辑一致）。
+	// 邮箱通道**没有独立开关**：只要「邮箱通知」配全了就自动可用，
+	// 地址规则是 旧 QQ 号 → <QQ号>@qq.com（与海豹现有邮件通知逻辑一致）。
 	// 这是唯一"零配置又有约束力"的方案：QQ 邮箱绑定 QQ 号，所以能证明账号归属。
 	// **不会**采用用户自己填的邮箱——那既证明不了归属，又会让骰子变成发信机。
-	IdentityBindUseEmailCode bool `json:"identityBindUseEmailCode" yaml:"identityBindUseEmailCode"`
+	//
+	// 默认 false：先试私聊，发不出去才走邮箱。
+	// 打开后顺序反过来：先寄邮箱，邮箱不可用再退回私聊。
+	IdentityBindPreferEmailCode bool `json:"identityBindPreferEmailCode" yaml:"identityBindPreferEmailCode"`
 }
 
 type RateLimitConfig struct {

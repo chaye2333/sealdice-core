@@ -107,8 +107,8 @@ func TestIdentityBindCodeConfigClamps(t *testing.T) {
 	if !DefaultConfig.IdentityBindUseVerificationCode {
 		t.Fatal("verification code should default to ON")
 	}
-	if DefaultConfig.IdentityBindUseEmailCode {
-		t.Fatal("email channel must default to OFF (needs SMTP configured first)")
+	if DefaultConfig.IdentityBindPreferEmailCode {
+		t.Fatal("email should not be preferred by default (DM first)")
 	}
 }
 

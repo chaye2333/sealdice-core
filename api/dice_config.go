@@ -507,9 +507,9 @@ func DiceConfigSet(c echo.Context) error {
 			config.IdentityBindUseVerificationCode = b
 		}
 	}
-	if val, ok := jsonMap["identityBindUseEmailCode"]; ok {
+	if val, ok := jsonMap["identityBindPreferEmailCode"]; ok {
 		if b, okBool := val.(bool); okBool {
-			config.IdentityBindUseEmailCode = b
+			config.IdentityBindPreferEmailCode = b
 		}
 	}
 	if val, ok := jsonMap["identityBindCodeLength"]; ok {

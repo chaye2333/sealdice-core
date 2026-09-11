@@ -223,6 +223,11 @@ func identityBindUseVerificationCode(d *Dice) bool {
 	return d != nil && d.Config.IdentityBindUseVerificationCode
 }
 
+// identityBindPreferEmailCode 是否优先用邮箱投递验证码。
+func identityBindPreferEmailCode(d *Dice) bool {
+	return d != nil && d.Config.IdentityBindPreferEmailCode
+}
+
 // identityBindCodeLength 取验证码长度并收敛到合法范围。
 func identityBindCodeLength(d *Dice) int {
 	n := 6
@@ -336,12 +341,27 @@ func identityBindQQMailAddress(oldUserID string) string {
 	return qq + "@qq.com"
 }
 
-// identityBindEmailCodeUsable 判断邮箱通道当前是否可用。
+// identityBindEmailCodeUsable 邮箱通道是否可用。
+//
+// **只看邮件配置本身**（发件邮箱 / 密钥 / SMTP 三者齐全），不再要求一个额外的开关：
+// 骰主既然把 SMTP 配好了，就说明他想用邮件；再要求点一次开关纯属多余，
+// 而且漏点会出现"配置明明好了却一直提示没配"的困惑。
+//
+// 走哪条通道由 identityBindPreferEmailCode 决定（见 identityBindDeliverPendingCodes）。
 func identityBindEmailCodeUsable(d *Dice) bool {
-	if d == nil || !d.Config.IdentityBindUseEmailCode {
+	if d == nil {
 		return false
 	}
 	return d.CanSendMail()
+}
+
+// identityBindMailSender 实际投递邮件的函数。
+//
+// 单独抽成变量有两个目的：
+//  1. 让测试可以注入假发信器，从而在不起真 SMTP 的情况下测「投递走没走通」；
+//  2. 保持生产行为不变——默认就是 Dice.SendMailRow。
+var identityBindMailSender = func(d *Dice, subject string, to []string, body string) {
+	d.SendMailRow(subject, to, body, nil)
 }
 
 // identityBindSendEmailCode 把验证码寄给旧 QQ 号的 QQ 邮箱。
@@ -353,7 +373,7 @@ func identityBindSendEmailCode(d *Dice, c *identityBindCodeChallenge) error {
 		return errors.New("上下文为空")
 	}
 	if !identityBindEmailCodeUsable(d) {
-		return errors.New("邮箱通道未启用或邮件配置不完整（需要 mailEnable/mailFrom/mailPassword/mailSmtp）")
+		return errors.New("邮箱通道未启用或邮件配置不完整（需要 mailEnabled/mailFrom/mailPassword/mailSmtp）")
 	}
 	to := identityBindQQMailAddress(c.Old.UserID)
 	if to == "" {
@@ -369,7 +389,7 @@ func identityBindSendEmailCode(d *Dice, c *identityBindCodeChallenge) error {
 			"不是本人操作请直接忽略本邮件，绑定不会生效。\n",
 		c.Old.UserID, c.Code, identityBindFormatDuration(identityBindCodeExpiry(d)))
 
-	d.SendMailRow(subject, []string{to}, body, nil)
+	identityBindMailSender(d, subject, []string{to}, body)
 	c.SentTo = to
 	return nil
 }
@@ -421,8 +441,37 @@ func identityBindDeliverPendingCodes(d *Dice) {
 	for _, item := range todo {
 		c := item.c
 
-		// 通道一：民间 bot 私聊（首选——只有它同时能证明"控制着这个 QQ 号"）
-		if ep := identityBindFindOldBotEndPoint(session, nil); ep != nil {
+		// 两条通道按优先级依次尝试。
+		// 默认私聊优先（只有它同时能证明"控制着这个 QQ 号"且不需要额外配置），
+		// 骰主打开 IdentityBindPreferEmailCode 后改为邮箱优先。
+		//
+		// 邮箱通道只在个人绑定上有意义：群号推不出邮箱，而且群绑定要证明的是"群"，
+		// 不是某个 QQ 号。
+		emailUsable := c.Action == identityBindActionUser && identityBindEmailCodeUsable(d)
+
+		tryEmail := func() bool {
+			if !emailUsable {
+				return false
+			}
+			if err := identityBindSendEmailCode(d, c); err != nil {
+				c.Reason = "邮箱投递失败: " + err.Error()
+				return false
+			}
+			c.Status = identityBindCodeDelivered
+			c.Channel = identityBindCodeChannelEmail
+			c.SentByEP = ""
+			c.DeliveredAt = time.Now().Unix()
+			c.Reason = ""
+			d.Logger.Infof("身份绑定验证码已邮件投递: 目标=%s 收件=%s 发起者=%s",
+				c.Old.UserID, c.SentTo, c.New.UserID)
+			return true
+		}
+
+		tryDM := func() bool {
+			ep := identityBindFindOldBotEndPoint(session, nil)
+			if ep == nil {
+				return false
+			}
 			body := fmt.Sprintf(
 				"【鲸娘与豹】身份绑定验证码\n\n"+
 					"有人正在 QQ 官方机器人上把身份绑定到你这个号（%s）。\n"+
@@ -432,34 +481,32 @@ func identityBindDeliverPendingCodes(d *Dice) {
 				c.Old.UserID, c.Code, identityBindFormatDuration(identityBindCodeExpiry(d)))
 
 			if err := identityBindSendPrivate(d, ep, c.DeliverTo, body); err != nil {
-				c.Reason = "私聊投递失败: " + err.Error()
-			} else {
-				c.Status = identityBindCodeDelivered
-				c.Channel = identityBindCodeChannelDM
-				c.SentByEP = ep.ID
-				c.SentTo = c.DeliverTo
-				c.DeliveredAt = time.Now().Unix()
-				c.Reason = ""
-				d.Logger.Infof("身份绑定验证码已私聊投递: 目标=%s 发起者=%s 端点=%s",
-					c.Old.UserID, c.New.UserID, ep.ID)
-				continue
-			}
-		}
-
-		// 通道二：QQ 邮箱（只在个人绑定上有意义——群号推不出邮箱，
-		// 而且群绑定要证明的是"群"，不是某个 QQ 号）
-		if c.Action == identityBindActionUser && identityBindEmailCodeUsable(d) {
-			if err := identityBindSendEmailCode(d, c); err != nil {
-				c.Reason = "邮箱投递失败: " + err.Error()
-				continue
+				if c.Reason == "" {
+					c.Reason = "私聊投递失败: " + err.Error()
+				}
+				return false
 			}
 			c.Status = identityBindCodeDelivered
-			c.Channel = identityBindCodeChannelEmail
-			c.SentByEP = ""
+			c.Channel = identityBindCodeChannelDM
+			c.SentByEP = ep.ID
+			c.SentTo = c.DeliverTo
 			c.DeliveredAt = time.Now().Unix()
 			c.Reason = ""
-			d.Logger.Infof("身份绑定验证码已邮件投递: 目标=%s 收件=%s 发起者=%s",
-				c.Old.UserID, c.SentTo, c.New.UserID)
+			d.Logger.Infof("身份绑定验证码已私聊投递: 目标=%s 发起者=%s 端点=%s",
+				c.Old.UserID, c.New.UserID, ep.ID)
+			return true
+		}
+
+		// 按优先级依次尝试两条通道；先成功的算数。
+		// 默认私聊优先，骰主把 IdentityBindPreferEmailCode 打开后邮箱优先。
+		var delivered bool
+		if identityBindPreferEmailCode(d) && emailUsable {
+			// 邮箱优先：邮箱失败仍然退回私聊，不让邮件问题阻断绑定
+			delivered = tryEmail() || tryDM()
+		} else {
+			delivered = tryDM() || tryEmail()
+		}
+		if delivered {
 			continue
 		}
 
@@ -468,11 +515,11 @@ func identityBindDeliverPendingCodes(d *Dice) {
 			switch {
 			case c.Action == identityBindActionGroup:
 				c.Reason = "没有可用的民间 bot（OneBot）连接，群绑定无法投递验证码"
-			case identityBindEmailCodeUsable(d):
-				c.Reason = "验证码投递失败，请稍后重试"
+			case emailUsable:
+				c.Reason = "验证码投递失败，请稍后重试（私聊与邮箱都试过了）"
 			default:
-				c.Reason = "没有可用的民间 bot（OneBot）连接；如需用邮箱收取验证码，" +
-					"请在管理界面打开「使用邮箱发送验证码」并配好 SMTP"
+				c.Reason = "没有可用的民间 bot（OneBot）连接，邮箱也没配好；" +
+					"请在管理界面配置「邮箱通知」（发件邮箱 / 密钥 / SMTP）作为备用通道"
 			}
 		}
 	}
@@ -555,7 +602,7 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 		// 邮箱码：由官方侧发起者确认
 		wantConfirmer = matched.New.UserID
 	}
-	if wantConfirmer != "" && !identityBindSameQQUser(msg.Sender.UserID, wantConfirmer) {
+	if wantConfirmer != "" && !identityBindSameIdentity(msg.Sender.UserID, wantConfirmer) {
 		// 有人在用错误的号试别人的验证码 —— 记一次失败
 		matched.Attempts++
 		d.Logger.Warnf("身份绑定验证码发信人不符: 期望=%s 实际=%s 目标=%s",
@@ -669,6 +716,26 @@ func identityBindReplyPerson(ctx *MsgContext, targetRawID string, text string) {
 		return
 	}
 	ctx.EndPoint.Adapter.SendToPerson(ctx, targetRawID, text, "skip")
+}
+
+// identityBindSameIdentity 判断两个身份标识是否指向同一个人。
+//
+// 先做**全等比较**，这样官方 OpenID 这类非数字标识也能正确匹配。
+// 只有全等失败时才退回"提取纯 QQ 号再比"，用来兼容 "QQ:12345" 与裸 "12345"。
+//
+// 为什么必须这样：官方 ID 形如 "OpenQQ:<UIN>-<MemberOpenID>"，
+// 而 MemberOpenID 通常是十六进制串。老实现只做数字提取 → 得到空串 → 比对永远失败，
+// 于是**邮箱通道下发起者本人也确认不了自己的绑定**。
+func identityBindSameIdentity(a, b string) bool {
+	ta := strings.TrimSpace(a)
+	tb := strings.TrimSpace(b)
+	if ta == "" || tb == "" {
+		return false
+	}
+	if ta == tb {
+		return true
+	}
+	return identityBindSameQQUser(ta, tb)
 }
 
 // identityBindSameQQUser 判断两个身份是不是同一个 QQ 号。
