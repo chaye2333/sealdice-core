@@ -203,33 +203,23 @@ type BaseConfig struct {
 	QQEnablePoke             bool       `json:"QQEnablePoke"            yaml:"QQEnablePoke"`              // 启用戳一戳
 	OfficialQQFileSendBase64 bool       `json:"officialQQFileSendBase64" yaml:"officialQQFileSendBase64"` // 是否使用base64发送本地/非公网文件
 	OfficialQQUseMarkdown    bool       `json:"officialQQUseMarkdown"    yaml:"officialQQUseMarkdown"`    // 是否自动把消息全转为markdown类型消息
-	// OfficialQQRequestTimeoutSec 官方 QQ OpenAPI 的单次请求超时（秒）。
-	// 这个超时作用在 SDK 的 resty client 上，覆盖文本发送、富媒体上传、拉取机器人信息等全部请求。
-	// 默认 60 秒：官方文档建议上传接口超时 ≥5 秒，而用 URL 上传时腾讯要先下载完整个文件才回响应头，
-	// 3 秒会导致语音/文件经常报 "context deadline exceeded"。发大文件建议调到 120 以上。
-	OfficialQQRequestTimeoutSec int64 `json:"officialQQRequestTimeoutSec" yaml:"officialQQRequestTimeoutSec"`
-	// OfficialQQChunkedUploadEnable 是否对「本地文件发送」启用分片上传。
-	// 默认关闭：先用旧路径保证稳定，测通后再打开。
-	// 打开后本地文件走 upload_prepare → 分片 PUT → upload_part_finish → 合并，
-	// 好处是**能保留文件名**（file_data/base64 方式腾讯不支持自定义文件名，会显示"未命名"）。
-	OfficialQQChunkedUploadEnable bool   `json:"officialQQChunkedUploadEnable" yaml:"officialQQChunkedUploadEnable"`
-	TextCmdTrustOnly              bool   `json:"textCmdTrustOnly"        yaml:"textCmdTrustOnly"`        // 只允许信任用户或master使用text指令
-	IgnoreUnaddressedBotCmd       bool   `json:"ignoreUnaddressedBotCmd" yaml:"ignoreUnaddressedBotCmd"` // 不响应群聊裸bot指令
-	UILogLimit                    int64  `json:"-"                       yaml:"UILogLimit"`
-	FriendAddComment              string `json:"friendAddComment"        yaml:"friendAddComment"` // 加好友验证信息
-	CustomReplyConfigEnable       bool   `json:"customReplyConfigEnable" yaml:"customReplyConfigEnable"`
-	AutoReloginEnable             bool   `json:"autoReloginEnable"       yaml:"autoReloginEnable"`    // 启用自动重新登录
-	RefuseGroupInvite             bool   `json:"refuseGroupInvite"       yaml:"refuseGroupInvite"`    // 拒绝加入新群
-	UpgradeWindowID               string `json:"-"                       yaml:"upgradeWindowId"`      // 执行升级指令的窗口
-	UpgradeEndpointID             string `json:"-"                       yaml:"upgradeEndpointId"`    // 执行升级指令的端点
-	BotExtFreeSwitch              bool   `json:"botExtFreeSwitch"        yaml:"botExtFreeSwitch"`     // 允许任意人员开关: 否则邀请者、群主、管理员、master有权限
-	BotExitWithoutAt              bool   `json:"botExitWithoutAt"        yaml:"botExitWithoutAt"`     // 不@骰娘即可执行退群指令
-	TrustOnlyMode                 bool   `json:"trustOnlyMode"           yaml:"trustOnlyMode"`        // 只有信任的用户/master可以拉群和使用
-	AliveNoticeEnable             bool   `json:"aliveNoticeEnable"       yaml:"aliveNoticeEnable"`    // 定时通知
-	AliveNoticeValue              string `json:"aliveNoticeValue"        yaml:"aliveNoticeValue"`     // 定时通知间隔
-	ReplyDebugMode                bool   `json:"replyDebugMode"          yaml:"replyDebugMode"`       // 回复调试
-	PlayerNameWrapEnable          bool   `json:"playerNameWrapEnable"    yaml:"playerNameWrapEnable"` // 启用玩家名称外框
-	DiceRandomMode                string `json:"diceRandomMode"          yaml:"diceRandomMode"`       // 骰点随机模式
+	TextCmdTrustOnly         bool       `json:"textCmdTrustOnly"        yaml:"textCmdTrustOnly"`          // 只允许信任用户或master使用text指令
+	IgnoreUnaddressedBotCmd  bool       `json:"ignoreUnaddressedBotCmd" yaml:"ignoreUnaddressedBotCmd"`   // 不响应群聊裸bot指令
+	UILogLimit               int64      `json:"-"                       yaml:"UILogLimit"`
+	FriendAddComment         string     `json:"friendAddComment"        yaml:"friendAddComment"` // 加好友验证信息
+	CustomReplyConfigEnable  bool       `json:"customReplyConfigEnable" yaml:"customReplyConfigEnable"`
+	AutoReloginEnable        bool       `json:"autoReloginEnable"       yaml:"autoReloginEnable"`    // 启用自动重新登录
+	RefuseGroupInvite        bool       `json:"refuseGroupInvite"       yaml:"refuseGroupInvite"`    // 拒绝加入新群
+	UpgradeWindowID          string     `json:"-"                       yaml:"upgradeWindowId"`      // 执行升级指令的窗口
+	UpgradeEndpointID        string     `json:"-"                       yaml:"upgradeEndpointId"`    // 执行升级指令的端点
+	BotExtFreeSwitch         bool       `json:"botExtFreeSwitch"        yaml:"botExtFreeSwitch"`     // 允许任意人员开关: 否则邀请者、群主、管理员、master有权限
+	BotExitWithoutAt         bool       `json:"botExitWithoutAt"        yaml:"botExitWithoutAt"`     // 不@骰娘即可执行退群指令
+	TrustOnlyMode            bool       `json:"trustOnlyMode"           yaml:"trustOnlyMode"`        // 只有信任的用户/master可以拉群和使用
+	AliveNoticeEnable        bool       `json:"aliveNoticeEnable"       yaml:"aliveNoticeEnable"`    // 定时通知
+	AliveNoticeValue         string     `json:"aliveNoticeValue"        yaml:"aliveNoticeValue"`     // 定时通知间隔
+	ReplyDebugMode           bool       `json:"replyDebugMode"          yaml:"replyDebugMode"`       // 回复调试
+	PlayerNameWrapEnable     bool       `json:"playerNameWrapEnable"    yaml:"playerNameWrapEnable"` // 启用玩家名称外框
+	DiceRandomMode           string     `json:"diceRandomMode"          yaml:"diceRandomMode"`       // 骰点随机模式
 
 	VMVersionForReply      string `json:"VMVersionForReply"      yaml:"VMVersionForReply"`      // 自定义回复使用的vm版本
 	VMVersionForDeck       string `json:"VMVersionForDeck"       yaml:"VMVersionForDeck"`       // 牌堆使用的vm版本
@@ -241,6 +231,26 @@ type BaseConfig struct {
 	DataDir string `yaml:"dataDir"` // 数据路径，为./data/{name}，例如data/default
 
 	OfficialQQMigrationEnable bool `json:"officialQQEnableIdentityMigration" yaml:"officialQQEnableIdentityMigration"` // 启动 QQ 官方旧身份数据迁移
+
+	// ==========================================================================
+	// 以下字段全部是 fork 新增，**统一追加在 BaseConfig 末尾**。
+	//
+	// 为什么不插在上面：DefaultConfig 是位置字面量（没有写字段名），
+	// 往中间插字段会让整个字面量错位；如果错位后类型恰好相同，
+	// Go 不会报错，只会把默认值静默赋给错误的字段。
+	// 追加在末尾时，上游同样在末尾追加字段只会产生一处相邻冲突，手工解一下即可。
+	// ==========================================================================
+
+	// OfficialQQRequestTimeoutSec 官方 QQ OpenAPI 的单次请求超时（秒）。
+	// 这个超时作用在 SDK 的 resty client 上，覆盖文本发送、富媒体上传、拉取机器人信息等全部请求。
+	// 默认 60 秒：官方文档建议上传接口超时 ≥5 秒，而用 URL 上传时腾讯要先下载完整个文件才回响应头，
+	// 3 秒会导致语音/文件经常报 "context deadline exceeded"。发大文件建议调到 120 以上。
+	OfficialQQRequestTimeoutSec int64 `json:"officialQQRequestTimeoutSec" yaml:"officialQQRequestTimeoutSec"`
+	// OfficialQQChunkedUploadEnable 是否对「本地文件发送」启用分片上传。
+	// 默认关闭：先用旧路径保证稳定，测通后再打开。
+	// 打开后本地文件走 upload_prepare → 分片 PUT → upload_part_finish → 合并，
+	// 好处是**能保留文件名**（file_data/base64 方式腾讯不支持自定义文件名，会显示"未命名"）。
+	OfficialQQChunkedUploadEnable bool `json:"officialQQChunkedUploadEnable" yaml:"officialQQChunkedUploadEnable"`
 
 	// IdentityBindEnable 是否允许用户使用 .bind 系列指令，把 QQ 官方机器人的身份
 	// 绑定回迁移前的旧账号（例如 NapCat 时代的 QQ:12345）。

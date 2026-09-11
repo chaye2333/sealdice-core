@@ -815,6 +815,75 @@ func TestIdentityBindLogOffTogglesSharedState(t *testing.T) {
 	}
 }
 
+// TestDefaultConfigValuesLandOnTheRightFields 锁定 DefaultConfig 的默认值。
+//
+// DefaultConfig 是**位置字面量**（没写字段名），所以字段顺序和字面量顺序必须严格对应。
+// 一旦有人往 BaseConfig 中间插字段、或调整了字面量顺序，而错位后的类型恰好相同，
+// Go 不会报错，只会把默认值静默赋给错误的字段——这类 bug 极难发现。
+// 这个测试把 fork 新增字段和几个相邻的上游字段一起钉住，顺序一动就会红。
+//
+//nolint:staticcheck // QF1008：这里刻意写全嵌入字段名，就是为了直接验证「哪一段」有没有串位
+func TestDefaultConfigValuesLandOnTheRightFields(t *testing.T) {
+	c := DefaultConfig
+
+	// fork 新增字段
+	if c.OfficialQQRequestTimeoutSec != 60 {
+		t.Fatalf("OfficialQQRequestTimeoutSec = %d, want 60", c.OfficialQQRequestTimeoutSec)
+	}
+	if c.OfficialQQChunkedUploadEnable {
+		t.Fatal("OfficialQQChunkedUploadEnable should default to false")
+	}
+	if c.IdentityBindEnable {
+		t.Fatal("IdentityBindEnable should default to false")
+	}
+	if c.IdentityBindQuestionCount != 1 {
+		t.Fatalf("IdentityBindQuestionCount = %d, want 1", c.IdentityBindQuestionCount)
+	}
+	if c.IdentityBindCooldownSec != 60 {
+		t.Fatalf("IdentityBindCooldownSec = %d, want 60", c.IdentityBindCooldownSec)
+	}
+	if c.IdentityBindFailCooldownSec != 12*3600 {
+		t.Fatalf("IdentityBindFailCooldownSec = %d, want %d", c.IdentityBindFailCooldownSec, 12*3600)
+	}
+	if c.LogMultiBotDedupWindowSec != logDedupDefaultWindowSec {
+		t.Fatalf("LogMultiBotDedupWindowSec = %d, want %d (upstream behaviour)",
+			c.LogMultiBotDedupWindowSec, logDedupDefaultWindowSec)
+	}
+
+	// 字面量里紧邻 fork 字段的上游字段，用来确认没有整体错位
+	if !c.PlayerNameWrapEnable {
+		t.Fatal("PlayerNameWrapEnable = false, want true (literal likely shifted)")
+	}
+	if !c.TextCmdTrustOnly {
+		t.Fatal("TextCmdTrustOnly = false, want true (literal likely shifted)")
+	}
+	if c.DiceRandomMode != string(DiceRandomModePCG) {
+		t.Fatalf("DiceRandomMode = %q, want %q", c.DiceRandomMode, DiceRandomModePCG)
+	}
+	if c.VMVersionForReply != "v1" || c.VMVersionForDeck != "v2" {
+		t.Fatalf("VM versions shifted: reply=%q deck=%q", c.VMVersionForReply, c.VMVersionForDeck)
+	}
+	if c.BaseConfig.Name != "default" || c.BaseConfig.DataDir != "data/default" {
+		t.Fatalf("Name/DataDir shifted: %q / %q", c.BaseConfig.Name, c.BaseConfig.DataDir)
+	}
+	if c.OfficialQQMigrationEnable {
+		t.Fatal("OfficialQQMigrationEnable should default to false")
+	}
+	// 位置字面量最容易被忽略的相邻嵌入：确认后面几个 config 段没有整体串位
+	if c.RateLimitConfig.PersonalReplenishRateStr != "@every 3s" {
+		t.Fatalf("RateLimitConfig shifted: %q", c.RateLimitConfig.PersonalReplenishRateStr)
+	}
+	if c.PersonalBurst != 3 || c.GroupBurst != 3 {
+		t.Fatalf("bursts shifted: personal=%d group=%d", c.PersonalBurst, c.GroupBurst)
+	}
+	if c.StoryLogConfig.LogSizeNoticeCount != 500 {
+		t.Fatalf("StoryLogConfig shifted: %d", c.StoryLogConfig.LogSizeNoticeCount)
+	}
+	if len(c.DirtyConfig.DiceMasters) != 1 || c.DirtyConfig.DiceMasters[0] != "UI:1001" {
+		t.Fatalf("DirtyConfig shifted: %+v", c.DirtyConfig.DiceMasters)
+	}
+}
+
 // ---------- 纯函数测试 ----------
 
 func TestIdentityBindNormalizeOldIDs(t *testing.T) {
