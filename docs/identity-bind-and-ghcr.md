@@ -1,7 +1,9 @@
-# QQ身份绑定 + 虚拟角色状态栏 + GHCR 自动构建：使用与部署说明
+# QQ身份绑定 + 双向数据共通 + 虚拟角色状态栏 + GHCR 自动构建：使用与部署说明
+
+> `.help` 第一行显示 `鲸娘与豹 <版本号>`，第二行是 fork 说明（该fork版本主要是适配官bot的功能，代码鲸鱼写的。）
 
 面向：把海豹从 NapCat（OneBot）迁移到 **QQ 官方机器人**，希望老玩家的角色卡 / 日志不丢，
-并且官方机器人也能显示角色属性的人。
+并且**官方 bot 与民间 bot 能共用同一份数据**、官方机器人也能显示角色属性的人。
 
 本说明只讲怎么用、怎么发布镜像、怎么验收。改动清单见文末。
 
@@ -19,11 +21,20 @@
 * 老玩家的角色卡（`.st` / `.pc`）读不到了；
 * 老群的日志（`.log list` / `.log get`）看不到了。
 
-本功能让玩家在官方 bot 里**自证身份**，然后把新身份"指"回旧身份：
+本功能让玩家在官方 bot 里**自证身份**，然后把新身份"归一"到旧身份：
 
-* 绑定后**只做读取回退**：读旧数据、写新数据；
-* 一条历史数据都不会被搬动、修改，`.unbind` 之后立刻恢复原样；
-* **只有 QQ 官方机器人端点**会用到绑定结果，你其它的 OneBot 群行为完全不变。
+* 规范 ID **固定是旧身份**，旧数据原地不动，一条都不搬；
+* 归一之后，**官方 bot 与民间 bot 读写的是同一份数据**（角色卡、属性、日志）；
+* 因此不是「两边各存一份再同步」，而是本来就只有一份，不存在分叉问题；
+* `.unbind` 之后立刻恢复原样；
+* **只有 QQ 官方机器人端点 + 参与过绑定的身份**会走归一，你其它的 OneBot 群行为完全不变。
+
+**两个维度，需要两个绑定**（详见 3.2.1）：
+
+| 绑定 | 维度 | 影响 |
+|---|---|---|
+| `.bind <旧QQ号>` | 用户 | 角色卡、属性、`.sn` 模板 |
+| `.group bind <旧群号>` | 群 | 日志状态、日志内容 |
 
 ---
 
@@ -77,6 +88,32 @@ docker restart sealdice-core
 | 验证题目数量 | `identityBindQuestionCount` | `1` | 1~5，超过 5 会被收敛到 5（只影响角色卡题） |
 | 绑定冷却时间(秒) | `identityBindCooldownSec` | `60` | 同一用户两次发起绑定的最小间隔，0 表示不限制 |
 | 答错锁定时长(秒) | `identityBindFailCooldownSec` | `43200` | 答错后多久不能再发起绑定，默认 **12 小时** |
+| 日志去重窗口(秒) | `logMultiBotDedupWindowSec` | `5` | 同一条玩家消息多久内只记一次。**默认 5 = 上游原行为**；同群同时挂官方 bot 与民间 bot 时才需要调大（见第七点八） |
+
+### 3.2.1 双向数据共通（重要）
+
+绑定之后，**官方身份与旧 QQ 号 / 官方群与旧群读写的是同一份数据**，而不是各存一份。
+
+实现方式是「规范 ID（canonical ID）归一」，不是数据同步：
+
+* 规范 ID **固定是旧身份**（迁移前的 QQ 号 / 旧群）；
+* 旧号、旧群那一侧**原地不动**，一条数据都不搬；
+* 官方那一侧的所有数据访问都先归一成旧 ID，于是两边算出来的 key 完全一样；
+* 因此不存在「两边数据分叉」的问题——本来就只有一份。
+
+要让数据**完全**共通，需要**两个绑定同时生效**：
+
+| 绑定 | 负责的维度 | 影响 |
+|---|---|---|
+| `.bind <旧QQ号>` | **用户**维度 | 角色卡、属性、`.sn` 名片模板 |
+| `.group bind <旧群号>` | **群**维度 | 日志状态（开没开/叫什么）、日志内容 |
+
+只做一个会有半边读不到：
+
+* 只做个人绑定：角色卡通了，但日志仍然在两个群各记一份；
+* 只做群绑定：日志通了，但每个玩家的角色卡还是各看各的。
+
+`.bind status` / `.group status` / `.group doctor` 都会提示当前缺哪一半。
 
 题目数量怎么选：
 
@@ -456,8 +493,21 @@ pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 是原生模�
 - [ ] **同时使用验证**：先 `.bind` 绑定个人身份，再 `.group bind` 绑群，
       两条都应该成功；`.bind status` 与 `.group status` 分别显示各自的记录；
       `.group unbind` 只解除群绑定，个人绑定仍在（`.pc list` 仍读旧卡）。
+- [ ] **双向共通（用户维度）**：官方 bot 用 `.st 生命值-3`，然后到旧群用民间 bot
+      发 `.st show`，看到的应该是**同一个数值**；反过来改也一样。
+- [ ] **双向共通（群维度）**：旧群 `.log on <名字>` 之后，官方群 `.log list` 能看到；
+      官方群 `.log off` 之后，确认旧群 `.log list` 里**不再新增**记录（状态是同一份）。
+- [ ] **跨群日志合并**：官方群发几条、旧群发几条，然后 `.log get`，
+      确认两边的话都在**同一份**记录里（而不是各记一份）。
+- [ ] **自检**：`.group doctor` 应该报「异常 0 条 / 所有绑定看起来都正常」。
+      如果报「目标旧群不在内存里」，去那个旧群让骰子收到一条消息即可恢复。
+- [ ] `.bind cancel` 能取消进行中的问答，取消后可以重新发起。
+- [ ] `.group bind <旧群号>` 后，题目应该是**填空**（列出真实日志名，让你回复其中一个），
+      回复任意一个真实日志名即可通过；`.log list` 能看到旧群日志。
+- [ ] `.unbind` 之后 `.pc list` 恢复成绑定前的状态（证明没有动过数据）。
 - [ ] 找一个 **OneBot / NapCat 群**发 `.r 1d20` 和 `.bind`，
       确认行为完全没变、`.bind` 会被拒绝、回复里**没有** `\scriptsize` 之类的公式。
+- [ ] `.help` 第一行是 `鲸娘与豹 <版本号>`，第二行是 fork 说明。
 - [ ] 看核心日志：没有 `panic`、没有数据库报错、没有"渲染 QQ 官方角色状态栏失败"的 warn。
 
 ---
@@ -479,20 +529,32 @@ pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 是原生模�
 只有一张卡时就只能出 1 题。
 
 **Q：绑定之后属性写入写到哪里？**
-绑定后 `AttrsManager.LoadByCtx` 回退读旧身份，因此 `.st` 这类**在当前角色卡上修改**的指令
-会落在**旧身份那张卡**上——这正是"卡还是我的卡"的预期效果。
-而 `.pc new` 新建角色卡走的是当前新身份，会挂在官方 bot 的 ID 下。
-绑定只增加"读取回退"，不会创建、复制或删除任何数据行。
+绑定后属性读写都归一成**旧身份**，所以 `.st` 这类修改会落在**旧身份那张卡**上——
+这正是"卡还是我的卡"的预期效果，而且民间 bot 那边立刻能看到同一个数值。
+`.pc new` 新建角色卡同样归一，因此新卡会挂在旧 QQ 号名下，两边都能看到。
+绑定不创建、不复制、不删除任何数据行，只是让两边算出同一个 key。
 
 **Q：解除绑定后旧数据会怎样？**
 什么都没变。绑定只是一张"新 ID → 旧 ID"的对照表（`identity-bindings.json`），
 `.unbind` 删掉一行对照表而已，旧数据从未被修改过。
 
 **Q：`.group bind` 之后新日志去哪了？**
-新日志（`.log new`）仍然记在当前新群。绑定只影响**读取**旧日志。
+记进**归一后的那份日志**（也就是旧群那份），官方群和旧群看到的是同一份记录。
+这正是「日志双向共通」的要点：不是各记一份再合并，而是本来就只有一份。
+
+**Q：绑定成功了但数据看起来没变化？**
+先用 `.group doctor` 自检。最常见的原因是**目标旧群不在内存里**
+（机器人很久没去过那个旧群），此时读取会静默回退到当前群。
+让骰子去旧群收到一条消息即可恢复。
+
+**Q：同时开了官方 bot 和民间 bot，日志记了两遍？**
+见「七点八」。把 `logMultiBotDedupWindowSec` 调到 `30` 可跨连接去重，
+但要接受"同一人窗口内发的两条相同消息会并成一条"这个代价。
 
 **Q：绑定关系存在哪？**
 `data/default/identity-bindings.json`，纯文本，可以直接看、可以备份。
+里面同一条绑定会存两份索引（新旧 ID 各一份），这是为了让两侧都能查到，
+展示和落盘时会自动去重，不用担心。
 删除这个文件等于解除所有绑定。
 
 ---
@@ -764,16 +826,75 @@ officialQQChunkedUploadEnable: true
 
 ---
 
+## 七点八、两个 bot 同时开着会怎样
+
+双向共通之后，最容易想到的问题就是「官方 bot 和民间 bot 同时在线会不会打架」。
+结论要分三种情况，差别很大。
+
+### 情况 A：同一个海豹实例，两个 bot 都在**同一个 QQ 群**
+
+| 环节 | 会不会重复 | 原因 |
+|---|---|---|
+| 玩家消息记日志 | ⚠️ **会重复** | 两个连接各收到同一条消息 |
+| 骰子自己的发言记日志 | ✅ 不会 | 每条回复只由发出它的那个 bot 触发一次 |
+| 绑定记录 | ✅ 无冲突 | 一条绑定只有一个存储记录 |
+| 属性 / 角色卡 | ✅ 天然正确 | 只按「群+人」查，与 bot 数量无关 |
+| 自动回复（读日志） | ⚠️ 可能重复 | 重复记进的两条都会被算进去 |
+
+重复的根因：去重键用的是 `msg.RawID`，而**两个 bot 收到同一条消息时 RawID 是各自的**，
+根本对不上。原来 5 秒的窗口只能挡住「同一个连接的重复推送」。
+
+需要这个场景时，把窗口调大：
+
+```yaml
+logMultiBotDedupWindowSec: 30
+```
+
+调大（> 5）之后才会切换成按「群 + 人 + 正文」**跨连接去重**。
+
+> ⚠️ 代价：同一个人在窗口内发的两条**内容完全相同**的消息会被并成一条
+> （例如连打两个「1」）。日志是永久记录，所以这个模式**默认不开**，
+> 必须由使用者主动开启。一般人不会同时开两个 bot，保持默认即可。
+
+### 情况 B：同一个海豹实例，官方 bot 在官方群、民间 bot 在旧群（**主流用法**）
+
+**完全不会重复**，因为两边收到的是**不同群**的消息。而这正是双向共通真正发挥作用的场景：
+
+* 官方群里的话 → 记进**归一后的那份日志**（旧群）
+* 旧群里的话 → 也记进**同一份**
+* 两边 `.log list` / `.log get` / `.log export` 看到的是同一份内容
+
+两个平台给的时间戳都保留着，所以两段对话的先后顺序可以还原。
+
+### 情况 C：两个**独立的海豹实例**各跑一个 bot
+
+**不支持。** 两个实例的 `data` 目录互相独立，绑定记录文件和去重表都不共享。
+这种情况下绑定会看起来「生效了但读不到数据」。必须让两种连接方式挂在**同一个实例**上。
+
+### 顺带说明 .log 状态的归属
+
+日志状态（开没开、叫什么名字、logID）本来挂在各自的 `GroupInfo` 上。
+实现里把状态**统一挂在归一后的群对象**上，所以：
+
+* 官方群 `.log on` → 旧群立刻跟着记
+* 旧群 `.log off` → 官方群也停
+* 顺序随意，谁先开都行
+
+排查这块时如果遇到「关不掉」或「开了没生效」，先用 `.group doctor` 确认绑定本身正常。
+
+---
+
 ## 八、本次改动的文件清单
 
 新增：
 
 | 文件 | 作用 |
 |---|---|
-| `dice/ext_identity_bind.go` | 绑定核心：存储、出题、验证、回退读取、`.bind` / `.group bind` 逻辑 |
-| `dice/ext_identity_bind_test.go` | 22 个测试：出题、答案解析、冷却、持久化、平台隔离、指令全流程 |
+| `dice/ext_identity_bind.go` | 绑定核心：**双向索引存储、规范 ID 归一**、出题、验证、自检、`.bind` / `.group bind` 逻辑 |
+| `dice/ext_identity_bind_test.go` | 绑定与双向共通测试：出题、答案解析、冷却、持久化、平台隔离、指令全流程、两侧收敛同一 key、抢号拦截、日志状态/写入/读取共通、自检 |
 | `dice/official_qq_character_roll_markdown.go` | 官方 QQ 虚拟角色状态栏：模板求值、小号红字、转义 |
 | `dice/official_qq_character_roll_markdown_test.go` | 状态栏测试：渲染、转义、实时更新、平台隔离、真实掷骰端到端 |
+| `dice/help_title_test.go` | 锁定 `.help` 第一行是固定标题、不跟随「核心:骰子名字」，并断言 fork 说明存在 |
 | `Dockerfile` | 多阶段构建：编译 WebUI → 编译核心（`CGO_ENABLED=0`）→ 精简运行镜像 |
 | `.dockerignore` | 避免把 `data`、二进制等打进镜像 |
 | `.github/workflows/docker-ghcr.yml` | 自动测试 + 构建 + 推送到 GHCR |
@@ -783,23 +904,23 @@ officialQQChunkedUploadEnable: true
 
 | 文件 | 改动 |
 |---|---|
-| `dice/dice_config.go` | 新增绑定配置字段 + `FixIdentityBindConfig()`；新增 `officialQQRequestTimeoutSec` + `FixOfficialQQConfig()` |
-| `dice/dice_config_default.go` | 默认值：绑定关闭、1 题、冷却 60 秒、答错锁 12 小时、官方 QQ 请求超时 60 秒 |
+| `dice/dice_config.go` | 新增绑定配置字段 + `logMultiBotDedupWindowSec` + `FixIdentityBindConfig()`；新增 `officialQQRequestTimeoutSec` + `FixOfficialQQConfig()` |
+| `dice/dice_config_default.go` | 默认值：绑定关闭、1 题、冷却 60 秒、答错锁 12 小时、官方 QQ 请求超时 60 秒、日志去重窗口 5 秒（= 上游原行为） |
 | `dice/dice.go` | `Dice.IdentityBindStore` 字段与初始化 |
-| `dice/im_session.go` | `MsgContext.OfficialQQStatusBarPending` 标记字段 |
+| `dice/im_session.go` | `MsgContext.OfficialQQStatusBarPending`；**`MsgContext.DataUserID` / `DataGroupID`（数据层身份，全项目唯一收敛点）** |
+| `dice/im_helpers.go` | 发送层统一消费状态栏标记（群聊 + 私聊）；**`GetPlayerInfoBySenderRaw` 里填充 `Data*ID`** |
 | `dice/rollvm_migrate.go` | `DiceFormatTmpl` 在渲染最终回复模板时打状态栏标记 |
-| `dice/im_helpers.go` | 发送层统一消费状态栏标记（群聊 + 私聊） |
-| `dice/builtin_commands.go` | 注册全局指令 `.bind` / `.unbind` / `.group`（含 `.groupbind`） |
-| `dice/ext_log.go` | 抽出 `EvalPlayerGroupCardTemplate`；`.group bind` / `.log bind` 系列；读操作群回退 |
-| `dice/dice_attrs_manager.go` | `LoadByCtx` 支持绑定后的属性读取回退 |
-| `api/dice_config.go` | WebUI 保存绑定配置项与官方 QQ 请求超时 |
-| `dice/platform_adapter_official_qq.go` | 请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；统一 file_info 解码（单聊路径此前与群聊不一致）；新增 `apiDomainOverride` 测试钩子 |
+| `dice/builtin_commands.go` | 注册全局指令 `.bind` / `.unbind` / `.group`（含 `.groupbind`）；**`.pc` 系列（list/new/rename/save/load/untagAll/del）改用数据层 ID**；`.help` 标题改为 `鲸娘与豹` + fork 说明 |
+| `dice/dice_attrs_manager.go` | `LoadByCtx` 改用 `identityBindDataUserID/GroupID`（属性读写双向共通） |
+| `dice/ext_log.go` | `.log` 状态统一挂在归一后的群对象（`stateGroup`）；骰子/玩家发言都写归一后的群；删除/编辑按归一后的群查找；日志去重窗口可配置且**跨 bot 模式为可选**；抽出 `EvalPlayerGroupCardTemplate` |
+| `dice/platform_adapter_official_qq.go` | `officialQQGroupIDPrefix` 常量；请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；统一 file_info 解码；新增 `apiDomainOverride` 测试钩子 |
+| `api/dice_config.go` | WebUI 保存绑定配置项、官方 QQ 请求超时、日志去重窗口 |
 
-新增测试：
+新增测试（重点）：
 
 | 文件 | 作用 |
 |---|---|
-| `dice/ext_identity_bind_test.go` | 绑定：出题、答案解析、冷却、答错锁定、持久化、平台隔离、群/个人独立 |
+| `dice/ext_identity_bind_test.go` | 出题、答案解析、冷却、答错锁定、持久化、平台隔离、群/个人独立、**两侧收敛同一 key**、**旧号侧也能解析**、**抢号被拒**、**只有用户绑定时两个群保持隔离**、**日志状态共通**、**日志写入归一**、**`.log off` 作用在归一后的对象上（已验证能抓到回归）**、**自检报告** |
 | `dice/official_qq_character_roll_markdown_test.go` | 状态栏：渲染、转义、实时更新、平台隔离、任意规则系统通用挂载 |
 | `dice/platform_adapter_official_qq_media_test.go` | 官方 QQ 富媒体：超时默认/收敛、file_info 解码、CQ:file 转义与往返、频道不受影响 |
 | `dice/platform_adapter_official_qq_chunked.go` | 大文件分片上传：预上传/分片 PUT/分片完成/合并，保留文件名 |
@@ -817,9 +938,12 @@ officialQQChunkedUploadEnable: true
 
 其余仍可后续增强的点：
 
-* 绑定关系目前是**全局生效**（绑一次所有群都能读到旧身份）。若你希望每个群独立，
-  需要把 `identityBindUserKey` 的键加上群维度。
-* 日志读取回退要求旧群对象在内存里（骰娘进过那个群）。如果旧群从未被官方 bot 加载过，
-  需要额外补一个"按群号构造只读 GroupInfo"的路径。
+* **日志跨群读要求旧群对象在内存里**。归一之后如果目标旧群不在 `ServiceAtNew`，
+  读取会静默回退（`.group doctor` 会报出来）。彻底解决需要补一条
+  "按群号构造只读 GroupInfo" 的路径。
+* **两个独立海豹实例各跑一个 bot 不支持**（见七点八情况 C）。
+  要支持得让两个实例共享数据库或走 HTTP 互通，是另一个量级的改动。
+* **群配置（前缀、自动回复、牌堆、扩展开关）目前不共享**，只有日志与玩家数据归一。
+  想让官方群直接继承旧群调好的群配置，需要把 `group_info` 也纳入归一范围。
 * 状态栏目前跟在玩家**当前保存的** `.sn` 模板上。若想让状态栏独立于 `.sn` 排版，
   可以再开放 `$tQQ角色属性行` / `$tQQ角色状态栏` 之类的文案变量让用户自定义位置。
