@@ -328,13 +328,36 @@ func identityBindSendPrivate(d *Dice, ep *EndPointInfo, targetRawID string, text
 
 // ---------- 通道一：QQ 邮箱 ----------
 
-// identityBindQQMailAddress 从旧 QQ 号推出 QQ 邮箱地址。
+// identityBindMailTargetQQ 取「验证码要寄给哪个 QQ 号」。
+//
+//   - 个人绑定：被声明的旧 QQ 号（用户就是要证明这个号是他的）
+//   - 群绑定：旧群的**邀请人**（DeliverTo），因为群号本身推不出邮箱；
+//     而邀请人必须是旧群成员，他的 QQ 邮箱能证明"他确实是那个人"。
+//
+// 注意：两种情况下地址都来自**我们自己数据库里的记录**，不是用户随口填的。
+// 这是"邮箱方案仍然有约束力"的前提——否则就变成任意邮箱发信机了。
+func identityBindMailTargetQQ(c *identityBindCodeChallenge) string {
+	if c == nil {
+		return ""
+	}
+	if c.Action == identityBindActionGroup {
+		// 群绑定：寄给邀请人
+		if qq := identityBindExtractQQNumber(c.DeliverTo); qq != "" {
+			return qq
+		}
+		// 兜底：老记录里 DeliverTo 可能没填，但 Old.UserID 一般就是邀请人
+		return identityBindExtractQQNumber(c.Old.UserID)
+	}
+	return identityBindExtractQQNumber(c.Old.UserID)
+}
+
+// identityBindQQMailAddress 推出收件用的 QQ 邮箱地址。
 //
 // 为什么用 <QQ号>@qq.com：这是唯一"零配置又有约束力"的方案。
 // QQ 邮箱与 QQ 号绑定，所以能收到这封信 ≈ 控制着这个 QQ 号。
 // **不会**接受用户自己填的邮箱——那既证明不了归属，又会让骰子变成发信机。
-func identityBindQQMailAddress(oldUserID string) string {
-	qq := identityBindExtractQQNumber(oldUserID)
+func identityBindQQMailAddress(c *identityBindCodeChallenge) string {
+	qq := identityBindMailTargetQQ(c)
 	if qq == "" {
 		return ""
 	}
@@ -375,23 +398,34 @@ func identityBindSendEmailCode(d *Dice, c *identityBindCodeChallenge) error {
 	if !identityBindEmailCodeUsable(d) {
 		return errors.New("邮件配置不完整（需要 mailFrom / mailPassword / mailSmtp 三项齐全）")
 	}
-	to := identityBindQQMailAddress(c.Old.UserID)
+	to := identityBindQQMailAddress(c)
 	if to == "" {
-		return errors.New("无法从旧 QQ 号推出 QQ 邮箱地址")
+		return errors.New("无法推出收件用的 QQ 邮箱地址")
 	}
 
 	subject := "身份绑定验证码"
 	body := fmt.Sprintf(
-		"有人正在 QQ 官方机器人上把身份绑定到这个 QQ 号（%s）。\n\n"+
+		"有人正在 QQ 官方机器人上申请绑定（%s）。\n\n"+
 			"如果**是你本人**在操作，请把下面的验证码回复给官方机器人：\n\n"+
 			"    %s\n\n"+
 			"验证码 %s 内有效。\n"+
 			"不是本人操作请直接忽略本邮件，绑定不会生效。\n",
-		c.Old.UserID, c.Code, identityBindFormatDuration(identityBindCodeExpiry(d)))
+		identityBindMailSceneText(c), c.Code, identityBindFormatDuration(identityBindCodeExpiry(d)))
 
 	identityBindMailSender(d, subject, []string{to}, body)
 	c.SentTo = to
 	return nil
+}
+
+// identityBindMailSceneText 邮件正文里描述"这次绑定在做什么"。
+func identityBindMailSceneText(c *identityBindCodeChallenge) string {
+	if c == nil {
+		return "身份绑定"
+	}
+	if c.Action == identityBindActionGroup {
+		return fmt.Sprintf("把官方群与旧群 %s 绑定，绑定后两群共用同一份日志", c.Old.GroupID)
+	}
+	return fmt.Sprintf("把身份绑定到这个 QQ 号（%s）", c.Old.UserID)
 }
 
 // ---------- 投递 worker ----------
@@ -442,12 +476,12 @@ func identityBindDeliverPendingCodes(d *Dice) {
 		c := item.c
 
 		// 两条通道按优先级依次尝试。
-		// 默认私聊优先（只有它同时能证明"控制着这个 QQ 号"且不需要额外配置），
-		// 骰主打开 IdentityBindPreferEmailCode 后改为邮箱优先。
+		// 默认私聊优先，骰主打开 IdentityBindPreferEmailCode 后改为邮箱优先。
 		//
-		// 邮箱通道只在个人绑定上有意义：群号推不出邮箱，而且群绑定要证明的是"群"，
-		// 不是某个 QQ 号。
-		emailUsable := c.Action == identityBindActionUser && identityBindEmailCodeUsable(d)
+		// 群绑定也能走邮箱：收件人是旧群的**邀请人**（见 identityBindMailTargetQQ）。
+		// 之前这里写死了「只有个人绑定能用邮箱」，导致骰主放弃民间 bot 之后
+		// 群绑定彻底无路可走，属于设计错误。
+		emailUsable := identityBindEmailCodeUsable(d) && identityBindMailTargetQQ(c) != ""
 
 		tryEmail := func() bool {
 			if !emailUsable {

@@ -99,6 +99,161 @@ func TestIdentityBindSameIdentity(t *testing.T) {
 	}
 }
 
+// TestIdentityBindGroupCanUseEmail 群绑定也能走邮箱，收件人是**旧群的邀请人**。
+//
+// 回归：之前写死了「只有个人绑定能用邮箱」，于是骰主放弃民间 bot 之后
+// 群绑定彻底无路可走（这正是用户实际遇到的）。
+func TestIdentityBindGroupCanUseEmail(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+	mailBox := withMailCapture(t)
+	enableMailConfig(env.d)
+
+	// 移除民间 bot 端点 → 私聊通道不可用，只能靠邮箱
+	env.d.ImSession.EndPoints = []*EndPointInfo{env.ctx.EndPoint}
+
+	const inviterQQ = "QQ:2431692084"
+	challenge := &identityBindCodeChallenge{
+		Action:    identityBindActionGroup,
+		New:       identityBindEndpoint{GroupID: bindTestNewGroupID},
+		Old:       identityBindEndpoint{GroupID: bindTestOldGroupID},
+		Code:      "666666",
+		DeliverTo: inviterQQ,
+		ConfirmBy: inviterQQ,
+		Status:    identityBindCodePending,
+	}
+	identityBindPutCode(challenge)
+	identityBindDeliverPendingCodes(env.d)
+
+	got, ok := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID)
+	if !ok {
+		t.Fatal("challenge disappeared")
+	}
+	if got.Status != identityBindCodeDelivered || got.Channel != identityBindCodeChannelEmail {
+		t.Fatalf("group challenge should be delivered via email, got status=%q channel=%q reason=%q",
+			got.Status, got.Channel, got.Reason)
+	}
+	if mailBox.count() != 1 {
+		t.Fatalf("expected exactly 1 email, got %d", mailBox.count())
+	}
+	mail, _ := mailBox.last()
+	if len(mail.to) != 1 || mail.to[0] != "2431692084@qq.com" {
+		t.Fatalf("mail recipient = %v, want the inviter's QQ mailbox 2431692084@qq.com", mail.to)
+	}
+	if !strings.Contains(mail.body, "666666") {
+		t.Fatalf("mail body should carry the code, got:\n%s", mail.body)
+	}
+	// 正文要说清是"群绑定"，否则收件人会以为是在绑个人身份
+	if !strings.Contains(mail.body, bindTestOldGroupID) {
+		t.Fatalf("group-binding mail should mention the old group, got:\n%s", mail.body)
+	}
+}
+
+// TestIdentityBindMailTargetQQ 收件人推导：个人看旧号，群看邀请人。
+func TestIdentityBindMailTargetQQ(t *testing.T) {
+	user := &identityBindCodeChallenge{
+		Action:    identityBindActionUser,
+		Old:       identityBindEndpoint{UserID: "QQ:111"},
+		DeliverTo: "QQ:111",
+	}
+	if got := identityBindMailTargetQQ(user); got != "111" {
+		t.Fatalf("user challenge target = %q, want 111", got)
+	}
+
+	group := &identityBindCodeChallenge{
+		Action:    identityBindActionGroup,
+		Old:       identityBindEndpoint{GroupID: "QQ-Group:999"},
+		DeliverTo: "QQ:2431692084",
+	}
+	if got := identityBindMailTargetQQ(group); got != "2431692084" {
+		t.Fatalf("group challenge target = %q, want the inviter 2431692084", got)
+	}
+
+	// 兜底：DeliverTo 缺失时用 Old.UserID（老记录里两者可能同源）
+	fallback := &identityBindCodeChallenge{
+		Action: identityBindActionGroup,
+		Old:    identityBindEndpoint{GroupID: "QQ-Group:999", UserID: "QQ:555"},
+	}
+	if got := identityBindMailTargetQQ(fallback); got != "555" {
+		t.Fatalf("fallback target = %q, want 555", got)
+	}
+
+	// 推不出号时返回空（调用方据此判定"邮箱不可用"，而不是发到垃圾地址）
+	if got := identityBindMailTargetQQ(&identityBindCodeChallenge{Action: identityBindActionGroup,
+		Old: identityBindEndpoint{GroupID: "QQ-Group:999"}}); got != "" {
+		t.Fatalf("unresolvable group target = %q, want empty", got)
+	}
+}
+
+// TestIdentityBindForceBindMasterOnly 手动确认只给 master。
+func TestIdentityBindForceBindMasterOnly(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+
+	// 群管理员（50）不够
+	env.ctx.PrivilegeLevel = 50
+	before := env.recorder.messageCount()
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bindforce", "1001"}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "master") {
+		t.Fatalf("non-master should be rejected, got %q", reply)
+	}
+	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldGroupID); ok {
+		t.Fatal("non-master must not create a binding")
+	}
+}
+
+// TestIdentityBindForceBindCreatesRecord master 手动确认后绑定成立，
+// 并且真实群上残留的日志状态被清掉（与正常路径一致）。
+func TestIdentityBindForceBindCreatesRecord(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+	env.ctx.PrivilegeLevel = 100
+
+	officialGroup := groupForTest(t, env, bindTestNewGroupID)
+	officialGroup.SetLogState(777, "残留记录", true)
+	officialGroup.MarkDirty(env.d)
+
+	before := env.recorder.messageCount()
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bindforce", "1001"}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "手动确认") {
+		t.Fatalf("expected a force-confirm reply, got %q", reply)
+	}
+
+	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldGroupID)
+	if !ok {
+		t.Fatal("force bind should create a binding record")
+	}
+	if record.Action != identityBindActionGroup || record.New.GroupID != bindTestNewGroupID {
+		t.Fatalf("unexpected record: %+v", record)
+	}
+	// 残留日志状态同样要清掉
+	if st := getGroupLogState(officialGroup); st.On || st.Name != "" {
+		t.Fatalf("force bind must also clear the real group's stale log state, got %+v", st)
+	}
+}
+
+// TestIdentityBindForceBindRejectsDuplicate 已被占用时手动确认也要拦住。
+func TestIdentityBindForceBindRejectsDuplicate(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+	env.ctx.PrivilegeLevel = 100
+
+	// 旧群已被别人占了
+	if err := identityBindStoreOf(env.d).put(env.d, &identityBindRecord{
+		Action: identityBindActionGroup,
+		New:    identityBindEndpoint{GroupID: "OpenQQ-Group:other"},
+		Old:    identityBindEndpoint{GroupID: bindTestOldGroupID},
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	before := env.recorder.messageCount()
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bindforce", "1001"}})
+	if reply := env.recorder.waitNextReply(t, before); !strings.Contains(reply, "已经被绑定") {
+		t.Fatalf("force bind should refuse an already-claimed group, got %q", reply)
+	}
+}
+
 // TestIdentityBindQQMailAddress 旧 QQ 号 → QQ 邮箱地址的推导。
 func TestIdentityBindQQMailAddress(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -110,9 +265,18 @@ func TestIdentityBindQQMailAddress(t *testing.T) {
 		{"OpenQQ:1-abc", ""}, // 官方 ID 不该被当 QQ 号
 	}
 	for _, c := range cases {
-		if got := identityBindQQMailAddress(c.in); got != c.want {
+		challenge := &identityBindCodeChallenge{
+			Action:    identityBindActionUser,
+			Old:       identityBindEndpoint{UserID: c.in},
+			DeliverTo: c.in,
+		}
+		if got := identityBindQQMailAddress(challenge); got != c.want {
 			t.Fatalf("identityBindQQMailAddress(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+	// nil 不该 panic
+	if got := identityBindQQMailAddress(nil); got != "" {
+		t.Fatalf("nil challenge should yield an empty address, got %q", got)
 	}
 }
 
@@ -253,12 +417,12 @@ func TestIdentityBindDeliveryPrefersEmailWhenConfigured(t *testing.T) {
 	}
 }
 
-// TestIdentityBindGroupNeverUsesEmail 群绑定永远走私聊——群号推不出邮箱。
-func TestIdentityBindGroupNeverUsesEmail(t *testing.T) {
+// TestIdentityBindGroupPrefersDMWhenAvailable 群绑定两条通道都在时，
+// 默认仍然走私聊（与优先级开关语义一致）。
+func TestIdentityBindGroupPrefersDMWhenAvailable(t *testing.T) {
 	env := newCodeTestEnv(t)
 	defer env.cleanup()
 	mailBox := withMailCapture(t)
-	env.d.Config.IdentityBindPreferEmailCode = true // 即使优先邮箱也不行
 	enableMailConfig(env.d)
 
 	challenge := &identityBindCodeChallenge{
@@ -274,15 +438,43 @@ func TestIdentityBindGroupNeverUsesEmail(t *testing.T) {
 	identityBindDeliverPendingCodes(env.d)
 
 	got, _ := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID)
-	if got.Channel == identityBindCodeChannelEmail {
-		t.Fatal("group binding must never use the email channel")
+	if got.Status != identityBindCodeDelivered || got.Channel != identityBindCodeChannelDM {
+		t.Fatalf("group challenge should go via DM by default, got status=%q channel=%q reason=%q",
+			got.Status, got.Channel, got.Reason)
 	}
 	if mailBox.count() != 0 {
-		t.Fatalf("no mail should be sent for group binding, got %d", mailBox.count())
+		t.Fatalf("no mail should be sent when DM works, got %d", mailBox.count())
 	}
-	if got.Status != identityBindCodeDelivered || got.Channel != identityBindCodeChannelDM {
-		t.Fatalf("group challenge should be delivered via DM, got status=%q channel=%q reason=%q",
+}
+
+// TestIdentityBindGroupPrefersEmailWhenConfigured 打开优先级后群绑定也走邮箱。
+func TestIdentityBindGroupPrefersEmailWhenConfigured(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+	mailBox := withMailCapture(t)
+	enableMailConfig(env.d)
+	env.d.Config.IdentityBindPreferEmailCode = true
+
+	const inviterQQ = "QQ:2431692084"
+	challenge := &identityBindCodeChallenge{
+		Action:    identityBindActionGroup,
+		New:       identityBindEndpoint{GroupID: bindTestNewGroupID},
+		Old:       identityBindEndpoint{GroupID: bindTestOldGroupID},
+		Code:      "777777",
+		DeliverTo: inviterQQ,
+		ConfirmBy: inviterQQ,
+		Status:    identityBindCodePending,
+	}
+	identityBindPutCode(challenge)
+	identityBindDeliverPendingCodes(env.d)
+
+	got, _ := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID)
+	if got.Status != identityBindCodeDelivered || got.Channel != identityBindCodeChannelEmail {
+		t.Fatalf("with prefer-email on, group challenge should use email, got status=%q channel=%q reason=%q",
 			got.Status, got.Channel, got.Reason)
+	}
+	if mailBox.count() != 1 {
+		t.Fatalf("expected 1 mail, got %d", mailBox.count())
 	}
 }
 

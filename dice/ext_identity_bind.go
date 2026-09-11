@@ -1235,6 +1235,7 @@ func identityBindLogHelp() string {
 日志状态（.log on / new / off）与日志内容都记在同一份记录里，两边都能读到。
 
 .group bind <旧群号> // 发起群绑定（需要管理权限）
+.group bindforce <旧群号> // 骰主手动确认，跳过验证码（仅 master）
 .group cancel // 取消进行中的绑定验证（同时清掉个人绑定的验证）
 .group unbind // 解除当前群的绑定（需要管理权限）
 .group status // 查看当前群的绑定
@@ -1244,10 +1245,12 @@ func identityBindLogHelp() string {
 发起后会私聊给**旧群的邀请人**（把骰子拉进旧群的那个人）一个验证码，
 由他把验证码回复给民间 bot 即可完成。
 
+如果两条通道都不通（没有民间 bot、邀请人也没开 QQ 邮箱），
+骰主可以用 .group bindforce <旧群号> 手动确认——**请先自行核实对方身份**。
+
 说明：
 * 群绑定负责「群维度」，个人身份绑定（.bind）负责「用户维度」。
   两个都做，官方身份与旧号才会完全共用同一套数据；只做一个会有半边读不到。
-* 群绑定只有私聊验证码这一条通道（群号推不出邮箱），所以需要民间 bot 在线。
 * 数据不做任何搬移，规范位置固定在旧群 / 旧号名下，.unbind 后立刻恢复原状。
 * 兼容写法：.log bind / .log unbind / .log bindstatus 与上面等价。`
 }
@@ -1287,10 +1290,11 @@ func identityBindGroupStatus(d *Dice, ctx *MsgContext) string {
 //
 // 支持：
 //
-//	.group bind <旧群号>   // 发起群绑定（需要管理权限）
-//	.group bind <选项序号> // 在问答过程中提交答案
-//	.group unbind          // 解除当前群的绑定（需要管理权限）
-//	.group status          // 查看当前群的绑定
+//	.group bind <旧群号>      // 发起群绑定（需要管理权限）
+//	.group bindforce <旧群号> // 骰主手动确认，跳过验证码（需要 master）
+//	.group unbind             // 解除当前群的绑定（需要管理权限）
+//	.group status             // 查看当前群的绑定
+//	.group doctor             // 自检所有绑定（需要管理权限）
 //
 // 群绑定与用户身份绑定（.bind）完全独立，互不影响。
 func runIdentityBindGroupCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
@@ -1330,6 +1334,11 @@ func runIdentityBindGroupCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs
 		return solved
 	}
 
+	// .group bindforce <旧群号> 骰主手动确认（兜底）
+	if sub == "bindforce" || sub == "force" {
+		return identityBindRunForceBind(ctx, msg, cmdArgs)
+	}
+
 	// .group unbind 解除当前群绑定
 	if sub == "unbind" {
 		return identityBindRunUnbind(ctx, msg, identityBindActionGroup)
@@ -1357,7 +1366,7 @@ func runIdentityBindLogCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) 
 		}
 	}
 	switch sub {
-	case "bind", "unbind", "bindstatus":
+	case "bind", "unbind", "bindstatus", "bindforce", "force":
 	default:
 		return solved, false
 	}
@@ -1371,6 +1380,11 @@ func runIdentityBindLogCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) 
 	if sub == "bindstatus" {
 		ReplyToSender(ctx, msg, identityBindGroupStatus(d, ctx))
 		return solved, true
+	}
+
+	// .log bindforce / .log force 也转发到手动确认，保持别名一致
+	if sub == "bindforce" || sub == "force" {
+		return identityBindRunForceBind(ctx, msg, cmdArgs), true
 	}
 
 	if sub == "unbind" {
@@ -1467,25 +1481,135 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		GroupName: oldGroupName,
 	}
 
-	// 群绑定统一走验证码。确认人是旧群的邀请人（把骰子拉进旧群的人），
-	// 因为他一定是那个群的成员，身份稳定、可以私聊。
+	// 群绑定的确认人是旧群的邀请人（把骰子拉进旧群的那个人）：
+	// 他必然是旧群成员，所以由他确认能证明"这个旧群确实是我们见过的那个"。
 	//
-	// 注意：群绑定**没有邮箱通道**——群号推不出邮箱，而且这里要证明的是"这个群"，
-	// 不是某个 QQ 号。所以必须有能发私聊的民间 bot。
+	// 投递通道两条都支持：
+	//   · 私聊 → 直接发给邀请人本人
+	//   · 邮箱 → 寄 邀请人QQ号@qq.com（连民间 bot 都不需要，适合纯官 bot 部署）
 	if !oldGroupInMemory || oldGroupObj == nil {
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"旧群 %s 目前不在骰子内存里，无法确定把验证码发给谁。\n"+
 				"请先让骰子在旧群收到一条消息，然后再试一次。", oldGroupID))
 		return solved
 	}
+	// 群绑定同样支持两条通道：私聊发给邀请人，或寄邀请人的 QQ 邮箱。
+	// （纯官 bot 部署、没有民间 bot 时，邮箱是唯一出路。）
 	confirmer := strings.TrimSpace(oldGroupObj.InviteUserID)
 	if confirmer == "" {
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"拿不到旧群 %s 的邀请人信息，无法确定把验证码发给谁。\n"+
-				"可以让骰子重新被拉进那个群（会记录邀请人），或联系骰主手工处理。", oldGroupID))
+				"可以：\n"+
+				"  · 让骰子重新被拉进那个群（会记录邀请人），或\n"+
+				"  · 骰主用 `.group bindforce %s` 手动确认（master 权限）",
+			oldGroupID, oldGroupID))
 		return solved
 	}
 	return identityBindStartCodeChallenge(ctx, msg, action, newEndpoint, oldEndpoint, confirmer)
+}
+
+// identityBindRunForceBind 骰主手动确认绑定（跳过验证码）。
+//
+// 为什么需要这个兜底：验证码依赖两条通道，而现实中两条都可能不可用——
+// 比如骰主已放弃民间 bot（私聊发不了），而旧群的邀请人没开通 QQ 邮箱
+// （邮件退信）。此时群绑定就彻底卡死，没有一个能推进的口子。
+//
+// **只给 master**（`.group` 的其它子指令是 ≥50，这里是 100），
+// 因为它本质上是"骰主替玩家作证"，属于最高信任级别的操作。
+func identityBindRunForceBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
+	solved := CmdExecuteResult{Matched: true, Solved: true}
+	if ctx == nil || ctx.Dice == nil || ctx.Group == nil {
+		return solved
+	}
+	d := ctx.Dice
+
+	if !identityBindSupported(ctx.EndPoint) {
+		ReplyToSender(ctx, msg, "该指令仅用于 QQ 官方机器人。")
+		return solved
+	}
+	if !identityBindEnabled(d) {
+		ReplyToSender(ctx, msg, "身份与日志绑定功能未开启，请让骰主在 serve.yaml 中把 identityBindEnable 设为 true。")
+		return solved
+	}
+	if ctx.PrivilegeLevel < 100 {
+		ReplyToSender(ctx, msg, "手动确认需要 master 权限（该操作会跳过验证码，等同骰主替对方作证）。")
+		return solved
+	}
+
+	// 参数位置：.group bindforce <旧群号>
+	rawGroup := cmdArgs.GetArgN(2)
+	if strings.TrimSpace(rawGroup) == "" {
+		// 兼容 .group force <旧群号> 以及 .groupbindforce <旧群号>
+		rawGroup = cmdArgs.GetArgN(1)
+		if strings.EqualFold(rawGroup, "bindforce") || strings.EqualFold(rawGroup, "force") {
+			rawGroup = ""
+		}
+	}
+	if strings.TrimSpace(rawGroup) == "" {
+		ReplyToSender(ctx, msg, "请使用 `.group bindforce <旧群号>`，例如 `.group bindforce 577347791`。")
+		return solved
+	}
+	oldGroupID, err := normalizeIdentityBindGroup(rawGroup)
+	if err != nil {
+		ReplyToSender(ctx, msg, err.Error())
+		return solved
+	}
+
+	var issues []string
+	if _, ok := identityBindStoreOf(d).find(d, oldGroupID); ok {
+		issues = append(issues, fmt.Sprintf("旧群 %s 已经被绑定到另一个群了", oldGroupID))
+	}
+	if existing, ok := identityBindStoreOf(d).find(d, ctx.Group.GroupID); ok {
+		issues = append(issues, fmt.Sprintf("本群已经绑定到 %s 了，请先 .group unbind", existing.Old.GroupID))
+	}
+	if len(issues) > 0 {
+		ReplyToSender(ctx, msg, "无法手动确认：\n  · "+strings.Join(issues, "\n  · "))
+		return solved
+	}
+
+	oldGroupName := ""
+	if oldGroupObj, ok := ctx.Session.ServiceAtNew.Load(oldGroupID); ok && oldGroupObj != nil {
+		oldGroupName = oldGroupObj.GroupName
+	}
+
+	record := &identityBindRecord{
+		Action: identityBindActionGroup,
+		New: identityBindEndpoint{
+			Platform: ctx.EndPoint.Platform,
+			Protocol: ctx.EndPoint.ProtocolType,
+			GroupID:  ctx.Group.GroupID,
+			UserID:   ctx.Player.UserID,
+		},
+		Old: identityBindEndpoint{
+			Platform:  "QQ",
+			Protocol:  "onebot",
+			GroupID:   oldGroupID,
+			GroupName: oldGroupName,
+		},
+		Created: time.Now().Unix(),
+		Creator: ctx.Player.UserID,
+	}
+	if err := identityBindStoreOf(d).put(d, record); err != nil {
+		ReplyToSender(ctx, msg, fmt.Sprintf("保存绑定失败: %v", err))
+		return solved
+	}
+
+	// 清掉真实群上残留的日志状态（同正常绑定路径，避免回退时"复活"成空日志）
+	identityBindResetRealGroupLogState(ctx, ctx.Group)
+
+	// 顺手清掉这个群里可能挂着的、还没被确认的挑战
+	identityBindCancelCode(identityBindActionGroup, ctx.Group.GroupID)
+
+	ReplyToSender(ctx, msg, fmt.Sprintf(
+		"已由骰主手动确认：本群与旧群 %s 绑定成功，双方共用同一份日志。\n"+
+			"（本次跳过了验证码——请确认你确实核实过对方身份。）\n"+
+			"如需解除请发送 `.group unbind`。", oldGroupID))
+	ctx.Notice(fmt.Sprintf(
+		"群绑定（骰主手动确认）: 群 <%s>(%s) 已绑定到旧群 %s，操作者 <%s>(%s)",
+		ctx.Group.GroupName, ctx.Group.GroupID, oldGroupID, msg.Sender.Nickname, ctx.Player.UserID,
+	), NoticeTypeGroup)
+	d.LastUpdatedTime = time.Now().Unix()
+	return solved
 }
 
 // identityBindLogWriteGroupID 计算日志「写入」应该使用的群 ID。
