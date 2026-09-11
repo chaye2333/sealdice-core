@@ -342,9 +342,37 @@ go generate ./...
 `https://github.com/sealdice/sealdice-ui/releases/download/pre-release/sealdice-ui.zip`
 下载官方前端产物并解压到 `static/frontend`。
 
-**本仓库的 Dockerfile 已经按这套机制处理**：在 Go 构建阶段执行
-`go generate ./static/...`，并断言 `index.html` 与 `assets/` 存在，
-下载失败就直接让构建失败——不会再出现「镜像能起来、但页面是脚手架欢迎页」这种情况。
+**本仓库的 Dockerfile 现在有两种取前端的方式**，用构建参数 `UI_FROM_SOURCE` 切换：
+
+| `UI_FROM_SOURCE` | 前端来源 | 用途 |
+| --- | --- | --- |
+| `1`（默认） | 从 `chaye2333/sealdice-ui` 拉源码，在 `node:22-alpine` 阶段现场 `pnpm run build-only` 编译 | 镜像里带上我们新增的设置项（官方QQ超时/分片上传、身份绑定） |
+| `0` | 走上游机制：`go generate ./static/...`，从 `sealdice-ui` 官方 pre-release 下载 zip | 想要一份「纯上游」的镜像时用 |
+
+```bash
+# 默认：带新设置项的前端
+docker build -t sealdice-core:local .
+
+# 纯上游前端
+docker build -t sealdice-core:local --build-arg UI_FROM_SOURCE=0 .
+```
+
+前端源码来源也可以用参数覆盖（默认已指向你的 fork）：
+
+```bash
+docker build -t sealdice-core:local \
+  --build-arg UI_REPO=chaye2333/sealdice-ui \
+  --build-arg UI_REF=cc3f080 .
+```
+
+`UI_REF` 默认写死为 `master`，所以它会被算进 Docker 的层缓存键：
+**改了 UI 并推到 fork 后，要重新构建镜像，需要在 `Dockerfile` 里把 `UI_REF` 改成新的短 hash
+（或者构建时传 `--build-arg UI_REF=<新hash>`）**，否则 Docker 会直接复用旧的 UI 层。
+镜像上也打了标签方便核对：`docker inspect <镜像> --format '{{json .Config.Labels}}'`
+能看到 `sealdice.ui.repo` / `sealdice.ui.ref`。
+
+无论走哪条路，Go 构建阶段都会断言 `static/frontend/index.html` 与 `static/frontend/assets/` 存在，
+缺了就直接让构建失败——不会再出现「镜像能起来、但页面是脚手架欢迎页」这种情况。
 
 工作流里还有一个**烟雾测试**：启动容器抓首页，校验：
 
@@ -355,24 +383,50 @@ go generate ./...
 三者都通过才算构建成功。
 
 > 想改管理界面本身，要去 [sealdice-ui](https://github.com/sealdice/sealdice-ui) 仓库改，
-> 不是在 sealdice-core 的 `ui/` 里改。改完发布后重新构建本镜像即可生效。
+> 不是在 sealdice-core 的 `ui/` 里改。改完推到自己的 fork，再按上面的方式重新构建镜像即可生效。
+
+### 5.6.1 管理界面上新增的开关（在你的 sealdice-ui fork 里）
+
+因为这三个配置项只有 `serve.yaml` 里有，上游的管理界面并没有对应的输入框，
+所以在你 fork 的 `sealdice-ui` 里补上了。位置：**杂项设置 → 官方QQ 区域**。
+
+| 界面上的名字 | 配置键 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| 官方QQ 请求超时（秒） | `officialQQRequestTimeoutSec` | 60 | 5~600，重启后生效 |
+| 本地文件使用分片上传 | `officialQQChunkedUploadEnable` | 关 | 开启后本地文件保留文件名 |
+| 启用身份绑定 | `identityBindEnable` | 关 | 总开关，关掉后 `.bind` 不可用 |
+| 身份绑定题目数量 | `identityBindQuestionCount` | 1 | 1~5 |
+| 身份绑定发起间隔（秒） | `identityBindCooldownSec` | 60 | 0~86400 |
+| 身份绑定答错锁定（秒） | `identityBindFailCooldownSec` | 43200 | 1~86400，答错后锁定 |
+
+改动只涉及两个文件：
+
+* `src/api/dice/index.ts`：`DiceConfig` 类型里补上这 6 个字段；
+* `src/components/misc/PageMiscSettings.vue`：加上对应的 `el-form-item`，
+  并在 `submit()` 里对 4 个数字框做 `toNumber()`（数字框偶尔会回传字符串，
+  后端按整数解析会失败）。
 
 ### 5.7 关于 pnpm 依赖授权（另一个踩过的坑）
 
-（如果以后你决定改成从 `ui/` 或 `sealdice-ui` 源码构建前端，会需要这段）
+从源码编译前端（也就是默认的 `UI_FROM_SOURCE=1`）会踩到这个坑。
 
-`ui/pnpm-workspace.yaml` 里的 `allowBuilds` 是**必须的**：
+`sealdice-ui` 的 `pnpm-workspace.yaml` 里的 `allowBuilds` 是**必须的**：
 
 ```yaml
 allowBuilds:
-  '@tailwindcss/oxide': true
   esbuild: true
+  core-js: false
+  vue-demi: false
 ```
 
-pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 和 `@tailwindcss/oxide` 都是原生模块，
+pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 是原生模块，
 没有这一步 `pnpm install --frozen-lockfile` 会以 `ERR_PNPM_IGNORED_BUILDS` 失败，
-进而让整个镜像构建中断。如果用 Dockerfile 里的 `COPY` 只拷了 `package.json` 与
-`pnpm-lock.yaml`，镜像内是看不到这个授权文件的，必须把它一起 COPY 进构建上下文。
+进而让整个镜像构建中断。所以 Dockerfile 里：
+
+* 用 `curl` 拉 **整个仓库 tarball**（而不是只 COPY 几个文件），保证
+  `pnpm-workspace.yaml`、`pnpm-lock.yaml` 都在；
+* 用 `npm install -g pnpm@10` 固定 pnpm 大版本，**不用 corepack**：
+  非交互环境下 corepack 会弹「是否下载 pnpm」的提示，在 CI 里会直接失败。
 
 ---
 
