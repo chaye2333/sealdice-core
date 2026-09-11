@@ -26,10 +26,19 @@
 # ---------- 阶段 1：编译 WebUI（sealdice-ui） ----------
 FROM node:22-alpine AS ui-builder
 
-# UI_REPO / UI_REF 决定用哪份前端源码，例如：
-#   --build-arg UI_REPO=chaye2333/sealdice-ui --build-arg UI_REF=cc3f080
+# UI_REPO / UI_REF 决定用哪份前端源码。
+#
+# ⚠️ UI_REF 必须钉成**具体的 commit hash**，不能用 "master" 这种分支名！
+#
+# 原因（真实踩过）：Docker 按 ARG 的值做层缓存，而 `curl` 那一层只依赖 UI_REF 的值。
+# 写成 "master" 时这个值永远不变 → 该层永远命中缓存 →
+# **之后推到 fork 的所有 UI 改动都不会进镜像**，而且构建照样"成功"，
+# 极难发现（镜像里的其实是第一次构建时的旧 UI）。
+#
+# 改 UI 之后必须同步更新这里的 hash（见下面的「改 UI 流程」）。
+# CI 里还有一步烟雾测试会校验新 UI 的关键选项确实在镜像里，漏改会被拦下。
 ARG UI_REPO="chaye2333/sealdice-ui"
-ARG UI_REF="master"
+ARG UI_REF="bd0a9b21a2f0d66c9c0309aff8bb2a530e20475f"
 # 前端包管理器版本。仓库里的 pnpm-workspace.yaml 用 allowBuilds 控制哪些依赖允许跑
 # postinstall 脚本（esbuild / @tailwindcss/oxide 必须为 true，否则 vite 无法运行），
 # 这是 pnpm 10 的写法，所以固定用 pnpm 10。
@@ -107,9 +116,10 @@ RUN BUILD_META="${VERSION_BUILD_METADATA:-+$(date -u +%Y%m%d)}" && \
 # ---------- 阶段 3：运行镜像 ----------
 FROM alpine:3.20
 
-# 记录前端来源，方便上线后核对镜像里到底是哪份 UI
+# 记录前端来源，方便上线后核对镜像里到底是哪份 UI。
+# 注意这里的默认值必须和阶段 1 保持一致，否则 label 会误导排查。
 ARG UI_REPO="chaye2333/sealdice-ui"
-ARG UI_REF="master"
+ARG UI_REF="bd0a9b21a2f0d66c9c0309aff8bb2a530e20475f"
 LABEL org.opencontainers.image.source="https://github.com/${UI_REPO}" \
       sealdice.ui.repo="${UI_REPO}" \
       sealdice.ui.ref="${UI_REF}"

@@ -373,7 +373,7 @@ func identityBindSendEmailCode(d *Dice, c *identityBindCodeChallenge) error {
 		return errors.New("上下文为空")
 	}
 	if !identityBindEmailCodeUsable(d) {
-		return errors.New("邮箱通道未启用或邮件配置不完整（需要 mailEnabled/mailFrom/mailPassword/mailSmtp）")
+		return errors.New("邮件配置不完整（需要 mailFrom / mailPassword / mailSmtp 三项齐全）")
 	}
 	to := identityBindQQMailAddress(c.Old.UserID)
 	if to == "" {

@@ -147,5 +147,31 @@ jobs:
           curl -fsS "$URL" -o /tmp/asset.js || fail "首页引用的资源 $ASSET 无法访问"
           echo "asset size: $(wc -c < /tmp/asset.js) bytes"
 
+          # ---------------------------------------------------------------
+          # 关键：确认镜像里是**我们 fork 的那份 UI**，而不是旧缓存里的老板本。
+          #
+          # 背景（真实踩过）：Dockerfile 里 `curl` 前端 tarball 那一层只依赖 UI_REF
+          # 这个 ARG 的值。当年写成 "master" 时该值永远不变 → 层永远命中缓存 →
+          # 之后所有 UI 改动都进不了镜像，而且构建照样成功，极难发现。
+          # 现在 UI_REF 钉成 commit hash，这里再校验新 UI 的特征字符串，
+          # 双保险：漏改 hash 会被这一步直接拦下。
+          # ---------------------------------------------------------------
+          echo "--- checking the bundled UI really contains our settings ---"
+
+          # 应当存在的：本 fork 新增的绑定设置
+          for NEEDLE in identityBindPreferEmailCode identityBindCodeExpireSec logMultiBotDedupWindowSec; do
+            if ! grep -q "$NEEDLE" /tmp/asset.js; then
+              fail "镜像里的 UI 缺少设置项 $NEEDLE —— 前端可能是旧缓存版本（检查 Dockerfile 的 UI_REF 是否匹配 sealdice-ui fork 的最新 commit）"
+            fi
+          done
+
+          # 应当已删除的：答题时代的失效选项
+          for GONE in identityBindQuestionCount identityBindKeepQuiz identityBindFailCooldownSec; do
+            if grep -q "$GONE" /tmp/asset.js; then
+              fail "镜像里的 UI 仍包含已废弃的选项 $GONE —— 前端是旧版本"
+            fi
+          done
+
+          echo "OK: 前端是 fork 的最新版本（含新设置项、已无废弃选项）"
           echo "OK: 管理界面已正确打包（资源 $ASSET 可用）"
           docker rm -f smktest
