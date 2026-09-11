@@ -120,6 +120,25 @@ func (c *Config) FixIdentityBindConfig() {
 	if c.LogMultiBotDedupWindowSec > logDedupWindowMaxSec {
 		c.LogMultiBotDedupWindowSec = logDedupWindowMaxSec
 	}
+	// 验证码相关
+	if c.IdentityBindCodeLength <= 0 {
+		c.IdentityBindCodeLength = DefaultConfig.IdentityBindCodeLength
+	}
+	if c.IdentityBindCodeLength < identityBindCodeMinLen {
+		c.IdentityBindCodeLength = identityBindCodeMinLen
+	}
+	if c.IdentityBindCodeLength > identityBindCodeMaxLen {
+		c.IdentityBindCodeLength = identityBindCodeMaxLen
+	}
+	if c.IdentityBindCodeExpireSec <= 0 {
+		c.IdentityBindCodeExpireSec = DefaultConfig.IdentityBindCodeExpireSec
+	}
+	if c.IdentityBindCodeExpireSec < 60 {
+		c.IdentityBindCodeExpireSec = 60
+	}
+	if c.IdentityBindCodeExpireSec > 3600 {
+		c.IdentityBindCodeExpireSec = 3600
+	}
 }
 
 // migrateOld2Version1 旧格式设置项的迁移
@@ -273,6 +292,25 @@ type BaseConfig struct {
 	// 调大后会切换成按「群+人+正文」跨连接去重，代价是同一人在窗口内发的两条
 	// 完全相同的消息会被并成一条。日志是永久记录，所以这个模式必须主动开启。
 	LogMultiBotDedupWindowSec int64 `json:"logMultiBotDedupWindowSec" yaml:"logMultiBotDedupWindowSec"`
+
+	// IdentityBindUseVerificationCode 是否用「私聊验证码」验证身份归属。**默认开启**。
+	//
+	// 这是防抢号的关键：答题只能拦住不知道你信息的人，拦不住"知道你旧 QQ 号
+	// 又猜得到你卡名"的人。验证码由民间 bot 私聊发到被声明的旧 QQ 号上，
+	// 只有真正持有那个号的人才能收到并回复，因此无法伪造。
+	//
+	// ⚠️ 它依赖民间 bot（OneBot 连接）在线。如果骰主已经放弃民间 bot 运营、
+	// 打算纯用官 bot 做数据迁移，请关掉这个开关，改回答题验证。
+	//
+	// 开启后答题环节默认被跳过（要两者并用请再打开 IdentityBindKeepQuiz）。
+	IdentityBindUseVerificationCode bool `json:"identityBindUseVerificationCode" yaml:"identityBindUseVerificationCode"`
+	// IdentityBindCodeLength 验证码位数，4~8，默认 6。
+	IdentityBindCodeLength int64 `json:"identityBindCodeLength" yaml:"identityBindCodeLength"`
+	// IdentityBindCodeExpireSec 验证码有效期（秒），60~3600，默认 600（10 分钟）。
+	IdentityBindCodeExpireSec int64 `json:"identityBindCodeExpireSec" yaml:"identityBindCodeExpireSec"`
+	// IdentityBindKeepQuiz 验证码通过之后是否还要求答题。
+	// 默认 false：验证码已经证明了归属，再答题只是增加摩擦。
+	IdentityBindKeepQuiz bool `json:"identityBindKeepQuiz" yaml:"identityBindKeepQuiz"`
 }
 
 type RateLimitConfig struct {

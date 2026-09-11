@@ -101,6 +101,12 @@ func resetIdentityBindGlobals() {
 		globalIdentityBindLastAttempt.Delete(key)
 		return true
 	})
+	// 验证码挑战也是包级全局，必须在每个用例开始前清干净，
+	// 否则上一个用例留下的挑战会污染下一个。
+	globalIdentityBindCodes.Range(func(key string, _ *identityBindCodeChallenge) bool {
+		globalIdentityBindCodes.Delete(key)
+		return true
+	})
 }
 
 // bindTestEnv 构建一个可直接调用 .bind 指令的环境。
@@ -123,6 +129,10 @@ func newBindTestEnv(t *testing.T) *bindTestEnv {
 	d.Config.IdentityBindEnable = true
 	d.Config.IdentityBindQuestionCount = 1
 	d.Config.IdentityBindCooldownSec = 0
+	// 这个环境专门用来测**答题路径**，所以显式关掉验证码。
+	// （产品默认是开着验证码的，见 DefaultConfig；需要验证码的用例自己打开。）
+	// 两边都显式声明，测试的意图才不会被默认值变化悄悄改掉。
+	d.Config.IdentityBindUseVerificationCode = false
 	// 关闭 QQ 发送延迟，否则每条回复都要等几百毫秒
 	d.Config.MessageDelayRangeStart = 0
 	d.Config.MessageDelayRangeEnd = 0

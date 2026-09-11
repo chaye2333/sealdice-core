@@ -348,6 +348,8 @@ func (d *Dice) Init(operator engine.DatabaseOperator, uiWriter *logger.UIWriter)
 	}
 
 	d.IdentityBindStore = &identityBindStore{}
+	// 启动私聊验证码投递任务（幂等；功能没开时它自己会空转返回）
+	identityBindStartCodeWorker(d)
 
 	d.registerCoreCommands()
 	d.RegisterBuiltinExt()

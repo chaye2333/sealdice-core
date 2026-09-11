@@ -74,6 +74,17 @@ var DefaultConfig = Config{
 		// 此时才会启用「按 群+人+正文 跨连接去重」——代价是同一人窗口内
 		// 发的两条完全相同的消息会被并成一条，所以默认不开。
 		LogMultiBotDedupWindowSec: 5,
+
+		// 私聊验证码：默认**开启**。
+		// 它由民间 bot 给被声明的旧 QQ 号发私聊，只有真正持有该号的人才能确认，
+		// 从根本上解决抢号；单靠答题是拦不住"知道你旧号又猜得到卡名"的人的。
+		//
+		// 代价：需要民间 bot（OneBot 连接）在线。如果骰主已经放弃民间 bot 运营、
+		// 打算纯用官 bot 做数据迁移，请把它关掉，改用答题方式。
+		IdentityBindUseVerificationCode: true,
+		IdentityBindCodeLength:          6,
+		IdentityBindCodeExpireSec:       600, // 10 分钟
+		IdentityBindKeepQuiz:            false,
 	},
 	RateLimitConfig{
 		RateLimitEnabled:         false,

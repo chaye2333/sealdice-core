@@ -319,7 +319,9 @@ func RegisterBuiltinExtLog(self *Dice) {
 				if state.On {
 					onText = "开启"
 				}
-				lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, state.Name)
+				// 条数必须按「记录实际所在的那个群」去查。
+				// 群绑定之后日志记录都在旧群名下，用当前群的 ID 去数必然是 0。
+				lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, stateGroup.GroupID, state.Name)
 				text := fmt.Sprintf("当前故事: %s\n当前状态: %s\n已记录文本%d条", state.Name, onText, lines)
 				text += identityBindStatusSuffix(ctx)
 				ReplyToSender(ctx, msg, text)
@@ -411,29 +413,29 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 				if name != "" {
 					var ok bool
-					name, ok = resolveLogNameWithReply(group.GroupID, name)
+					name, ok = resolveLogNameWithReply(stateGroup.GroupID, name)
 					if !ok {
 						return CmdExecuteResult{Matched: true, Solved: true}
 					}
 				}
 
 				if name != "" {
-					lines, exists := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, name)
+					lines, exists := service.LogLinesCountGet(ctx.Dice.DBOperator, stateGroup.GroupID, name)
 
 					if exists {
 						if groupNotActiveCheck() {
 							return CmdExecuteResult{Matched: true, Solved: true}
 						}
 
-						logID, err := service.LogGetOrCreate(ctx.Dice.DBOperator, group.GroupID, name)
+						logID, err := service.LogGetOrCreate(ctx.Dice.DBOperator, stateGroup.GroupID, name)
 						if err != nil {
 							ReplyToSender(ctx, msg, "日志开启失败: "+err.Error())
-							ctx.Dice.Logger.Errorf("日志开启失败: group=%s name=%s err=%v", group.GroupID, name, err)
+							ctx.Dice.Logger.Errorf("日志开启失败: group=%s name=%s err=%v", stateGroup.GroupID, name, err)
 							return CmdExecuteResult{Matched: true, Solved: true}
 						}
 						stateGroup.SetLogState(logID, name, true)
 						stateGroup.MarkDirty(ctx.Dice)
-						ctx.Dice.Logger.Infof("日志状态切换: 群=%s 开启日志 name=%s id=%d", group.GroupID, name, logID)
+						ctx.Dice.Logger.Infof("日志状态切换: 群=%s 开启日志 name=%s id=%d", stateGroup.GroupID, name, logID)
 
 						VarSetValueStr(ctx, "$t记录名称", name)
 						VarSetValueInt64(ctx, "$t当前记录条数", lines)
@@ -451,8 +453,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 				if state.Name != "" && state.On {
 					stateGroup.SetLogOn(false)
 					stateGroup.MarkDirty(ctx.Dice)
-					ctx.Dice.Logger.Infof("日志状态切换: 群=%s 暂停日志 name=%s id=%d", group.GroupID, state.Name, state.ID)
-					lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, state.Name)
+					ctx.Dice.Logger.Infof("日志状态切换: 群=%s 暂停日志 name=%s id=%d", stateGroup.GroupID, state.Name, state.ID)
+					lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, stateGroup.GroupID, state.Name)
 					VarSetValueStr(ctx, "$t记录名称", state.Name)
 					VarSetValueInt64(ctx, "$t当前记录条数", lines)
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_关闭_成功"))
@@ -525,7 +527,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_关闭_失败"))
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
-				lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, state.Name)
+				lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, stateGroup.GroupID, state.Name)
 				VarSetValueInt64(ctx, "$t当前记录条数", lines)
 				VarSetValueStr(ctx, "$t记录名称", state.Name)
 				text := DiceFormatTmpl(ctx, "日志:记录_结束")
@@ -549,7 +551,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 			} else if cmdArgs.IsArgEqual(1, "halt") {
 				state := getGroupLogState(stateGroup)
 				if len(state.Name) > 0 {
-					lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, group.GroupID, state.Name)
+					lines, _ := service.LogLinesCountGet(ctx.Dice.DBOperator, stateGroup.GroupID, state.Name)
 					VarSetValueInt64(ctx, "$t当前记录条数", lines)
 					VarSetValueStr(ctx, "$t记录名称", state.Name)
 				}
@@ -615,15 +617,18 @@ func RegisterBuiltinExtLog(self *Dice) {
 				}
 				VarSetValueStr(ctx, "$t上一记录名称", currentState.Name)
 				VarSetValueStr(ctx, "$t记录名称", name)
-				logID, err := service.LogGetOrCreate(ctx.Dice.DBOperator, group.GroupID, name)
+				// 日志行必须建在「记录实际所在的那个群」上（群绑定后是旧群）。
+				// 否则会出现 logID 属于旧群、group_id 却写成官方群的错配行，
+				// 之后按 (group_id, name) 写入就查不到它，表现为"记不进去"。
+				logID, err := service.LogGetOrCreate(ctx.Dice.DBOperator, stateGroup.GroupID, name)
 				if err != nil {
 					ReplyToSender(ctx, msg, "日志新建失败: "+err.Error())
-					ctx.Dice.Logger.Errorf("日志新建失败: group=%s name=%s err=%v", group.GroupID, name, err)
+					ctx.Dice.Logger.Errorf("日志新建失败: group=%s name=%s err=%v", stateGroup.GroupID, name, err)
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
 				stateGroup.SetLogState(logID, name, true)
 				stateGroup.MarkDirty(ctx.Dice)
-				ctx.Dice.Logger.Infof("日志状态切换: 群=%s 新建并开启日志 name=%s id=%d", group.GroupID, name, logID)
+				ctx.Dice.Logger.Infof("日志状态切换: 群=%s 新建并开启日志 name=%s id=%d", stateGroup.GroupID, name, logID)
 
 				ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_新建"))
 				return CmdExecuteResult{Matched: true, Solved: true}

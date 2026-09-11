@@ -523,6 +523,36 @@ func DiceConfigSet(c echo.Context) error {
 			}
 		}
 	}
+	if val, ok := jsonMap["identityBindUseVerificationCode"]; ok {
+		if b, okBool := val.(bool); okBool {
+			config.IdentityBindUseVerificationCode = b
+		}
+	}
+	if val, ok := jsonMap["identityBindKeepQuiz"]; ok {
+		if b, okBool := val.(bool); okBool {
+			config.IdentityBindKeepQuiz = b
+		}
+	}
+	if val, ok := jsonMap["identityBindCodeLength"]; ok {
+		switch v := val.(type) {
+		case float64:
+			config.IdentityBindCodeLength = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				config.IdentityBindCodeLength = parsed
+			}
+		}
+	}
+	if val, ok := jsonMap["identityBindCodeExpireSec"]; ok {
+		switch v := val.(type) {
+		case float64:
+			config.IdentityBindCodeExpireSec = int64(v)
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+				config.IdentityBindCodeExpireSec = parsed
+			}
+		}
+	}
 	config.FixIdentityBindConfig()
 
 	if val, ok := jsonMap["playerNameWrapEnable"]; ok {

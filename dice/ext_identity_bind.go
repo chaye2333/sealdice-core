@@ -1310,13 +1310,6 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 		}
 	}
 
-	questions, errText := identityBindBuildUserQuestions(d, oldUserID)
-	if errText != "" {
-		identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionUser)
-		ReplyToSender(ctx, msg, errText)
-		return solved
-	}
-
 	oldGroupName := ""
 	oldPlayerName := ""
 	if oldGroupID != "" {
@@ -1328,22 +1321,43 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 		}
 	}
 
+	newEndpoint := identityBindEndpoint{
+		Platform: ctx.EndPoint.Platform,
+		Protocol: ctx.EndPoint.ProtocolType,
+		GroupID:  ctx.Group.GroupID,
+		UserID:   ctx.Player.UserID,
+	}
+	oldEndpoint := identityBindEndpoint{
+		Platform:  "QQ",
+		Protocol:  "onebot",
+		GroupID:   oldGroupID,
+		UserID:    oldUserID,
+		GroupName: oldGroupName,
+		UserName:  oldPlayerName,
+	}
+
+	// 优先走私聊验证码：它是唯一能证明"你确实持有那个旧 QQ 号"的手段。
+	// 除非配置里显式要求两者并用，否则开了验证码就不再出题。
+	if identityBindUseVerificationCode(d) && !identityBindQuizStillRequired(d) {
+		return identityBindStartCodeChallenge(ctx, msg, identityBindActionUser, newEndpoint, oldEndpoint, oldUserID)
+	}
+
+	questions, errText := identityBindBuildUserQuestions(d, oldUserID)
+	if errText != "" {
+		// 开了验证码但要求两者并用时，答题出题失败不应该直接终止：
+		// 验证码那一关才是关键，降级为只用验证码。
+		if identityBindUseVerificationCode(d) {
+			return identityBindStartCodeChallenge(ctx, msg, identityBindActionUser, newEndpoint, oldEndpoint, oldUserID)
+		}
+		identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionUser)
+		ReplyToSender(ctx, msg, errText)
+		return solved
+	}
+
 	session := &identityBindSession{
-		Action: identityBindActionUser,
-		New: identityBindEndpoint{
-			Platform: ctx.EndPoint.Platform,
-			Protocol: ctx.EndPoint.ProtocolType,
-			GroupID:  ctx.Group.GroupID,
-			UserID:   ctx.Player.UserID,
-		},
-		Old: identityBindEndpoint{
-			Platform:  "QQ",
-			Protocol:  "onebot",
-			GroupID:   oldGroupID,
-			UserID:    oldUserID,
-			GroupName: oldGroupName,
-			UserName:  oldPlayerName,
-		},
+		Action:    identityBindActionUser,
+		New:       newEndpoint,
+		Old:       oldEndpoint,
 		Questions: questions,
 		Created:   time.Now().Unix(),
 	}
@@ -1353,6 +1367,87 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 	ReplyToSender(ctx, msg, fmt.Sprintf("正在验证旧身份 %s，共 %d 题。\n%s",
 		oldUserID, len(questions), identityBindFormatQuestions(questions)))
 	return solved
+}
+
+// identityBindStartCodeChallenge 登记一条验证码挑战并告诉用户接下来会发生什么。
+//
+// confirmBy 是"只有谁能确认"：
+//   - 个人绑定 = 被声明的旧 QQ 号（验证码私聊发给他）
+//   - 群绑定   = 旧群的邀请人
+func identityBindStartCodeChallenge(
+	ctx *MsgContext, msg *Message,
+	action identityBindAction,
+	newEndpoint, oldEndpoint identityBindEndpoint,
+	deliverTo string,
+) CmdExecuteResult {
+	d := ctx.Dice
+	solved := CmdExecuteResult{Matched: true, Solved: true}
+
+	code, err := identityBindGenerateCode(identityBindCodeLength(d))
+	if err != nil {
+		ReplyToSender(ctx, msg, "生成验证码失败，请稍后重试或联系骰主。")
+		return solved
+	}
+
+	now := time.Now()
+	challenge := &identityBindCodeChallenge{
+		Action:    action,
+		New:       newEndpoint,
+		Old:       oldEndpoint,
+		Code:      code,
+		DeliverTo: deliverTo,
+		ConfirmBy: deliverTo,
+		Status:    identityBindCodePending,
+		CreatedAt: now.Unix(),
+		ExpiresAt: now.Add(identityBindCodeExpiry(d)).Unix(),
+	}
+	identityBindPutCode(challenge)
+	identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, action)
+
+	// 立刻尝试投递一次，省掉最多一个 tick 的等待
+	identityBindDeliverPendingCodes(d)
+
+	// 投递是否成功要在投递之后再读一次状态
+	latest, _ := identityBindLoadCode(action, identityBindCodeTargetID(action, oldEndpoint))
+	delivered := latest != nil && latest.Status == identityBindCodeDelivered
+	reason := ""
+	if latest != nil {
+		reason = latest.Reason
+	}
+
+	ttl := identityBindFormatDuration(identityBindCodeExpiry(d))
+	var lines []string
+	switch {
+	case delivered:
+		lines = append(lines,
+			fmt.Sprintf("已通过民间 bot 给 %s 发送了私聊验证码。", deliverTo),
+			"请**用那个号**打开与民间 bot 的私聊，把收到的验证码回复过去即可完成绑定。",
+		)
+	case action == identityBindActionGroup:
+		lines = append(lines,
+			fmt.Sprintf("已登记确认请求，验证码会私聊发给旧群的邀请人 %s。", deliverTo),
+		)
+	default:
+		lines = append(lines,
+			fmt.Sprintf("已登记验证请求，验证码会私聊发到 %s。", deliverTo),
+		)
+	}
+	if reason != "" {
+		lines = append(lines, "", "⚠️ "+reason,
+			"请确认民间 bot（OneBot 连接）在线且已启用；修好后稍等片刻会自动重试。")
+	}
+	lines = append(lines, "", fmt.Sprintf("验证码 %s 内有效。", ttl))
+
+	ReplyToSender(ctx, msg, strings.Join(lines, "\n"))
+	return solved
+}
+
+// identityBindCodeTargetID 取挑战用的目标 ID（个人=旧QQ号，群=旧群号）。
+func identityBindCodeTargetID(action identityBindAction, old identityBindEndpoint) string {
+	if action == identityBindActionGroup {
+		return old.GroupID
+	}
+	return old.UserID
 }
 
 // identityBindBuildUserQuestions 依据旧用户的角色卡名出题。
@@ -1849,12 +1944,59 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		return solved
 	}
 
+	newEndpoint := identityBindEndpoint{
+		Platform: ctx.EndPoint.Platform,
+		Protocol: ctx.EndPoint.ProtocolType,
+		GroupID:  ctx.Group.GroupID,
+		UserID:   ctx.Player.UserID,
+	}
+	oldGroupName := ""
+	oldGroupObj, oldGroupInMemory := ctx.Session.ServiceAtNew.Load(oldGroupID)
+	if oldGroupInMemory && oldGroupObj != nil {
+		oldGroupName = oldGroupObj.GroupName
+	}
+	oldEndpoint := identityBindEndpoint{
+		Platform:  "QQ",
+		Protocol:  "onebot",
+		GroupID:   oldGroupID,
+		GroupName: oldGroupName,
+	}
+
+	// 群绑定同样优先用验证码。确认人是旧群的邀请人（把骰子拉进旧群的人），
+	// 因为他一定是那个群的成员，而且身份稳定、可私聊。
+	if identityBindUseVerificationCode(d) && !identityBindQuizStillRequired(d) {
+		if !oldGroupInMemory || oldGroupObj == nil {
+			ReplyToSender(ctx, msg, fmt.Sprintf(
+				"旧群 %s 目前不在骰子内存里，无法确定确认人，因此不能走验证码流程。\n"+
+					"请先让骰子在旧群收到一条消息，或改用答题方式（把 identityBindKeepQuiz 打开）。", oldGroupID))
+			return solved
+		}
+		confirmer := strings.TrimSpace(oldGroupObj.InviteUserID)
+		if confirmer == "" {
+			ReplyToSender(ctx, msg, fmt.Sprintf(
+				"拿不到旧群 %s 的邀请人信息，无法确定把验证码发给谁。\n"+
+					"可以改用答题方式（打开 identityBindKeepQuiz），或让骰子重新被拉进那个群。", oldGroupID))
+			return solved
+		}
+		return identityBindStartCodeChallenge(ctx, msg, action, newEndpoint, oldEndpoint, confirmer)
+	}
+
 	names, err := identityBindLogNames(d, oldGroupID)
 	if err != nil {
 		ReplyToSender(ctx, msg, fmt.Sprintf("查询旧群日志失败: %v", err))
 		return solved
 	}
 	if len(names) == 0 {
+		if identityBindUseVerificationCode(d) {
+			// 开了验证码也要求答题，但旧群没日志可出题 —— 降级为只用验证码
+			confirmer := ""
+			if oldGroupInMemory && oldGroupObj != nil {
+				confirmer = strings.TrimSpace(oldGroupObj.InviteUserID)
+			}
+			if confirmer != "" {
+				return identityBindStartCodeChallenge(ctx, msg, action, newEndpoint, oldEndpoint, confirmer)
+			}
+		}
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"旧群 %s 没有任何日志记录，无法出题验证。请确认旧群号正确，或该群此前确实记录过日志。", oldGroupID))
 		return solved
@@ -1868,25 +2010,10 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 	}
 	questions := []identityBindQuestion{question}
 
-	oldGroupName := ""
-	if group, exists := ctx.Session.ServiceAtNew.Load(oldGroupID); exists && group != nil {
-		oldGroupName = group.GroupName
-	}
-
 	session := &identityBindSession{
-		Action: identityBindActionGroup,
-		New: identityBindEndpoint{
-			Platform: ctx.EndPoint.Platform,
-			Protocol: ctx.EndPoint.ProtocolType,
-			GroupID:  ctx.Group.GroupID,
-			UserID:   ctx.Player.UserID,
-		},
-		Old: identityBindEndpoint{
-			Platform:  "QQ",
-			Protocol:  "onebot",
-			GroupID:   oldGroupID,
-			GroupName: oldGroupName,
-		},
+		Action:    identityBindActionGroup,
+		New:       newEndpoint,
+		Old:       oldEndpoint,
 		Questions: questions,
 		Created:   time.Now().Unix(),
 	}
@@ -1929,6 +2056,9 @@ func identityBindVerifyLogAnswers(ctx *MsgContext, msg *Message, sessionKey stri
 		return solved
 	}
 	identityBindClearSession(sessionKey)
+
+	// 真实群上的日志状态已经用不上了，清掉以免解绑/回退时"复活"成一份空日志。
+	identityBindResetRealGroupLogState(ctx, ctx.Group)
 
 	ReplyToSender(ctx, msg, fmt.Sprintf(
 		"群绑定成功！当前群与旧群 %s 现在共用同一份日志：\n"+
@@ -1976,6 +2106,34 @@ func identityBindLogWriteGroupID(ctx *MsgContext, fallback string) string {
 		return fallback
 	}
 	return target
+}
+
+// identityBindResetRealGroupLogState 清掉「真实群对象上残留的日志状态」。
+//
+// 背景：GroupInfo.LogCurName / LogOn 是**会持久化**的字段，而 LogCurID 不持久化
+// （重启后由 ensureGroupLogState 用「本群自己的 GroupID + LogCurName」去补全）。
+//
+// 群绑定之后，日志状态统一挂在归一后的群（旧群）上，真实群那份状态就失去意义了。
+// 如果不清掉，它会一直留在数据库里，造成两个后果：
+//
+//  1. 解绑（.group unbind）之后，官方群会突然"自动开始记录"一个并不存在的同名日志；
+//  2. **回退到官方主线**之后，官方主线不认识绑定关系，会拿着这份残留状态执行
+//     LogGetOrCreate(官方群ID, 旧群的日志名)，凭空建出一份**空日志**，
+//     于是"当前故事"名字对、条数却是 0，看起来像数据丢了。
+//
+// 清掉它是安全的：绑定期内所有读写都走归一后的群，不依赖这份状态。
+func identityBindResetRealGroupLogState(ctx *MsgContext, realGroup *GroupInfo) {
+	if realGroup == nil {
+		return
+	}
+	state := realGroup.GetLogState()
+	if !state.On && state.Name == "" && state.ID == 0 {
+		return
+	}
+	realGroup.ClearLogState()
+	if ctx != nil && ctx.Dice != nil {
+		realGroup.MarkDirty(ctx.Dice)
+	}
 }
 
 // identityBindLogReadGroupID 计算日志「读取」应该使用的群 ID。

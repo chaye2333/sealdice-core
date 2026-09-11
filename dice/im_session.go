@@ -1057,6 +1057,12 @@ func (s *IMSession) Execute(ep *EndPointInfo, msg *Message, runInSync bool) {
 		// 权限号设置
 		_ = mctx.fillPrivilege(msg)
 
+		// 私聊验证码拦截：一条纯数字私聊可能是在回复身份绑定验证码。
+		// 命中时直接结束分发，避免它被当成普通指令、也不进日志。
+		if identityBindTryConsumeCode(mctx, msg, msg.Message) {
+			return
+		}
+
 		if mctx.Group != nil && mctx.Group.IsActive(mctx) {
 			if mctx.PrivilegeLevel != -30 {
 				for _, wrapper := range mctx.Group.GetActivatedExtList(mctx.Dice) {
@@ -1433,6 +1439,11 @@ func (s *IMSession) ExecuteNew(ep *EndPointInfo, msg *Message) {
 
 	// 权限设置
 	_ = mctx.fillPrivilege(msg)
+
+	// 私聊验证码拦截：命中的话就直接结束分发（详见 identityBindTryConsumeCode）。
+	if identityBindTryConsumeCode(mctx, msg, msg.Message) {
+		return
+	}
 
 	if mctx.Group != nil && mctx.Group.IsActive(mctx) {
 		if mctx.PrivilegeLevel != -30 {
