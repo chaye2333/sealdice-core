@@ -610,9 +610,7 @@ func identityBindDeliverPendingCodes(d *Dice) {
 
 		// 转人工：两条通道都不通时，私聊把这件事告诉骰主，让他来确认。
 		// 只通知一次——worker 每 3 秒跑一遍，不做标记会把骰主私聊刷爆。
-		if !c.NeedMaster {
-			c.NeedMaster = true
-		}
+		c.NeedMaster = true
 		if c.MasterNotifiedAt == 0 {
 			c.MasterNotifiedAt = time.Now().Unix()
 			c.MasterNotifiedTo = identityBindNotifyMasters(d, c)
