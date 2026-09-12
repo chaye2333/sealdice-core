@@ -729,7 +729,7 @@ func identityBindMarkAttempt(epID, userID string, action identityBindAction) {
 // ---------- .bind 指令 ----------
 
 func identityBindUserHelp() string {
-	return `.bind <旧QQ号> // 绑定你的个人身份，之后你的角色卡/属性与旧 QQ 号共用同一份
+	return `.bind <旧QQ号> [旧群号] // 绑定你的个人身份，之后你的角色卡/属性与旧 QQ 号共用同一份
 .bind cancel // 取消进行中的绑定验证
 .bind reset // 同上，顺便清掉群绑定的验证
 .bind status // 查看自己的绑定
@@ -737,11 +737,19 @@ func identityBindUserHelp() string {
 .bind doctor // 自检所有绑定，需要管理权限
 .unbind // 解除自己的个人绑定
 
+【骰主专用】
+.bind pending // 列出所有待处理的绑定申请
+.bind approve <旧QQ号> // 人工确认一条申请（跳过验证码）
+
 【怎么验证身份】
-发起绑定后，会给你被声明的那个旧 QQ 号发一个验证码：
-  · 民间 bot 能发私聊时 → 用旧 QQ 号打开与民间 bot 的私聊，把验证码回复过去；
-  · 骰主开了邮箱验证时 → 验证码寄到该 QQ 号的 QQ 邮箱，收到后在官方 bot 这边回复。
+发起绑定后，会把一个验证码送到"只有那个旧 QQ 号的主人才能拿到"的地方，
+两条通道自动二选一（都可用时按骰主的偏好设置）：
+  · 邮箱通道：寄到 <旧QQ号>@qq.com，收到后**在官方 bot 这边**回复验证码；
+  · 私聊通道：民间 bot（OneBot 连接）私聊发给旧 QQ 号，用那个号回复民间 bot。
 只有真正持有那个旧 QQ 号的人能拿到验证码，所以别人抢不走你的绑定。
+
+如果两条通道都发不出去（民间 bot 不在线、邮箱也没配），申请会转成人工：
+骰主会收到私聊通知，可以用 .bind approve <旧QQ号> 核实后确认。
 
 个人绑定与群无关、全局生效：在任何官方群里绑定一次即可。
 旧群号只是可选参数（.bind <旧QQ号> <旧群号>），填了也只会用于展示。
@@ -750,6 +758,8 @@ func identityBindUserHelp() string {
 还需要再做一次群绑定：
 
 .group bind <旧群号> // 发起群绑定，需要管理权限
+.group pending // 列出待处理申请（骰主）
+.group approve <旧群号> // 人工确认（骰主）
 .group unbind
 .group status
 .group doctor // 自检所有绑定
@@ -780,6 +790,22 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 	// .unbind 不需要功能开关，否则用户开不了也解不了。
 	if sub == "unbind" {
 		return identityBindRunUnbind(ctx, msg, action)
+	}
+
+	// 骰主人工兜底：待确认列表 + 手动确认。
+	// 刻意放在"仅官方 bot"检查之前——申请常常正是因为"民间 bot 不在线"
+	// 才卡住的，骰主很可能就是在民间 bot 那边看到通知、顺手处理。
+	switch sub {
+	case "pending", "待确认":
+		if ctx.PrivilegeLevel < 100 {
+			ReplyToSender(ctx, msg, "待确认列表需要 master 权限。")
+			return solved
+		}
+		ReplyToSender(ctx, msg, identityBindFormatPendingList(d, false))
+		return solved
+	case "approve", "pass":
+		// 目标在 Args[1]，而 GetArgN 是 1-based（GetArgN(2) == Args[1]）
+		return identityBindRunApprove(ctx, msg, cmdArgs.GetArgN(2))
 	}
 
 	if !identityBindEnabled(d) {
@@ -996,15 +1022,50 @@ func identityBindStartCodeChallenge(
 	if latest != nil {
 		reason = latest.Reason
 	}
+	needMaster := latest != nil && latest.NeedMaster
+
+	// 骰主手动确认的写法（用于给骰主的提示 / 给普通用户的转告话术）
+	approveHint := fmt.Sprintf("`.bind approve %s`", identityBindBareNumber(oldEndpoint.UserID))
+	if action == identityBindActionGroup {
+		approveHint = fmt.Sprintf("`.group bindforce %s`", identityBindBareNumber(oldEndpoint.GroupID))
+	}
 
 	ttl := identityBindFormatDuration(identityBindCodeExpiry(d))
 	var lines []string
 	switch {
+	case delivered && latest.Channel == identityBindCodeChannelEmail:
+		// 邮箱通道：码进了邮箱，回复地点是**官方 bot 这边**（不是民间 bot）
+		who := "这个 QQ 号"
+		if action == identityBindActionGroup {
+			who = "旧群邀请人"
+		}
+		lines = append(lines,
+			fmt.Sprintf("验证码已寄到%s（QQ %s）的 QQ 邮箱：%s",
+				who, identityBindMailTargetQQ(latest), latest.SentTo),
+			"拿到验证码后**在官方 bot 这边**把它回复过来即可完成绑定——发在群里或私聊都行。",
+			"没收到的话记得翻一下垃圾邮件。",
+		)
 	case delivered:
 		lines = append(lines,
 			fmt.Sprintf("已通过民间 bot 给 %s 发送了私聊验证码。", deliverTo),
 			"请**用那个号**打开与民间 bot 的私聊，把收到的验证码回复过去即可完成绑定。",
 		)
+	case needMaster:
+		// 两条通道都发不出去：已经转人工，这里必须说清楚"谁在等、等谁"
+		lines = append(lines, "这条申请已经登记，但验证码两条通道都发不出去。")
+		if len(latest.MasterNotifiedTo) > 0 {
+			lines = append(lines, fmt.Sprintf("已私聊通知骰主（%s），请等骰主核实身份后确认。",
+				strings.Join(latest.MasterNotifiedTo, "、")))
+		} else {
+			lines = append(lines, "而且**没能通知到骰主**——民间 bot 不在线时，官方 bot 无法按 QQ 号主动私聊。")
+		}
+		if ctx.PrivilegeLevel >= 100 {
+			lines = append(lines, fmt.Sprintf(
+				"你就是骰主：核实对方身份后可以直接用 %s 确认（会跳过验证码）。", approveHint))
+		} else {
+			lines = append(lines, fmt.Sprintf(
+				"请把这条申请转告骰主，让骰主用 %s 确认。", approveHint))
+		}
 	case action == identityBindActionGroup:
 		lines = append(lines,
 			fmt.Sprintf("已登记确认请求，验证码会私聊发给旧群的邀请人 %s。", deliverTo),
@@ -1015,10 +1076,16 @@ func identityBindStartCodeChallenge(
 		)
 	}
 	if reason != "" {
-		lines = append(lines, "", "⚠️ "+reason,
-			"请确认民间 bot（OneBot 连接）在线且已启用；修好后稍等片刻会自动重试。")
+		lines = append(lines, "", "⚠️ "+reason)
+		if !needMaster {
+			lines = append(lines, "请确认民间 bot（OneBot 连接）在线且已启用；修好后稍等片刻会自动重试。")
+		}
 	}
-	lines = append(lines, "", fmt.Sprintf("验证码 %s 内有效。", ttl))
+	if needMaster {
+		lines = append(lines, "", "这条申请会保留 12 小时，骰主确认后立即生效。")
+	} else {
+		lines = append(lines, "", fmt.Sprintf("验证码 %s 内有效。", ttl))
+	}
 
 	ReplyToSender(ctx, msg, strings.Join(lines, "\n"))
 	return solved
@@ -1235,18 +1302,25 @@ func identityBindLogHelp() string {
 日志状态（.log on / new / off）与日志内容都记在同一份记录里，两边都能读到。
 
 .group bind <旧群号> // 发起群绑定（需要管理权限）
-.group bindforce <旧群号> // 骰主手动确认，跳过验证码（仅 master）
+.group pending // 列出待处理的绑定申请（仅 master）
+.group approve <旧群号> // 骰主人工确认，跳过验证码（仅 master）
+.group bindforce <旧群号> // 同上，等价写法；区别是它绑"骰主当前所在的群"
 .group cancel // 取消进行中的绑定验证（同时清掉个人绑定的验证）
 .group unbind // 解除当前群的绑定（需要管理权限）
 .group status // 查看当前群的绑定
 .group doctor // 自检所有绑定（需要管理权限）
 
 【怎么验证】
-发起后会私聊给**旧群的邀请人**（把骰子拉进旧群的那个人）一个验证码，
-由他把验证码回复给民间 bot 即可完成。
+发起后会把验证码送到旧群的**邀请人**（把骰子拉进旧群的那个人）手里，
+两条通道自动二选一：
+  · 邮箱通道：寄到 邀请人QQ号@qq.com，拿到码后**在官方 bot 这边**回复即可；
+  · 私聊通道：民间 bot 私聊发给邀请人，由他在民间 bot 那边回复。
+回复的人不必是发起绑定的人：码只有拿到邮件/私聊的人才有，
+所以群管理拿到邀请人转发的码同样可以确认。
 
 如果两条通道都不通（没有民间 bot、邀请人也没开 QQ 邮箱），
-骰主可以用 .group bindforce <旧群号> 手动确认——**请先自行核实对方身份**。
+申请会自动转人工并私聊通知骰主，骰主用 .group approve <旧群号> 确认
+——**请先自行核实对方身份**。
 
 说明：
 * 群绑定负责「群维度」，个人身份绑定（.bind）负责「用户维度」。
@@ -1299,7 +1373,7 @@ func identityBindGroupStatus(d *Dice, ctx *MsgContext) string {
 // 群绑定与用户身份绑定（.bind）完全独立，互不影响。
 func runIdentityBindGroupCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
 	solved := CmdExecuteResult{Matched: true, Solved: true}
-	if ctx == nil || ctx.Dice == nil || ctx.Group == nil {
+	if ctx == nil || ctx.Dice == nil {
 		return solved
 	}
 
@@ -1311,6 +1385,25 @@ func runIdentityBindGroupCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs
 	sub := ""
 	if len(cmdArgs.Args) > 0 {
 		sub = strings.ToLower(strings.TrimSpace(cmdArgs.Args[0]))
+	}
+
+	// 骰主人工兜底：这两个子指令**不要求"当前在某个群里"**——
+	// 骰主常常是在私聊里（甚至民间 bot 那边）看到通知后直接处理的。
+	if sub == "pending" || sub == "待确认" {
+		if ctx.PrivilegeLevel < 100 {
+			ReplyToSender(ctx, msg, "待确认列表需要 master 权限。")
+			return solved
+		}
+		ReplyToSender(ctx, msg, identityBindFormatPendingList(ctx.Dice, false))
+		return solved
+	}
+	if sub == "approve" || sub == "pass" {
+		// 目标在 Args[1]，而 GetArgN 是 1-based（GetArgN(2) == Args[1]）
+		return identityBindRunApprove(ctx, msg, cmdArgs.GetArgN(2))
+	}
+
+	if ctx.Group == nil {
+		return solved
 	}
 
 	// 取消 / 重置：群绑定和个人身份绑定的问答都会被清掉
@@ -1506,6 +1599,155 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		return solved
 	}
 	return identityBindStartCodeChallenge(ctx, msg, action, newEndpoint, oldEndpoint, confirmer)
+}
+
+// identityBindFormatPendingList 列出待处理的绑定申请（骰主排查用）。
+func identityBindFormatPendingList(d *Dice, onlyNeedMaster bool) string {
+	list := identityBindPendingChallenges(onlyNeedMaster)
+	if len(list) == 0 {
+		if onlyNeedMaster {
+			return "当前没有等待骰主确认的申请。"
+		}
+		return "当前没有任何待处理的绑定申请。"
+	}
+	lines := []string{fmt.Sprintf("共 %d 条待处理申请（按发起时间排序）：", len(list))}
+	for _, c := range list {
+		lines = append(lines, identityBindDescribeChallenge(c))
+		if c.Reason != "" {
+			lines = append(lines, "    原因: "+c.Reason)
+		}
+	}
+	lines = append(lines,
+		"",
+		"手动确认（需要 master 权限，会跳过验证码，请先核实对方身份）:",
+		"  个人绑定: .bind approve <旧QQ号>",
+		"  群绑定  : .group approve <旧群号>（等价于 .group bindforce <旧群号>）",
+	)
+	return strings.Join(lines, "\n")
+}
+
+// identityBindMatchPending 按用户输入的旧号 / 旧群找一条待确认申请。
+//
+// 裸数字会有歧义（旧 QQ 号与旧群号都可能是 6~10 位数字），所以：
+// 带前缀的按前缀判定；裸数字先当个人绑定找，找不到再当群绑定找。
+func identityBindMatchPending(raw string) *identityBindCodeChallenge {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil
+	}
+	switch {
+	case strings.HasPrefix(value, identityBindGroupPrefix):
+		c, _ := identityBindFindPendingChallenge(identityBindActionGroup, value)
+		return c
+	case strings.HasPrefix(value, identityBindUserPrefix):
+		c, _ := identityBindFindPendingChallenge(identityBindActionUser, value)
+		return c
+	}
+	if c, ok := identityBindFindPendingChallenge(identityBindActionUser, value); ok {
+		return c
+	}
+	c, _ := identityBindFindPendingChallenge(identityBindActionGroup, value)
+	return c
+}
+
+// identityBindRunApprove 骰主人工确认一条已经登记好的申请（跳过验证码）。
+//
+// 与 .group bindforce 的区别：
+//   - bindforce 绑的是"骰主当前所在的那个群"；
+//   - approve 绑的是"申请人登记在挑战里的那个身份"，所以骰主在哪里敲都行
+//     （群里、私聊、甚至民间 bot 那边都能处理）。
+//
+// 触发场景很明确：民间 bot 不在线、邮箱又没配好，验证码两条通道都发不出去，
+// 申请被转成人工。这时骰主是唯一的出口，所以这条指令必须好用、好记。
+func identityBindRunApprove(ctx *MsgContext, msg *Message, rawTarget string) CmdExecuteResult {
+	solved := CmdExecuteResult{Matched: true, Solved: true}
+	if ctx == nil || ctx.Dice == nil {
+		return solved
+	}
+	d := ctx.Dice
+	if !identityBindEnabled(d) {
+		ReplyToSender(ctx, msg, "身份与日志绑定功能未开启，请让骰主在 serve.yaml 中把 identityBindEnable 设为 true。")
+		return solved
+	}
+	if ctx.PrivilegeLevel < 100 {
+		ReplyToSender(ctx, msg, "手动确认需要 master 权限（该操作会跳过验证码，等同骰主替对方作证）。")
+		return solved
+	}
+
+	target := strings.TrimSpace(rawTarget)
+	if target == "" {
+		ReplyToSender(ctx, msg,
+			"请指定要确认的旧号：\n"+
+				"  · 个人绑定: `.bind approve <旧QQ号>`\n"+
+				"  · 群绑定  : `.group approve <旧群号>`\n"+
+				"用 `.bind pending` 可以查看当前的待确认申请。")
+		return solved
+	}
+
+	challenge := identityBindMatchPending(target)
+	if challenge == nil {
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"没有找到与 %s 对应的待确认申请。\n用 `.bind pending` 查看当前有哪些申请。", target))
+		return solved
+	}
+
+	// 唯一性检查：和正常绑定路径保持一致，不允许把同一个旧号 / 旧身份绑两次
+	oldID := challenge.Old.UserID
+	newID := challenge.New.UserID
+	if challenge.Action == identityBindActionGroup {
+		oldID = challenge.Old.GroupID
+		newID = challenge.New.GroupID
+	}
+	var issues []string
+	if existing, ok := identityBindStoreOf(d).find(d, oldID); ok {
+		issues = append(issues, fmt.Sprintf("%s 已经被绑定到 %s 了，请先解除", oldID, identityBindRecordEndpointID(existing)))
+	}
+	if existing, ok := identityBindStoreOf(d).find(d, newID); ok {
+		issues = append(issues, fmt.Sprintf("%s 已经绑定了 %s，请先解除", newID, identityBindRecordOldID(existing)))
+	}
+	if len(issues) > 0 {
+		ReplyToSender(ctx, msg, "无法手动确认：\n  · "+strings.Join(issues, "\n  · "))
+		return solved
+	}
+
+	if err := identityBindCommitChallenge(d, challenge); err != nil {
+		ReplyToSender(ctx, msg, fmt.Sprintf("手动确认失败: %v", err))
+		return solved
+	}
+
+	// 群绑定成功后，真实群（官方群）上残留的日志状态要清掉，
+	// 否则解绑或回退官方主线时会"复活"成一份同名空日志（与正常绑定路径一致）。
+	if challenge.Action == identityBindActionGroup && ctx.Session != nil {
+		if realGroup, ok := ctx.Session.ServiceAtNew.Load(challenge.New.GroupID); ok && realGroup != nil {
+			identityBindResetRealGroupLogState(ctx, realGroup)
+		}
+	}
+
+	identityBindNotifyNewSide(d, challenge)
+
+	if challenge.Action == identityBindActionGroup {
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"已手动确认：官方群 %s 与旧群 %s 绑定成功，双方共用同一份日志。\n"+
+				"（本次跳过了验证码——请确认你确实核实过对方身份。）\n"+
+				"如需解除请让对方在群里发送 `.group unbind`。",
+			challenge.New.GroupID, challenge.Old.GroupID))
+		ctx.Notice(fmt.Sprintf(
+			"群绑定（骰主手动确认）: 群 %s 已绑定到旧群 %s，申请人 %s",
+			challenge.New.GroupID, challenge.Old.GroupID, challenge.New.UserID,
+		), NoticeTypeGroup)
+	} else {
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"已手动确认：%s 与旧 QQ 号 %s 绑定成功，双方共用同一份数据。\n"+
+				"（本次跳过了验证码——请确认你确实核实过对方身份。）\n"+
+				"如需解除请让对方发送 `.unbind`。",
+			challenge.New.UserID, challenge.Old.UserID))
+		ctx.Notice(fmt.Sprintf(
+			"身份绑定（骰主手动确认）: 用户 %s 已绑定到旧 QQ 号 %s",
+			challenge.New.UserID, challenge.Old.UserID,
+		), NoticeTypeGroup)
+	}
+	d.LastUpdatedTime = time.Now().Unix()
+	return solved
 }
 
 // identityBindRunForceBind 骰主手动确认绑定（跳过验证码）。

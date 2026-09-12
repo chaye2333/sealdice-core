@@ -737,12 +737,17 @@ func RegisterBuiltinExtLog(self *Dice) {
 						}
 						if len(rightEmails) > 0 {
 							emailMsg := DiceFormatTmpl(ctx, "日志:记录_导出_邮件附言")
-							dice.SendMailRow(
+							// SendMailRow 现在会返回 SMTP 错误（身份绑定的邮箱通道要用它
+							// 判断验证码到底寄出去没有）。这里保持原有行为：
+							// 失败了也只是记日志，不让 .log export 直接报错。
+							if err := dice.SendMailRow(
 								fmt.Sprintf("Seal 记录提取: %s", logFileNamePrefix),
 								rightEmails,
 								emailMsg,
 								[]string{logFile},
-							)
+							); err != nil {
+								dice.Logger.Errorf("导出日志的邮件发送失败: %v", err)
+							}
 							text := DiceFormatTmpl(ctx, "日志:记录_导出_邮箱发送前缀") + strings.Join(rightEmails, "\n")
 							ReplyToSenderRaw(ctx, msg, text, "skip")
 							return CmdExecuteResult{Matched: true, Solved: true}

@@ -2,6 +2,7 @@
 package dice
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -22,11 +23,20 @@ type capturedMail struct {
 	body    string
 }
 
-func (m *mailCapture) sender() func(*Dice, string, []string, string) {
-	return func(_ *Dice, subject string, to []string, body string) {
+// sender 返回一个假的发信器。第二个返回值 err 用来模拟 SMTP 失败。
+func (m *mailCapture) sender() func(*Dice, string, []string, string) error {
+	return func(_ *Dice, subject string, to []string, body string) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.sent = append(m.sent, capturedMail{subject: subject, to: to, body: body})
+		return nil
+	}
+}
+
+// failSender 模拟"SMTP 连不上"：验证码其实没寄出去。
+func failSender() func(*Dice, string, []string, string) error {
+	return func(_ *Dice, _ string, _ []string, _ string) error {
+		return errors.New("dial tcp: connection refused")
 	}
 }
 
@@ -478,9 +488,17 @@ func TestIdentityBindGroupPrefersEmailWhenConfigured(t *testing.T) {
 	}
 }
 
-// TestIdentityBindEmailCodeConfirmByInitiator 邮箱码由官方侧发起者确认，
-// 别人拿到码也没用。
-func TestIdentityBindEmailCodeConfirmByInitiator(t *testing.T) {
+// TestIdentityBindEmailCodeAnyoneWithTheCodeCanConfirm 邮箱码由"拿到邮件的人"确认即可。
+//
+// 为什么不再要求"回复者必须是发起人本人"：
+//  1. 官方平台的群内 OpenID 与私聊 OpenID 不是同一个值 —— 在群里发起 .bind、
+//     再到私聊里回复验证码，会被误判成"不是本人"（用户实测撞到的就是这条）；
+//  2. 群绑定的码本来就寄给旧群邀请人，而张罗群绑定的往往是群里另一位管理；
+//  3. 真正证明身份的是"能不能拿到那封邮件"，不是"谁按的发送键"。
+//
+// 安全性不变的关键：绑定记录用的是挑战里登记的发起者身份，
+// 旁人代回也只会把数据交给发起者，抢不走。
+func TestIdentityBindEmailCodeAnyoneWithTheCodeCanConfirm(t *testing.T) {
 	env := newCodeTestEnv(t)
 	defer env.cleanup()
 	withMailCapture(t)
@@ -498,24 +516,53 @@ func TestIdentityBindEmailCodeConfirmByInitiator(t *testing.T) {
 	}
 	identityBindPutCode(challenge)
 
-	// 另一个人在官方群回复同一个码 → 必须被拒
+	// 另一个官方身份（比如替邀请人转达的群管理）在官方群里回复同一个码
 	otherCtx, otherMsg := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, "OpenQQ:100-other", bindTestNewGroupID, "新群")
 	otherMsg.MessageType = "group"
 	if !identityBindTryConsumeCode(otherCtx, otherMsg, "444444") {
 		t.Fatal("the reply should be consumed (it is code-shaped and matches an email challenge)")
 	}
-	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID); ok {
-		t.Fatal("a third party must not complete an email-channel binding")
-	}
 
-	// 发起者本人在官方群回复 → 通过
-	initCtx, initMsg := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, bindTestNewUserID, bindTestNewGroupID, "新群")
-	initMsg.MessageType = "group"
-	if !identityBindTryConsumeCode(initCtx, initMsg, "444444") {
-		t.Fatal("the initiator's reply should be consumed")
+	record, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID)
+	if !ok {
+		t.Fatal("the code holder should be able to complete the binding")
 	}
-	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID); !ok {
-		t.Fatal("the initiator should be able to complete the binding from the email code")
+	// 关键：绑定归属必须仍然是**发起者**，不是代回复的那个人
+	if record.New.UserID != bindTestNewUserID {
+		t.Fatalf("binding must stay with the initiator: got %q want %q", record.New.UserID, bindTestNewUserID)
+	}
+	// 审计：记下实际回复的人
+	if challenge.ConfirmedBy != "OpenQQ:100-other" {
+		t.Fatalf("ConfirmedBy should record the actual confirmer, got %q", challenge.ConfirmedBy)
+	}
+}
+
+// TestIdentityBindEmailCodeWrongCodeStillRejected 放开"谁回复"不等于放开"码对不对"。
+func TestIdentityBindEmailCodeWrongCodeStillRejected(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+	withMailCapture(t)
+
+	challenge := &identityBindCodeChallenge{
+		Action:    identityBindActionUser,
+		New:       identityBindEndpoint{UserID: bindTestNewUserID},
+		Old:       identityBindEndpoint{UserID: bindTestOldUserID},
+		Code:      "444444",
+		DeliverTo: bindTestOldUserID,
+		ConfirmBy: bindTestOldUserID,
+		Channel:   identityBindCodeChannelEmail,
+		Status:    identityBindCodeDelivered,
+		ExpiresAt: 1<<62 - 1,
+	}
+	identityBindPutCode(challenge)
+
+	otherCtx, otherMsg := newQuitCommandTestContext(t, env.d, env.ctx.EndPoint, "OpenQQ:100-other", bindTestNewGroupID, "新群")
+	otherMsg.MessageType = "group"
+	if identityBindTryConsumeCode(otherCtx, otherMsg, "444445") {
+		t.Fatal("a wrong code must not be consumed")
+	}
+	if _, ok := identityBindStoreOf(env.d).find(env.d, bindTestOldUserID); ok {
+		t.Fatal("a wrong code must not create a binding")
 	}
 }
 

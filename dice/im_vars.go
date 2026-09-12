@@ -134,11 +134,24 @@ func VarGetValueComputed(ctx *MsgContext, s string) (string, bool) {
 }
 
 func VarGetValue(ctx *MsgContext, s string) (*ds.VMValue, bool) {
+	// 后台任务（例如绑定成功通知）自己拼的上下文可能连 Dice 都没有。
+	// 这里返回"没有这个变量"而不是 panic：官方 QQ 的 SDK 会让 panic
+	// 把整条 websocket 连接带走（close 4004 / invalid session）。
+	if ctx == nil || ctx.Dice == nil {
+		return nil, false
+	}
 	name := GetValueNameByAlias(s, aliasMapForCtx(ctx))
 	am := ctx.Dice.AttrsManager
 
 	// 临时变量
 	if strings.HasPrefix(s, "$t") {
+		// 注意：ctx.Player 可能为 nil —— 例如后台任务（绑定成功通知）自己拼的
+		// MsgContext 里没有玩家。这里必须挡住，否则下面读 ctx.Player.ValueMapTemp
+		// 会直接 nil 解引用 panic，而官方 QQ 的 SDK 会让这个 panic 把整条
+		// websocket 连接带走（表现为 close 4004 / invalid session）。
+		if ctx.Player == nil {
+			return nil, false
+		}
 		if ctx.vm != nil {
 			v, ok := ctx.vm.Attrs.Load(s)
 			if ok {

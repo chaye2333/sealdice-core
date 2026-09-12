@@ -121,6 +121,7 @@ func newCodeTestEnv(t *testing.T) *bindTestEnv {
 	env.d.Config.IdentityBindUseVerificationCode = true
 
 	// 民间 bot 端点：OneBot，能处理 QQ:<号>
+	// State 必须是"已连接"：只 Enable 不算可用，否则消息发不出去却报成功。
 	oldRecorder := &recordingAdapter{}
 	oldEP := &EndPointInfo{
 		EndPointInfoBase: EndPointInfoBase{
@@ -130,6 +131,7 @@ func newCodeTestEnv(t *testing.T) *bindTestEnv {
 			UserID:       "QQ:900000",
 			Nickname:     "OldBot",
 			Enable:       true,
+			State:        StateConnected,
 		},
 		Adapter: oldRecorder,
 	}
