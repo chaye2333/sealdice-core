@@ -1,6 +1,6 @@
 # QQ身份绑定 + 双向数据共通 + 虚拟角色状态栏 + GHCR 自动构建：使用与部署说明
 
-> `.help` 第一行显示 `鲸娘与豹 <版本号>`，第二行是 fork 说明（该fork版本主要是适配官bot的功能，代码鲸鱼写的。）
+> `.help` 第一行显示 `鲸娘与豹 <版本号>`（硬编码，不跟随「核心:骰子名字」）。
 
 面向：把海豹从 NapCat（OneBot）迁移到 **QQ 官方机器人**，希望老玩家的角色卡 / 日志不丢，
 并且**官方 bot 与民间 bot 能共用同一份数据**、官方机器人也能显示角色属性的人。
@@ -565,7 +565,7 @@ pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 是原生模�
 - [ ] `.unbind` 之后 `.pc list` 恢复成绑定前的状态（证明没有动过数据）。
 - [ ] 找一个 **OneBot / NapCat 群**发 `.r 1d20` 和 `.bind`，
       确认行为完全没变、`.bind` 会被拒绝、回复里**没有** `\scriptsize` 之类的公式。
-- [ ] `.help` 第一行是 `鲸娘与豹 <版本号>`，第二行是 fork 说明。
+- [ ] `.help` 第一行是 `鲸娘与豹 <版本号>`，且不再出现 fork 说明文字。
 - [ ] 看核心日志：没有 `panic`、没有数据库报错、没有"渲染 QQ 官方角色状态栏失败"的 warn。
 
 ---
@@ -969,7 +969,7 @@ logMultiBotDedupWindowSec: 30
 | `dice/im_session.go` | `MsgContext.OfficialQQStatusBarPending`；**`MsgContext.DataUserID` / `DataGroupID`（数据层身份，全项目唯一收敛点）** |
 | `dice/im_helpers.go` | 发送层统一消费状态栏标记（群聊 + 私聊）；**`GetPlayerInfoBySenderRaw` 里填充 `Data*ID`** |
 | `dice/rollvm_migrate.go` | `DiceFormatTmpl` 在渲染最终回复模板时打状态栏标记 |
-| `dice/builtin_commands.go` | 注册全局指令 `.bind` / `.unbind` / `.group`（含 `.groupbind`）；**`.pc` 系列（list/new/rename/save/load/untagAll/del）改用数据层 ID**；`.help` 标题改为 `鲸娘与豹` + fork 说明 |
+| `dice/builtin_commands.go` | 注册全局指令 `.bind` / `.unbind` / `.group`（含 `.groupbind`）；**`.pc` 系列（list/new/rename/save/load/untagAll/del）改用数据层 ID**；`.help` 标题改为 `鲸娘与豹`（硬编码，不带 fork 说明） |
 | `dice/dice_attrs_manager.go` | `LoadByCtx` 改用 `identityBindDataUserID/GroupID`（属性读写双向共通） |
 | `dice/ext_log.go` | `.log` 状态统一挂在归一后的群对象（`stateGroup`）；骰子/玩家发言都写归一后的群；删除/编辑按归一后的群查找；日志去重窗口可配置且**跨 bot 模式为可选**；抽出 `EvalPlayerGroupCardTemplate` |
 | `dice/platform_adapter_official_qq.go` | `officialQQGroupIDPrefix` 常量；请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；统一 file_info 解码；新增 `apiDomainOverride` 测试钩子 |

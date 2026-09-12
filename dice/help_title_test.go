@@ -30,7 +30,7 @@ func TestHelpFirstLineIsHardcodedAndIndependentFromDiceName(t *testing.T) {
 	}
 
 	reply := waitGroupMessage(t, env)
-	firstLine, rest, _ := strings.Cut(reply, "\n")
+	firstLine, _, _ := strings.Cut(reply, "\n")
 	if !strings.HasPrefix(firstLine, "鲸娘与豹 ") {
 		t.Fatalf(".help 第一行应为固定的标题，实际为 %q", firstLine)
 	}
@@ -41,8 +41,11 @@ func TestHelpFirstLineIsHardcodedAndIndependentFromDiceName(t *testing.T) {
 	if strings.Contains(firstLine, customDiceName) {
 		t.Fatalf(".help 第一行不应跟随「核心:骰子名字」变化，实际为 %q", firstLine)
 	}
-	// fork 说明必须留在帮助里，方便使用者知道自己在跑哪个版本
-	if !strings.Contains(rest, "该fork版本主要是适配官bot的功能，代码鲸鱼写的。") {
-		t.Fatalf(".help 应包含 fork 说明，实际为:\n%s", reply)
+	// 第二行不该再挂 fork 说明（看起来太杂），只留官网那一行
+	if strings.Contains(reply, "该fork版本") {
+		t.Fatalf(".help 不应再包含 fork 说明，实际为:\n%s", reply)
+	}
+	if !strings.Contains(reply, "官网: sealdice.com") {
+		t.Fatalf(".help 应保留官网信息，实际为:\n%s", reply)
 	}
 }
