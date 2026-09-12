@@ -155,19 +155,39 @@ jobs:
           # 之后所有 UI 改动都进不了镜像，而且构建照样成功，极难发现。
           # 现在 UI_REF 钉成 commit hash，这里再校验新 UI 的特征字符串，
           # 双保险：漏改 hash 会被这一步直接拦下。
+          #
+          # 为什么要拼接**所有** assets/*.js：Vite 会按路由/legacy 拆出多个 chunk，
+          # 设置页的代码不一定在首页第一个 <script> 里。只 grep 第一个文件会两头出错：
+          #   · 新字符串落在别的 chunk → 明明打对了却构建失败、不发布；
+          #   · 该消失的旧字符串落在别的 chunk → 检查恒过（假绿）。
           # ---------------------------------------------------------------
+          echo "--- collecting all js assets referenced by the page ---"
+          : > /tmp/all_assets.js
+          grep -oE 'assets/[A-Za-z0-9._/-]+\.js' /tmp/page.html | sort -u > /tmp/asset_list.txt || true
+          ASSET_COUNT=0
+          while read -r A; do
+            [ -n "$A" ] || continue
+            if curl -fsS "http://127.0.0.1:13211/$A" >> /tmp/all_assets.js 2>/dev/null; then
+              ASSET_COUNT=$((ASSET_COUNT + 1))
+            fi
+          done < /tmp/asset_list.txt
+          echo "collected $ASSET_COUNT js assets, $(wc -c < /tmp/all_assets.js) bytes"
+          if [ ! -s /tmp/all_assets.js ]; then
+            fail "没能取到任何 js 产物，无法校验前端版本"
+          fi
+
           echo "--- checking the bundled UI really contains our settings ---"
 
           # 应当存在的：本 fork 新增的绑定设置
           for NEEDLE in identityBindPreferEmailCode identityBindCodeExpireSec logMultiBotDedupWindowSec; do
-            if ! grep -q "$NEEDLE" /tmp/asset.js; then
+            if ! grep -q "$NEEDLE" /tmp/all_assets.js; then
               fail "镜像里的 UI 缺少设置项 $NEEDLE —— 前端可能是旧缓存版本（检查 Dockerfile 的 UI_REF 是否匹配 sealdice-ui fork 的最新 commit）"
             fi
           done
 
           # 应当已删除的：答题时代的失效选项
           for GONE in identityBindQuestionCount identityBindKeepQuiz identityBindFailCooldownSec; do
-            if grep -q "$GONE" /tmp/asset.js; then
+            if grep -q "$GONE" /tmp/all_assets.js; then
               fail "镜像里的 UI 仍包含已废弃的选项 $GONE —— 前端是旧版本"
             fi
           done

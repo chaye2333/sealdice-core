@@ -71,24 +71,40 @@ func (c *Config) LoadYamlConfig(data []byte) error {
 	return nil
 }
 
+// 官方 QQ 请求超时的合法区间。
+//
+// 下限取 5 秒是官方文档对上传接口的建议；上限 600 秒是防止误填一个巨大的值
+// 把机器人卡在一条死连接上。
+const (
+	officialQQMinTimeoutSec = 5
+	officialQQMaxTimeoutSec = 600
+)
+
+// clampOfficialQQRequestTimeout 把超时收敛到合法区间。
+//
+// 单独抽出来是因为它有两个入口：LoadYamlConfig（FixOfficialQQConfig）和
+// WebUI 保存（api/dice_config.go）。只在加载路径钳制的话，
+// 管理界面填 100000 会在**内存里立刻生效**（resty client 拿到 ≈27 小时），
+// 重启后才被钳回 600 —— 界面显示值与实际生效值长期不一致。
+func clampOfficialQQRequestTimeout(sec int64) int64 {
+	if sec <= 0 {
+		sec = DefaultConfig.OfficialQQRequestTimeoutSec
+	}
+	if sec < officialQQMinTimeoutSec {
+		sec = officialQQMinTimeoutSec
+	}
+	if sec > officialQQMaxTimeoutSec {
+		sec = officialQQMaxTimeoutSec
+	}
+	return sec
+}
+
 // FixOfficialQQConfig 收敛官方 QQ 相关的配置到合理范围。
 //
 // 重点是请求超时：老配置文件里没有这个字段（0），如果直接拿去 SetTimeout(0)
 // 会导致请求立即超时，所以必须补成默认值。
 func (c *Config) FixOfficialQQConfig() {
-	const (
-		minTimeoutSec = 5   // 官方文档建议上传接口超时 ≥5 秒
-		maxTimeoutSec = 600 // 上限 10 分钟，避免误填一个巨大的值把机器人卡死
-	)
-	if c.OfficialQQRequestTimeoutSec <= 0 {
-		c.OfficialQQRequestTimeoutSec = DefaultConfig.OfficialQQRequestTimeoutSec
-	}
-	if c.OfficialQQRequestTimeoutSec < minTimeoutSec {
-		c.OfficialQQRequestTimeoutSec = minTimeoutSec
-	}
-	if c.OfficialQQRequestTimeoutSec > maxTimeoutSec {
-		c.OfficialQQRequestTimeoutSec = maxTimeoutSec
-	}
+	c.OfficialQQRequestTimeoutSec = clampOfficialQQRequestTimeout(c.OfficialQQRequestTimeoutSec)
 }
 
 // FixIdentityBindConfig 把身份绑定相关配置收敛到合理范围。

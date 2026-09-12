@@ -532,7 +532,10 @@ func DiceConfigSet(c echo.Context) error {
 			}
 		}
 	}
+	// 保存路径同样要收敛：只调 FixIdentityBindConfig 的话，
+	// 「官方QQ 请求超时」填一个越界值会在内存里立刻生效（重启才被钳回）。
 	config.FixIdentityBindConfig()
+	config.FixOfficialQQConfig()
 
 	if val, ok := jsonMap["playerNameWrapEnable"]; ok {
 		config.PlayerNameWrapEnable = val.(bool)

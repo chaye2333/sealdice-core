@@ -107,6 +107,16 @@ func resetIdentityBindGlobals() {
 		globalIdentityBindCodes.Delete(key)
 		return true
 	})
+	// 按目标号/全局的限频状态同样是包级全局：不清会让下一个用例
+	// 直接撞上"刚刚发起过验证"（同一个目标号在多条用例里复用）。
+	globalIdentityBindTargetLast.Range(func(key string, _ int64) bool {
+		globalIdentityBindTargetLast.Delete(key)
+		return true
+	})
+	globalIdentityBindRateMu.Lock()
+	globalIdentityBindRateWindowStart = 0
+	globalIdentityBindRateCount = 0
+	globalIdentityBindRateMu.Unlock()
 }
 
 // bindTestEnv 构建一个可直接调用 .bind 指令的环境。

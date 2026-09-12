@@ -456,10 +456,9 @@ func (pa *PlatformAdapterOfficialQQ) requestTimeout() time.Duration {
 			sec = configured
 		}
 	}
-	if sec <= 0 {
-		sec = DefaultConfig.OfficialQQRequestTimeoutSec
-	}
-	return time.Duration(sec) * time.Second
+	// 这里也要钳制：WebUI 保存后是直接改内存里的 Config 的，
+	// 不能指望"重启后 LoadYamlConfig 会修好它"。
+	return time.Duration(clampOfficialQQRequestTimeout(sec)) * time.Second
 }
 
 // connect 建立正式连接。probe 非空时复用探测结果，避免重复拉取机器人信息。

@@ -314,7 +314,12 @@ func TestIdentityBindCodeExpiry(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a challenge")
 	}
-	challenge.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+	// 注意：identityBindLoadCode 返回的是**副本**（防止和投递 worker 抢内存），
+	// 改过期时间必须改在全局那条上。
+	identityBindCodeUpdate(identityBindCodeKey(identityBindActionUser, bindTestNewUserID),
+		func(c *identityBindCodeChallenge) {
+			c.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+		})
 
 	oldEP := codeOldEndPoint(t, env)
 	oldCtx, oldMsg := newQuitCommandTestContext(t, env.d, oldEP, bindTestOldUserID, bindTestOldGroupID, "旧群")
@@ -389,8 +394,12 @@ func TestIdentityBindCodeGroupFlowUsesInviter(t *testing.T) {
 	if !strings.Contains(reply, "验证码") {
 		t.Fatalf("expected the group code flow, got %q", reply)
 	}
-	if !strings.Contains(reply, bindTestOldUserID) {
-		t.Fatalf("the prompt should name the confirmer %q, got %q", bindTestOldUserID, reply)
+	// 邀请人是第三方：回执里只能出现打码后的号码（防止在群里泄露他的 QQ/邮箱）
+	if !strings.Contains(reply, identityBindMaskNumber("2001")) {
+		t.Fatalf("the prompt should name the (masked) confirmer, got %q", reply)
+	}
+	if strings.Contains(reply, bindTestOldUserID) {
+		t.Fatalf("the group prompt must not leak the inviter's full QQ, got %q", reply)
 	}
 
 	challenge, ok := identityBindLoadCode(identityBindActionGroup, bindTestNewGroupID)

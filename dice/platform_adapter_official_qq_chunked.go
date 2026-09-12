@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -129,6 +130,11 @@ func (pa *PlatformAdapterOfficialQQ) officialQQChunkedUploadEnabled() bool {
 	return pa.EndPoint.Session.Parent.Config.OfficialQQChunkedUploadEnable
 }
 
+// officialQQChunkedUploadMinBytes 走分片上传的最小文件体积。
+// 小文件走原有 base64 路径**更快**，四步流程（prepare→PUT→finish→发消息）
+// 纯属浪费，而且每一步都可能失败。
+const officialQQChunkedUploadMinBytes = 1 << 20 // 1MB
+
 // officialQQShouldUseChunkedUpload 判断本次上传是否走分片。
 //
 // 只有同时满足下面三点才走：
@@ -147,7 +153,31 @@ func (pa *PlatformAdapterOfficialQQ) officialQQShouldUseChunkedUpload(file *mess
 	if file.URL == "" && file.File == "" {
 		return false
 	}
+	// 第 3 条：体积门槛。读一下大小即可；读不到（文件不存在/无权限）
+	// 就交给原路径去报错，避免这里把错误吞掉。
+	if size, err := officialQQLocalFileSize(file); err == nil && size < officialQQChunkedUploadMinBytes {
+		return false
+	}
 	return true
+}
+
+// officialQQLocalFileSize 取本地文件大小（分片上传的体积门槛用）。
+func officialQQLocalFileSize(file *message.FileElement) (int64, error) {
+	if file == nil {
+		return 0, errors.New("文件为空")
+	}
+	path := file.File
+	if path == "" {
+		path = strings.TrimPrefix(file.URL, "file://")
+	}
+	if path == "" {
+		return 0, errors.New("文件路径为空")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 // uploadGroupMediaChunked 用分片上传的方式上传群文件，可自定义文件名。

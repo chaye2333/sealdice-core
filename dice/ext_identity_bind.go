@@ -40,6 +40,11 @@ const (
 	// identityBindGroupPrefix / identityBindUserPrefix 旧 OneBot 身份前缀。
 	identityBindGroupPrefix = "QQ-Group:"
 	identityBindUserPrefix  = "QQ:"
+
+	// identityBindPrivateGroupPrefix 私聊伪群号前缀。
+	// Sealdice 把私聊当成 "PG-<用户ID>" 的群来处理（见 GetPlayerInfoBySenderRaw），
+	// 属性/默认卡的「群维度」key 用的就是它，所以归一化时必须单独照顾。
+	identityBindPrivateGroupPrefix = "PG-"
 )
 
 // identityBindAction 绑定类型。
@@ -75,14 +80,24 @@ type identityBindStoreData struct {
 	Version int                   `json:"version"`
 	SavedAt int64                 `json:"savedAt"`
 	Records []*identityBindRecord `json:"records"`
+	// NameTemplateOff 明确关掉名片模板（.sn off）的身份。
+	//
+	// 为什么需要它：绑定后"官方侧没有模板"时会去沿用绑定另一侧的模板，
+	// 于是 .sn off（把模板清空）看起来像是没生效——状态栏又冒出来了。
+	// 单独记一份"我确实关掉了"的名单就能区分「没设置过」和「设置过又关掉」。
+	//
+	// 放在这个文件里（而不是往玩家表加字段）是为了不动数据库 schema：
+	// 上游主线读到这个文件只会忽略，回退也不受影响。
+	NameTemplateOff []string `json:"nameTemplateOff,omitempty"`
 }
 
 // identityBindStore 绑定关系的内存索引 + 落盘。
 type identityBindStore struct {
-	mu      sync.RWMutex
-	byKey   map[string]*identityBindRecord
-	loaded  bool
-	lastErr error
+	mu              sync.RWMutex
+	byKey           map[string]*identityBindRecord
+	nameTemplateOff map[string]bool
+	loaded          bool
+	lastErr         error
 }
 
 // identityBindSession 一次等待确认的绑定会话。
@@ -265,6 +280,44 @@ func (s *identityBindStore) ensureLoaded(d *Dice) {
 			s.byKey[key] = record
 		}
 	}
+	s.nameTemplateOff = map[string]bool{}
+	for _, id := range payload.NameTemplateOff {
+		if id = strings.TrimSpace(id); id != "" {
+			s.nameTemplateOff[id] = true
+		}
+	}
+}
+
+// setNameTemplateOff 记录/取消「这个人明确关掉了名片模板」。
+func (s *identityBindStore) setNameTemplateOff(d *Dice, userID string, off bool) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	s.ensureLoaded(d)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nameTemplateOff == nil {
+		s.nameTemplateOff = map[string]bool{}
+	}
+	if off {
+		s.nameTemplateOff[userID] = true
+	} else {
+		delete(s.nameTemplateOff, userID)
+	}
+	return s.saveLocked(d)
+}
+
+// isNameTemplateOff 这个人是否明确关掉了名片模板（.sn off）。
+func (s *identityBindStore) isNameTemplateOff(d *Dice, userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	s.ensureLoaded(d)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nameTemplateOff[userID]
 }
 
 // saveLocked 落盘，调用方必须已持有写锁。
@@ -286,6 +339,14 @@ func (s *identityBindStore) saveLocked(d *Dice) error {
 		Version: identityBindStoreVersion,
 		SavedAt: time.Now().Unix(),
 		Records: records,
+	}
+	if len(s.nameTemplateOff) > 0 {
+		off := make([]string, 0, len(s.nameTemplateOff))
+		for id := range s.nameTemplateOff {
+			off = append(off, id)
+		}
+		sort.Strings(off)
+		payload.NameTemplateOff = off
 	}
 	data, err := json.MarshalIndent(&payload, "", "  ")
 	if err != nil {
@@ -514,8 +575,18 @@ func identityCanonicalUserID(d *Dice, userID string) string {
 
 // identityCanonicalGroupID 把任意一侧的群 ID 归一成数据层应使用的 ID（同样是旧群）。
 // 无绑定时原样返回。
+//
+// 私聊要特殊处理：Sealdice 把私聊伪装成 "PG-<用户ID>" 这种伪群号
+// （见 GetPlayerInfoBySenderRaw），直接查群绑定永远查不到，
+// 于是官方私聊与旧号私聊各存一份属性/默认卡。这里把后半段当用户 ID 再归一一次。
 func identityCanonicalGroupID(d *Dice, groupID string) string {
 	if d == nil || strings.TrimSpace(groupID) == "" {
+		return groupID
+	}
+	if rest, ok := strings.CutPrefix(groupID, identityBindPrivateGroupPrefix); ok {
+		if canonicalUser := identityCanonicalUserID(d, rest); canonicalUser != "" && canonicalUser != rest {
+			return identityBindPrivateGroupPrefix + canonicalUser
+		}
 		return groupID
 	}
 	oldID, ok := identityBindStoreOf(d).lookupGroup(d, groupID)
@@ -632,6 +703,11 @@ func identityBindPlayerNameTemplate(ctx *MsgContext) string {
 	if ctx == nil || ctx.Player == nil {
 		return ""
 	}
+	if ctx.Dice != nil && identityBindStoreOf(ctx.Dice).isNameTemplateOff(ctx.Dice, ctx.Player.UserID) {
+		// 本人明确关掉过（.sn off）：这时**不能**再去沿用绑定另一侧的模板，
+		// 否则状态栏又会冒出来，看起来像"关不掉"。
+		return ""
+	}
 	if tmpl := strings.TrimSpace(ctx.Player.AutoSetNameTemplate); tmpl != "" {
 		return tmpl
 	}
@@ -640,6 +716,9 @@ func identityBindPlayerNameTemplate(ctx *MsgContext) string {
 	}
 	// 自身没有模板，看绑定另一侧有没有。
 	if player := identityBindReadPlayer(ctx); player != nil && player != ctx.Player {
+		if identityBindStoreOf(ctx.Dice).isNameTemplateOff(ctx.Dice, player.UserID) {
+			return ""
+		}
 		if tmpl := strings.TrimSpace(player.AutoSetNameTemplate); tmpl != "" {
 			return tmpl
 		}
@@ -650,10 +729,30 @@ func identityBindPlayerNameTemplate(ctx *MsgContext) string {
 	if !bound {
 		return ""
 	}
+	if identityBindStoreOf(ctx.Dice).isNameTemplateOff(ctx.Dice, targetUserID) {
+		return ""
+	}
 	if player := identityBindFindPlayerAnyGroup(ctx, targetUserID); player != nil {
 		return strings.TrimSpace(player.AutoSetNameTemplate)
 	}
 	return ""
+}
+
+// identityBindNoteNameTemplate 记录 .sn 的显式开关状态。
+//
+// 为什么需要：绑定之后，本侧没有名片模板时会去沿用绑定另一侧的模板，
+// 于是「.sn off」看起来像没生效（模板被清空了，但另一侧那份又被捡回来）。
+// 这里把"确实关掉了"记下来，identityBindPlayerNameTemplate 就不会再回退。
+//
+// 只在开启身份绑定时才落盘，避免给完全没用这个功能的部署凭空造文件。
+func identityBindNoteNameTemplate(ctx *MsgContext, off bool) {
+	if ctx == nil || ctx.Dice == nil || ctx.Player == nil {
+		return
+	}
+	if !identityBindEnabled(ctx.Dice) {
+		return
+	}
+	_ = identityBindStoreOf(ctx.Dice).setNameTemplateOff(ctx.Dice, ctx.Player.UserID, off)
 }
 
 // identityBindFindPlayerAnyGroup 在内存中的各个群里找某个用户的玩家记录，
@@ -697,11 +796,19 @@ func identityBindCancelCode(action identityBindAction, targetID string) bool {
 		return false
 	}
 	key := identityBindCodeKey(action, targetID)
-	if _, ok := globalIdentityBindCodes.Load(key); !ok {
-		return false
+	identityBindCodesMu.Lock()
+	if c, ok := globalIdentityBindCodes.Load(key); ok {
+		// 用户主动取消：把该目标的限频一起放掉，
+		// 否则"取消后想换一个号重试"会被自己的限频挡住 10 分钟。
+		if target := identityBindChallengeTargetKey(c); target != "" {
+			globalIdentityBindTargetLast.Delete(target)
+		}
+		globalIdentityBindCodes.Delete(key)
+		identityBindCodesMu.Unlock()
+		return true
 	}
-	globalIdentityBindCodes.Delete(key)
-	return true
+	identityBindCodesMu.Unlock()
+	return false
 }
 
 // identityBindCooldownRemaining 返回还需要等待多久才能再次发起绑定。
@@ -993,11 +1100,31 @@ func identityBindStartCodeChallenge(
 	d := ctx.Dice
 	solved := CmdExecuteResult{Matched: true, Solved: true}
 
+	// 限频：同一个目标号 / 旧群最多 10 分钟发起一次，全实例每小时最多 20 次。
+	// 目的见 identityBindTargetCooldown 的注释——不让骰子变成"给任意 QQ 邮箱发信"的工具。
+	throttleKey := oldEndpoint.UserID
+	if action == identityBindActionGroup {
+		throttleKey = oldEndpoint.GroupID
+	}
+	nowSec := time.Now().Unix()
+	if remaining := identityBindTargetThrottleRemaining(throttleKey, nowSec); remaining > 0 {
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"这个号码/群刚刚发起过验证，请在 %s 后再试。",
+			identityBindFormatDuration(remaining)))
+		return solved
+	}
+	if !identityBindGlobalRateAllow(nowSec) {
+		ReplyToSender(ctx, msg, "短时间内验证码发送过于频繁，请稍后再试。")
+		return solved
+	}
+
 	code, err := identityBindGenerateCode(identityBindCodeLength(d))
 	if err != nil {
 		ReplyToSender(ctx, msg, "生成验证码失败，请稍后重试或联系骰主。")
 		return solved
 	}
+	// 限频额度在**真正投递成功**时才记账（见 identityBindDeliverPendingCodes）：
+	// 两条通道都不通的时候什么都没发出去，没理由把用户挡在门外。
 
 	now := time.Now()
 	challenge := &identityBindCodeChallenge{
@@ -1043,19 +1170,27 @@ func identityBindStartCodeChallenge(
 	switch {
 	case delivered && latest.Channel == identityBindCodeChannelEmail:
 		// 邮箱通道：码进了邮箱，回复地点是**官方 bot 这边**（不是民间 bot）
-		who := "这个 QQ 号"
 		if action == identityBindActionGroup {
-			who = "旧群邀请人"
+			// 收件人是旧群**邀请人**（第三方）：他的 QQ 号与邮箱不能在群里公开，
+			// 打码后本人仍能认出是不是自己。
+			lines = append(lines,
+				fmt.Sprintf("验证码已寄到旧群邀请人（QQ %s）的 QQ 邮箱：%s",
+					identityBindMaskNumber(identityBindMailTargetQQ(latest)),
+					identityBindMaskNumber(latest.SentTo)),
+				"拿到验证码后**在官方 bot 这边**把它回复过来即可完成绑定——发在群里或私聊都行。",
+				"没收到的话记得翻一下垃圾邮件。",
+			)
+		} else {
+			lines = append(lines,
+				fmt.Sprintf("验证码已寄到这个 QQ 号的邮箱：%s", identityBindMaskNumber(latest.SentTo)),
+				"拿到验证码后**在官方 bot 这边**把它回复过来即可完成绑定——发在群里或私聊都行。",
+				"没收到的话记得翻一下垃圾邮件。",
+			)
 		}
-		lines = append(lines,
-			fmt.Sprintf("验证码已寄到%s（QQ %s）的 QQ 邮箱：%s",
-				who, identityBindMailTargetQQ(latest), latest.SentTo),
-			"拿到验证码后**在官方 bot 这边**把它回复过来即可完成绑定——发在群里或私聊都行。",
-			"没收到的话记得翻一下垃圾邮件。",
-		)
 	case delivered:
 		lines = append(lines,
-			fmt.Sprintf("已通过民间 bot 给 %s 发送了私聊验证码。", deliverTo),
+			fmt.Sprintf("已通过民间 bot 给 %s 发送了私聊验证码。",
+				identityBindDeliverToText(action, deliverTo)),
 			"请**用那个号**打开与民间 bot 的私聊，把收到的验证码回复过去即可完成绑定。",
 		)
 	case needMaster:
@@ -1076,7 +1211,8 @@ func identityBindStartCodeChallenge(
 		}
 	case action == identityBindActionGroup:
 		lines = append(lines,
-			fmt.Sprintf("已登记确认请求，验证码会私聊发给旧群的邀请人 %s。", deliverTo),
+			fmt.Sprintf("已登记确认请求，验证码会私聊发给旧群的邀请人 %s。",
+				identityBindDeliverToText(action, deliverTo)),
 		)
 	default:
 		lines = append(lines,
@@ -1097,6 +1233,17 @@ func identityBindStartCodeChallenge(
 
 	ReplyToSender(ctx, msg, strings.Join(lines, "\n"))
 	return solved
+}
+
+// identityBindDeliverToText 在**群聊回执**里描述"验证码发给谁"。
+//
+// 个人绑定 = 用户自己刚填的那个旧号，直接显示没有问题；
+// 群绑定 = 旧群的**邀请人**，那是第三方，QQ 号不能在群里公开，所以打码。
+func identityBindDeliverToText(action identityBindAction, deliverTo string) string {
+	if action != identityBindActionGroup {
+		return deliverTo
+	}
+	return identityBindMaskNumber(identityBindBareNumber(deliverTo))
 }
 
 // identityBindFormatUserStatus 生成个人绑定状态。

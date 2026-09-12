@@ -994,6 +994,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				return CmdExecuteResult{Matched: true, Solved: true, ShowHelp: true}
 			case "coc", "coc7":
 				ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} SAN{理智} HP{生命值}/{生命值上限} DEX{敏捷}"
+				identityBindNoteNameTemplate(ctx, false)
 				ctx.Player.UpdatedAtTime = time.Now().Unix()
 				if ctx.Group != nil {
 					ctx.Group.MarkDirty(ctx.Dice)
@@ -1009,6 +1010,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 			case "dnd", "dnd5e":
 				// PW{pw}
 				ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{hp}/{hpmax} AC{ac} DC{dc} PP{pp}"
+				identityBindNoteNameTemplate(ctx, false)
 				ctx.Player.UpdatedAtTime = time.Now().Unix()
 				if ctx.Group != nil {
 					ctx.Group.MarkDirty(ctx.Dice)
@@ -1023,6 +1025,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:名片_自动设置"))
 			case "none":
 				ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW}"
+				identityBindNoteNameTemplate(ctx, false)
 				ctx.Player.UpdatedAtTime = time.Now().Unix()
 				if ctx.Group != nil {
 					ctx.Group.MarkDirty(ctx.Dice)
@@ -1037,6 +1040,9 @@ func RegisterBuiltinExtLog(self *Dice) {
 			case "off", "cancel":
 				_, _ = SetPlayerGroupCardByTemplate(ctx, "{$t玩家_RAW}")
 				ctx.Player.AutoSetNameTemplate = ""
+				// 明确记下"关掉了"：否则绑定另一侧的模板又会被捡回来，
+				// 状态栏看起来关不掉。
+				identityBindNoteNameTemplate(ctx, true)
 				ctx.Player.UpdatedAtTime = time.Now().Unix()
 				if ctx.Group != nil {
 					ctx.Group.MarkDirty(ctx.Dice)
@@ -1050,6 +1056,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				if t == "" {
 					_, _ = SetPlayerGroupCardByTemplate(ctx, "{$t玩家_RAW}")
 					ctx.Player.AutoSetNameTemplate = ""
+					identityBindNoteNameTemplate(ctx, true)
 					ctx.Player.UpdatedAtTime = time.Now().Unix()
 					if ctx.Group != nil {
 						ctx.Group.MarkDirty(ctx.Dice)
@@ -1066,6 +1073,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 						return handleOverlong(ctx, msg, text)
 					} else {
 						ctx.Player.UpdatedAtTime = time.Now().Unix()
+						identityBindNoteNameTemplate(ctx, false)
 						if ctx.Group != nil {
 							ctx.Group.MarkDirty(ctx.Dice)
 						}
@@ -1101,6 +1109,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 						return false
 					}
 					ctx.Player.AutoSetNameTemplate = t.Template
+					identityBindNoteNameTemplate(ctx, false)
 					VarSetValueStr(ctx, "$t名片格式", val)
 					VarSetValueStr(ctx, "$t名片预览", text)
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:名片_自动设置"))
@@ -1139,7 +1148,13 @@ func RegisterBuiltinExtLog(self *Dice) {
 			if msg.MessageType == "private" && ctx.CommandHideFlag != "" {
 				if privateCommandListenHas(ctx.CommandID) {
 					session := ctx.Session
-					groupInfo, ok := session.ServiceAtNew.Load(ctx.CommandHideFlag)
+					// CommandHideFlag 里存的是**真实群号**（暗骰时记下"这条回复属于哪个群"），
+					// 群绑定之后日志状态与记录都在归一后的旧群名下，
+					// 所以这里也要归一：
+					//   · 用真实群对象取状态 → 绑群时状态已被清空 → On=false → 暗骰内容静默丢失；
+					//   · 就算取到，写入也得落同一个群，否则同一份日志被劈成两个 group_id。
+					logGroupID := identityBindLogWriteGroupID(ctx, ctx.CommandHideFlag)
+					groupInfo, ok := session.ServiceAtNew.Load(logGroupID)
 					if !ok {
 						ctx.Dice.Logger.Warn("ServiceAtNew ext_log加载groupInfo异常")
 						return

@@ -141,6 +141,11 @@ type identityBindCodeChallenge struct {
 	NewMsgID string
 	// NewMsgAt 发起时间（NewMsgID 的新鲜度判断用）
 	NewMsgAt int64
+
+	// Delivering 是否正在投递（受 identityBindCodesMu 保护）。
+	// 作用：指令路径会同步投递一次，worker 每 3 秒也会扫一遍，
+	// 没有这个标记同一条挑战会被投两遍（甚至把 Channel 覆盖成错的那个）。
+	Delivering bool
 }
 
 func (c *identityBindCodeChallenge) expired() bool {
@@ -156,6 +161,18 @@ var (
 	globalIdentityBindCodes       SyncMap[string, *identityBindCodeChallenge]
 	globalIdentityBindDeliverOnce sync.Once
 )
+
+// identityBindCodesMu 保护**挑战对象内部的字段**（SyncMap 只保护 map 本身）。
+//
+// 三条并发路径都会碰同一条挑战：
+//   - 后台投递 worker（每 3 秒一次 Range）
+//   - 消息分发里的验证码拦截 identityBindTryConsumeCode
+//   - 指令处理（.bind / .group / .bind approve）
+//
+// 规矩：**任何**对挑战字段的读写都在这个锁里做；其中绝不能做 I/O
+// （SMTP / 私聊可能阻塞数秒，握着锁会把消息分发一起堵死）。
+// 投递流程因此是"锁里抢占 + 拷贝快照 → 锁外发消息 → 锁里写回结果"。
+var identityBindCodesMu sync.Mutex
 
 // identityBindChallengeOwnerID 一条挑战归属于谁——也就是**发起绑定的人**。
 //
@@ -205,26 +222,91 @@ func identityBindPutCode(challenge *identityBindCodeChallenge) {
 	if owner == "" {
 		return
 	}
+	identityBindCodesMu.Lock()
 	globalIdentityBindCodes.Store(identityBindCodeKey(challenge.Action, owner), challenge)
+	identityBindCodesMu.Unlock()
 }
 
 // identityBindLoadCode 按**发起者**取挑战。
 // 传 userID = 官方侧用户 ID（个人）或真实群 ID（群）。
+//
+// 返回的是**副本**：调用方可以随便读，不会和后台投递 worker 抢同一块内存。
+// 需要改状态请用 identityBindCodeUpdate。
 func identityBindLoadCode(action identityBindAction, ownerID string) (*identityBindCodeChallenge, bool) {
+	identityBindCodesMu.Lock()
+	defer identityBindCodesMu.Unlock()
 	v, ok := globalIdentityBindCodes.Load(identityBindCodeKey(action, ownerID))
 	if !ok || v == nil {
 		return nil, false
 	}
-	return v, true
+	return identityBindCodeCopy(v), true
+}
+
+// identityBindCodeCopy 复制一条挑战（字段逐个列出，避免 copylocks）。
+// 调用方必须已持有 identityBindCodesMu。
+func identityBindCodeCopy(c *identityBindCodeChallenge) *identityBindCodeChallenge {
+	if c == nil {
+		return nil
+	}
+	out := &identityBindCodeChallenge{
+		Action:           c.Action,
+		New:              c.New,
+		Old:              c.Old,
+		Code:             c.Code,
+		DeliverTo:        c.DeliverTo,
+		ConfirmBy:        c.ConfirmBy,
+		Channel:          c.Channel,
+		Status:           c.Status,
+		Attempts:         c.Attempts,
+		SentByEP:         c.SentByEP,
+		SentTo:           c.SentTo,
+		CreatedAt:        c.CreatedAt,
+		ExpiresAt:        c.ExpiresAt,
+		DeliveredAt:      c.DeliveredAt,
+		FinishedAt:       c.FinishedAt,
+		Reason:           c.Reason,
+		NeedMaster:       c.NeedMaster,
+		MasterNotifiedAt: c.MasterNotifiedAt,
+		ConfirmedBy:      c.ConfirmedBy,
+		NewMsgID:         c.NewMsgID,
+		NewMsgAt:         c.NewMsgAt,
+		Delivering:       c.Delivering,
+	}
+	if len(c.MasterNotifiedTo) > 0 {
+		out.MasterNotifiedTo = append([]string(nil), c.MasterNotifiedTo...)
+	}
+	return out
+}
+
+// identityBindCodeUpdate 在锁里改一条挑战。
+//
+// 所有对挑战状态的写入都必须走这里：worker（每 3 秒）与消息分发/指令处理
+// 会并发碰同一条挑战，之前是直接改字段，属于数据竞争。
+func identityBindCodeUpdate(key string, fn func(c *identityBindCodeChallenge)) {
+	if fn == nil {
+		return
+	}
+	identityBindCodesMu.Lock()
+	defer identityBindCodesMu.Unlock()
+	v, ok := globalIdentityBindCodes.Load(key)
+	if !ok || v == nil {
+		return
+	}
+	fn(v)
 }
 
 // identityBindCleanupCodes 清理已过期 / 已完成的挑战。
 func identityBindCleanupCodes() {
 	now := time.Now().Unix()
 	var toDelete []string
+	identityBindCodesMu.Lock()
 	globalIdentityBindCodes.Range(func(key string, c *identityBindCodeChallenge) bool {
 		if c == nil {
 			toDelete = append(toDelete, key)
+			return true
+		}
+		// 正在投递的那条先别动，免得状态被改坏
+		if c.Delivering {
 			return true
 		}
 		// 等骰主人工确认的挑战不参与"超时作废"：验证码根本没发出去，
@@ -251,6 +333,98 @@ func identityBindCleanupCodes() {
 	for _, key := range toDelete {
 		globalIdentityBindCodes.Delete(key)
 	}
+	identityBindCodesMu.Unlock()
+	identityBindPruneTargetThrottle(now)
+}
+
+// ---------- 防刷：按目标号限频 ----------
+
+const (
+	// identityBindTargetCooldown 同一个目标（被声明的旧号 / 旧群）两次发起验证的最小间隔。
+	//
+	// 为什么需要：发起一次绑定 = 给那个 QQ 号寄一封邮件 / 发一条私聊。
+	// 没有这个限制的话，任何人都能反复 .bind <别人的号>，
+	// 拿骰子当"给任意 QQ 邮箱发信"的工具，消耗骰主的 SMTP 信誉
+	// （被投诉/被拉黑之后所有通知邮件都废了）与民间 bot 的私聊额度。
+	identityBindTargetCooldown = 10 * time.Minute
+
+	// identityBindGlobalRateWindowSec 全局限频窗口：每小时。
+	identityBindGlobalRateWindowSec = 3600
+	// identityBindGlobalRateLimit 全局窗口内最多发起多少次验证码投递。
+	identityBindGlobalRateLimit = 20
+)
+
+var (
+	// globalIdentityBindTargetLast 目标 -> 上次发起时间，用于按目标限频。
+	globalIdentityBindTargetLast SyncMap[string, int64]
+
+	globalIdentityBindRateMu          sync.Mutex
+	globalIdentityBindRateWindowStart int64
+	globalIdentityBindRateCount       int
+)
+
+// identityBindTargetThrottleRemaining 目标还要等多久才能再次发起（0 = 现在可以）。
+func identityBindTargetThrottleRemaining(target string, now int64) time.Duration {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return 0
+	}
+	last, ok := globalIdentityBindTargetLast.Load(target)
+	if !ok || last <= 0 {
+		return 0
+	}
+	deadline := last + int64(identityBindTargetCooldown.Seconds())
+	if now >= deadline {
+		return 0
+	}
+	return time.Duration(deadline-now) * time.Second
+}
+
+// identityBindChallengeTargetKey 一条挑战的"目标"——被声明的旧号 / 旧群。
+// 限频就是按它算的：同一个目标 10 分钟内最多发一次验证码。
+func identityBindChallengeTargetKey(c *identityBindCodeChallenge) string {
+	if c == nil {
+		return ""
+	}
+	if c.Action == identityBindActionGroup {
+		return c.Old.GroupID
+	}
+	return c.Old.UserID
+}
+
+// identityBindMarkTargetAttempt 记一次"给这个目标发过验证码"。
+func identityBindMarkTargetAttempt(target string, now int64) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return
+	}
+	globalIdentityBindTargetLast.Store(target, now)
+}
+
+// identityBindGlobalRateAllow 全局限频（滑动窗口换成固定窗口，够用且简单）。
+func identityBindGlobalRateAllow(now int64) bool {
+	globalIdentityBindRateMu.Lock()
+	defer globalIdentityBindRateMu.Unlock()
+	if now-globalIdentityBindRateWindowStart >= identityBindGlobalRateWindowSec {
+		globalIdentityBindRateWindowStart = now
+		globalIdentityBindRateCount = 0
+	}
+	if globalIdentityBindRateCount >= identityBindGlobalRateLimit {
+		return false
+	}
+	globalIdentityBindRateCount++
+	return true
+}
+
+// identityBindPruneTargetThrottle 清掉过期的限频记录，避免 SyncMap 无限增长。
+func identityBindPruneTargetThrottle(now int64) {
+	ttl := int64(identityBindTargetCooldown.Seconds()) * 2
+	globalIdentityBindTargetLast.Range(func(key string, last int64) bool {
+		if last <= 0 || now-last > ttl {
+			globalIdentityBindTargetLast.Delete(key)
+		}
+		return true
+	})
 }
 
 // ---------- 配置 ----------
@@ -507,6 +681,14 @@ func identityBindStartCodeWorker(d *Dice) {
 }
 
 // identityBindDeliverPendingCodes 扫描所有待投递的挑战并尝试发送验证码。
+//
+// 并发要点（与 identityBindCodesMu 的注释配套）：
+//  1. 锁里只做"抢占 + 拷贝快照"：把 Delivering 置 true 并复制一份挑战出来；
+//  2. 锁外发消息（SMTP / 私聊都可能阻塞数秒，绝不能握着锁）；
+//  3. 锁里写回结果。
+//
+// 抢占让"指令路径同步投递一次"与"worker 每 3 秒扫一遍"不会重复发送，
+// 也不会把 Channel 覆盖成与实际不符的那个。
 func identityBindDeliverPendingCodes(d *Dice) {
 	if d == nil || !identityBindEnabled(d) || !identityBindUseVerificationCode(d) {
 		return
@@ -517,21 +699,27 @@ func identityBindDeliverPendingCodes(d *Dice) {
 	}
 
 	type pending struct {
-		c *identityBindCodeChallenge
+		key  string
+		snap *identityBindCodeChallenge
 	}
 	var todo []pending
-	globalIdentityBindCodes.Range(func(_ string, c *identityBindCodeChallenge) bool {
-		if c != nil && c.Status == identityBindCodePending && !c.expired() {
-			todo = append(todo, pending{c: c})
+	identityBindCodesMu.Lock()
+	globalIdentityBindCodes.Range(func(key string, c *identityBindCodeChallenge) bool {
+		if c == nil || c.Delivering || c.Status != identityBindCodePending || c.expired() {
+			return true
 		}
+		c.Delivering = true
+		todo = append(todo, pending{key: key, snap: identityBindCodeCopy(c)})
 		return true
 	})
+	identityBindCodesMu.Unlock()
 	if len(todo) == 0 {
 		return
 	}
 
 	for _, item := range todo {
-		c := item.c
+		// 注意：c 是**快照**，改它不会影响全局那条；结果由 finishDelivery 写回。
+		c := item.snap
 
 		// 两条通道按优先级依次尝试。
 		// 默认私聊优先，骰主打开 IdentityBindPreferEmailCode 后改为邮箱优先。
@@ -541,6 +729,12 @@ func identityBindDeliverPendingCodes(d *Dice) {
 		// 群绑定彻底无路可走，属于设计错误。
 		emailUsable := identityBindEmailCodeUsable(d) && identityBindMailTargetQQ(c) != ""
 
+		var (
+			delivered bool
+			sentTo    string
+			sentByEP  string
+		)
+
 		tryEmail := func() bool {
 			if !emailUsable {
 				return false
@@ -549,13 +743,8 @@ func identityBindDeliverPendingCodes(d *Dice) {
 				c.Reason = "邮箱投递失败: " + err.Error()
 				return false
 			}
-			c.Status = identityBindCodeDelivered
 			c.Channel = identityBindCodeChannelEmail
-			c.SentByEP = ""
-			c.DeliveredAt = time.Now().Unix()
-			c.Reason = ""
-			// 投递成功了就不需要骰主人工插手了
-			c.NeedMaster = false
+			sentTo = c.SentTo
 			d.Logger.Infof("身份绑定验证码已邮件投递: 目标=%s 收件=%s 发起者=%s",
 				c.Old.UserID, c.SentTo, c.New.UserID)
 			return true
@@ -580,14 +769,9 @@ func identityBindDeliverPendingCodes(d *Dice) {
 				}
 				return false
 			}
-			c.Status = identityBindCodeDelivered
 			c.Channel = identityBindCodeChannelDM
-			c.SentByEP = ep.ID
-			c.SentTo = c.DeliverTo
-			c.DeliveredAt = time.Now().Unix()
-			c.Reason = ""
-			// 投递成功了就不需要骰主人工插手了
-			c.NeedMaster = false
+			sentByEP = ep.ID
+			sentTo = c.DeliverTo
 			d.Logger.Infof("身份绑定验证码已私聊投递: 目标=%s 发起者=%s 端点=%s",
 				c.Old.UserID, c.New.UserID, ep.ID)
 			return true
@@ -595,47 +779,103 @@ func identityBindDeliverPendingCodes(d *Dice) {
 
 		// 按优先级依次尝试两条通道；先成功的算数。
 		// 默认私聊优先，骰主把 IdentityBindPreferEmailCode 打开后邮箱优先。
-		var delivered bool
 		if identityBindPreferEmailCode(d) && emailUsable {
 			// 邮箱优先：邮箱失败仍然退回私聊，不让邮件问题阻断绑定
 			delivered = tryEmail() || tryDM()
 		} else {
 			delivered = tryDM() || tryEmail()
 		}
+
+		reason := c.Reason
 		if delivered {
+			// 真正发出去了才记限频额度：防的是"拿骰子当发信机"，
+			// 而不是"用户想重试"。
+			identityBindMarkTargetAttempt(identityBindChallengeTargetKey(c), time.Now().Unix())
+			identityBindFinishDelivery(item.key, identityBindCodeDelivered, c.Channel, sentTo, sentByEP, "", false, nil)
 			continue
 		}
 
 		// 两条通道都不可用：把原因说清楚，别反复刷屏。
 		// 只在还没有原因时才写通用文案——tryEmail / tryDM 已经写进具体错误
 		// （比如 "SMTP 发送失败: dial tcp ..."），覆盖掉它只会让骰主无从排查。
-		if c.Reason == "" {
+		if reason == "" {
 			switch {
 			case c.Action == identityBindActionGroup:
-				c.Reason = "没有可用的民间 bot（OneBot）连接，群绑定无法投递验证码"
+				reason = "没有可用的民间 bot（OneBot）连接，群绑定无法投递验证码"
 			case emailUsable:
-				c.Reason = "验证码投递失败，请稍后重试（私聊与邮箱都试过了）"
+				reason = "验证码投递失败，请稍后重试（私聊与邮箱都试过了）"
 			default:
-				c.Reason = "没有可用的民间 bot（OneBot）连接，邮箱也没配好；" +
+				reason = "没有可用的民间 bot（OneBot）连接，邮箱也没配好；" +
 					"请在管理界面配置「邮箱通知」（发件邮箱 / 密钥 / SMTP）作为备用通道"
 			}
 		}
 
 		// 转人工：两条通道都不通时，私聊把这件事告诉骰主，让他来确认。
 		// 只通知一次——worker 每 3 秒跑一遍，不做标记会把骰主私聊刷爆。
+		// 这里先落 NeedMaster 再通知（锁内），保证并发的另一次投递不会重复通知。
+		c.Reason = reason
 		c.NeedMaster = true
-		if c.MasterNotifiedAt == 0 {
-			c.MasterNotifiedAt = time.Now().Unix()
-			c.MasterNotifiedTo = identityBindNotifyMasters(d, c)
-			if len(c.MasterNotifiedTo) > 0 {
+		c.Channel = identityBindCodeChannelNone
+		identityBindFinishDelivery(item.key, identityBindCodePending, identityBindCodeChannelNone, "", "", reason, true, nil)
+
+		if identityBindClaimMasterNotify(item.key) {
+			notified := identityBindNotifyMasters(d, c)
+			identityBindCodeUpdate(item.key, func(live *identityBindCodeChallenge) {
+				live.MasterNotifiedAt = time.Now().Unix()
+				live.MasterNotifiedTo = notified
+			})
+			if len(notified) > 0 {
 				d.Logger.Infof("身份绑定已转人工确认并通知骰主: 目标=%s 骰主=%s",
-					identityBindChallengeTargetText(c), strings.Join(c.MasterNotifiedTo, ","))
+					identityBindChallengeTargetText(c), strings.Join(notified, ","))
 			} else {
 				d.Logger.Warnf("身份绑定投递失败且无法通知到任何骰主: 目标=%s 原因=%s",
-					identityBindChallengeTargetText(c), c.Reason)
+					identityBindChallengeTargetText(c), reason)
 			}
 		}
 	}
+}
+
+// identityBindFinishDelivery 把投递结果写回全局那条挑战，并解除"投递中"标记。
+func identityBindFinishDelivery(
+	key string, status identityBindCodeStatus, channel identityBindCodeChannel,
+	sentTo, sentByEP, reason string, needMaster bool, notifiedTo []string,
+) {
+	identityBindCodeUpdate(key, func(c *identityBindCodeChallenge) {
+		c.Delivering = false
+		c.Channel = channel
+		c.Status = status
+		if sentTo != "" {
+			c.SentTo = sentTo
+		}
+		c.SentByEP = sentByEP
+		c.Reason = reason
+		if status == identityBindCodeDelivered {
+			c.DeliveredAt = time.Now().Unix()
+			c.NeedMaster = false
+		}
+		if needMaster {
+			c.NeedMaster = true
+		}
+		if notifiedTo != nil {
+			c.MasterNotifiedTo = notifiedTo
+		}
+	})
+}
+
+// identityBindClaimMasterNotify 抢占"通知骰主"这件事，true 表示这次由我来通知。
+//
+// 之前是 `if c.MasterNotifiedAt == 0 { c.MasterNotifiedAt = now; ... }`：
+// 判断与赋值不在一个临界区里，两个 goroutine 可能同时通过判断，把骰主私聊刷两遍。
+func identityBindClaimMasterNotify(key string) bool {
+	claimed := false
+	identityBindCodeUpdate(key, func(c *identityBindCodeChallenge) {
+		if c.MasterNotifiedAt != 0 {
+			return
+		}
+		c.MasterNotifiedAt = time.Now().Unix()
+		claimed = true
+	})
+	return claimed
 }
 
 // identityBindChallengeTargetText 用一句话描述"这条挑战在绑定什么"，用于日志。
@@ -754,6 +994,33 @@ func identityBindBareNumber(id string) string {
 	return id
 }
 
+// identityBindMaskNumber 把号码或邮箱地址打码，只留头尾便于本人确认。
+//
+// 用在**群聊回复**里：群绑定的收件人是旧群邀请人，他的 QQ 号 / 邮箱
+// 不该被官方群里所有人看到（第三方信息泄露）。
+//
+//	2431692084        -> 243****084
+//	2431692084@qq.com -> 243****084@qq.com
+func identityBindMaskNumber(value string) string {
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return ""
+	}
+	// 邮箱只打码 @ 前面的本地部分
+	at := strings.LastIndex(s, "@")
+	if at > 0 {
+		return identityBindMaskNumber(s[:at]) + s[at:]
+	}
+	runes := []rune(s)
+	if len(runes) <= 4 {
+		return strings.Repeat("*", len(runes))
+	}
+	if len(runes) <= 7 {
+		return string(runes[:2]) + strings.Repeat("*", len(runes)-2)
+	}
+	return string(runes[:3]) + "****" + string(runes[len(runes)-3:])
+}
+
 // ---------- 待确认申请（骰主视角） ----------
 
 // identityBindPendingChallenges 列出还等着处理的申请，按登记时间从早到晚。
@@ -762,6 +1029,8 @@ func identityBindBareNumber(id string) string {
 // 为 false 时把"已投递但对方还没回复"的也算上，方便骰主排查到底卡在哪一步。
 func identityBindPendingChallenges(onlyNeedMaster bool) []*identityBindCodeChallenge {
 	var list []*identityBindCodeChallenge
+	identityBindCodesMu.Lock()
+	defer identityBindCodesMu.Unlock()
 	globalIdentityBindCodes.Range(func(_ string, c *identityBindCodeChallenge) bool {
 		if c == nil || c.Status == identityBindCodeUsed {
 			return true
@@ -774,7 +1043,8 @@ func identityBindPendingChallenges(onlyNeedMaster bool) []*identityBindCodeChall
 			// 已投递但过期的就不列了；转人工的不受有效期约束
 			return true
 		}
-		list = append(list, c)
+		// 返回副本：骰主指令接下来会读这些字段，不能和 worker 共用一个对象
+		list = append(list, identityBindCodeCopy(c))
 		return true
 	})
 	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt < list[j].CreatedAt })
@@ -823,10 +1093,15 @@ func identityBindCommitChallenge(d *Dice, c *identityBindCodeChallenge) error {
 	if err := identityBindStoreOf(d).put(d, record); err != nil {
 		return err
 	}
-	c.Status = identityBindCodeUsed
-	c.NeedMaster = false
-	c.FinishedAt = time.Now().Unix()
-	c.Reason = "骰主手动确认"
+	// 状态改动走锁：这条挑战可能正被 worker 或消息分发处理
+	key := identityBindCodeKey(c.Action, identityBindChallengeOwnerID(c.Action, c.New))
+	identityBindCodeUpdate(key, func(live *identityBindCodeChallenge) {
+		live.Status = identityBindCodeUsed
+		live.NeedMaster = false
+		live.Delivering = false
+		live.FinishedAt = time.Now().Unix()
+		live.Reason = "骰主手动确认"
+	})
 	return nil
 }
 
@@ -900,12 +1175,17 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	onOfficial := identityBindSupported(ctx.EndPoint)
 	isPrivate := ctx.IsPrivate || msg.MessageType == "private"
 
-	// 扫描所有已投递、未过期的挑战，找验证码匹配、且**通道与当前端点相符**的那一条
+	// 扫描所有已投递、未过期的挑战，找验证码匹配、且**通道与当前端点相符**的那一条。
+	//
+	// 整段都在锁里：这是与后台投递 worker 唯一的交汇点。锁里只读不写 I/O，
+	// 提示与通知都等到解锁之后再发。
 	var matched *identityBindCodeChallenge
 	var matchedKey string
 	// 码猜错时也要计次（见下面 identityBindIsExpectedConfirmer）：
 	// 邮箱通道曾经完全没有失败上限，4 位码 + 1 小时有效期时是可以被硬猜穿的。
 	var wrongGuessKeys []string
+	var expiredByAttempts *identityBindCodeChallenge
+	identityBindCodesMu.Lock()
 	globalIdentityBindCodes.Range(func(key string, c *identityBindCodeChallenge) bool {
 		if c == nil || c.Status != identityBindCodeDelivered || c.expired() {
 			return true
@@ -935,14 +1215,20 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 		}
 		return true
 	})
-	if matched == nil {
-		// 猜错了：只对"本来就该由这个人确认"的挑战计次。
-		// 为什么不给所有人计次——群里随便一个人连发五个数字就能把别人的验证码作废，
-		// 那是白送的骚扰手段。
-		for _, key := range wrongGuessKeys {
-			c, ok := globalIdentityBindCodes.Load(key)
-			if !ok || c == nil || c.Status != identityBindCodeDelivered {
-				continue
+	if matched != nil {
+		matched = identityBindCodeCopy(matched)
+	}
+	identityBindCodesMu.Unlock()
+
+	// 猜错了：只对"本来就该由这个人确认"的挑战计次。
+	// 为什么不给所有人计次——群里随便一个人连发五个数字就能把别人的验证码作废，
+	// 那是白送的骚扰手段。
+	//
+	// 注意：这一段必须在**解锁之后**做，identityBindCodeUpdate 自己会加锁。
+	for _, key := range wrongGuessKeys {
+		identityBindCodeUpdate(key, func(c *identityBindCodeChallenge) {
+			if c.Status != identityBindCodeDelivered {
+				return
 			}
 			c.Attempts++
 			c.Reason = fmt.Sprintf("验证码错误 %d/%d 次", c.Attempts, identityBindCodeMaxAttempts)
@@ -950,12 +1236,18 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 				c.Status = identityBindCodeUsed
 				c.FinishedAt = time.Now().Unix()
 				c.Reason = "验证码错误次数过多，已作废"
-				d.Logger.Warnf("身份绑定验证码错误次数过多已作废: 目标=%s 发起者=%s",
-					identityBindChallengeTargetText(c), c.New.UserID)
-				identityBindReplyPerson(ctx, msg.Sender.UserID,
-					"验证码错误次数过多，这条申请已作废。请重新发起绑定。")
+				expiredByAttempts = identityBindCodeCopy(c)
 			}
-		}
+		})
+	}
+
+	if expiredByAttempts != nil {
+		d.Logger.Warnf("身份绑定验证码错误次数过多已作废: 目标=%s 发起者=%s",
+			identityBindChallengeTargetText(expiredByAttempts), expiredByAttempts.New.UserID)
+		identityBindReplyPerson(ctx, msg.Sender.UserID,
+			"验证码错误次数过多，这条申请已作废。请重新发起绑定。")
+	}
+	if matched == nil {
 		// 不是验证码回复，交回给正常指令流程。
 		// 不做任何提示：随手发个数字不该被骰子插嘴。
 		return false
@@ -979,17 +1271,19 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 		wantConfirmer = ""
 	}
 	if wantConfirmer != "" && !identityBindSameIdentity(msg.Sender.UserID, wantConfirmer) {
-		// 有人在用错误的号试别人的验证码 —— 记一次失败
-		matched.Attempts++
+		// 有人在用错误的号试别人的验证码 —— 记一次失败（状态改动走锁）
+		identityBindCodeUpdate(matchedKey, func(c *identityBindCodeChallenge) {
+			c.Attempts++
+			if c.Attempts >= identityBindCodeMaxAttempts {
+				c.Status = identityBindCodeUsed
+				c.FinishedAt = time.Now().Unix()
+				c.Reason = "尝试次数过多"
+			}
+		})
 		d.Logger.Warnf("身份绑定验证码发信人不符: 期望=%s 实际=%s 目标=%s",
 			wantConfirmer, msg.Sender.UserID, matched.Old.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID,
 			"这个验证码不是发给你的，请让本人用他自己的号回复。")
-		if matched.Attempts >= identityBindCodeMaxAttempts {
-			matched.Status = identityBindCodeUsed
-			matched.FinishedAt = time.Now().Unix()
-			matched.Reason = "尝试次数过多"
-		}
 		return true
 	}
 
@@ -1011,41 +1305,36 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 		newID = matched.New.GroupID
 	}
 	if existing, ok := identityBindStoreOf(d).find(d, oldID); ok {
-		matched.Status = identityBindCodeUsed
-		matched.FinishedAt = time.Now().Unix()
-		matched.Reason = "确认时该旧身份已被绑定"
-		globalIdentityBindCodes.Store(matchedKey, matched)
+		identityBindFinishChallenge(matchedKey, "确认时该旧身份已被绑定")
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"绑定失败：%s 已经被绑定到 %s 了，请先解除那边的绑定。",
 			oldID, identityBindRecordEndpointID(existing)))
 		return true
 	}
 	if existing, ok := identityBindStoreOf(d).find(d, newID); ok {
-		matched.Status = identityBindCodeUsed
-		matched.FinishedAt = time.Now().Unix()
-		matched.Reason = "确认时发起者已有绑定"
-		globalIdentityBindCodes.Store(matchedKey, matched)
+		identityBindFinishChallenge(matchedKey, "确认时发起者已有绑定")
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"绑定失败：当前身份已经绑定了 %s，请先发送 `.unbind`。",
 			identityBindRecordOldID(existing)))
 		return true
 	}
 	if err := identityBindStoreOf(d).put(d, record); err != nil {
-		matched.Attempts++
+		identityBindCodeUpdate(matchedKey, func(c *identityBindCodeChallenge) { c.Attempts++ })
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf("绑定保存失败: %v", err))
 		return true
 	}
 
-	matched.Status = identityBindCodeUsed
-	matched.FinishedAt = time.Now().Unix()
-	matched.Reason = "验证码确认成功"
-	// 审计：邮箱通道允许代确认，所以记下到底是谁回的这个码
-	matched.ConfirmedBy = msg.Sender.UserID
+	identityBindCodeUpdate(matchedKey, func(c *identityBindCodeChallenge) {
+		c.Status = identityBindCodeUsed
+		c.FinishedAt = time.Now().Unix()
+		c.Reason = "验证码确认成功"
+		// 审计：邮箱通道允许代确认，所以记下到底是谁回的这个码
+		c.ConfirmedBy = msg.Sender.UserID
+	})
 	if matched.Channel == identityBindCodeChannelEmail && !identityBindSameIdentity(msg.Sender.UserID, matched.New.UserID) {
 		d.Logger.Infof("身份绑定验证码由非发起者回复: 确认人=%s 发起者=%s 目标=%s",
 			msg.Sender.UserID, matched.New.UserID, identityBindChallengeTargetText(matched))
 	}
-	globalIdentityBindCodes.Store(matchedKey, matched)
 
 	// 群绑定完成后，真实群（官方群）上残留的日志状态就失效了，清掉它，
 	// 否则解绑或回退到官方主线时会"复活"成一份同名空日志（详见函数注释）。
@@ -1078,6 +1367,16 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 
 	d.LastUpdatedTime = time.Now().Unix()
 	return true
+}
+
+// identityBindFinishChallenge 把一条挑战标记为已完结（状态改动走锁）。
+func identityBindFinishChallenge(key, reason string) {
+	identityBindCodeUpdate(key, func(c *identityBindCodeChallenge) {
+		c.Status = identityBindCodeUsed
+		c.FinishedAt = time.Now().Unix()
+		c.Reason = reason
+		c.Delivering = false
+	})
 }
 
 // identityBindNotifyNewSide 通过官方 bot 把结果告诉发起绑定的人。
