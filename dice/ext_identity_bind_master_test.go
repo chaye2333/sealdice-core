@@ -313,6 +313,8 @@ func TestIdentityBindGroupApproveWithoutGroupContext(t *testing.T) {
 func TestIdentityBindNotifyNewSideSurvivesMissingGroupContext(t *testing.T) {
 	env := newCodeTestEnv(t)
 	defer env.cleanup()
+	// 通知只发给"已连接"的官方端点（掉线时 pa.Api 为 nil，发出去会 panic）
+	env.ctx.EndPoint.State = StateConnected
 
 	const ghostGroup = "OpenQQ-Group:100-ghost"
 	challenge := &identityBindCodeChallenge{

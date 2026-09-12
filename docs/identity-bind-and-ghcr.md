@@ -66,7 +66,6 @@
 
 ```yaml
 identityBindEnable: true
-identityBindQuestionCount: 1
 identityBindCooldownSec: 60
 ```
 
@@ -256,13 +255,14 @@ docker restart sealdice-core
 >
 > 也可以简写成 `.group 789`，不带 `bind` 一样识别。
 
-卡住了同样用 `.group cancel` 取消。**答错会锁定 12 小时**（可用
-`identityBindFailCooldownSec` 调整）。
+卡住了同样用 `.group cancel` 取消（群维度需要管理权限）。**验证码猜错有次数上限**
+（默认 5 次，超过即作废，重新发起即可）。
 
 成功之后：
 
 * `.log list` / `.log get` / `.log stat` / `.log export` 都会去读**旧群**的日志；
-* `.log new` / `.log on` / `.log end` 这些**写入**操作仍然记在当前新群，不会污染旧数据。
+* `.log new` / `.log on` / `.log end` 这些**写入**操作也写进归一后的旧群
+  —— 这正是"两边共用同一份日志"的意思，不是各记一份再合并。
 
 | 指令 | 作用 |
 |---|---|
@@ -297,12 +297,13 @@ docker restart sealdice-core
 
 ### 4.3 安全设计（为什么不怕被冒领）
 
-* 题目答案来自**旧数据**，只有真正拥有过那个 QQ 号 / 那个群的人才知道；
-* 答错会立刻作废本次问答，并**锁定 12 小时**（`identityBindFailCooldownSec`），防止穷举猜测；
+* 验证码只送到"只有那个旧号 / 旧群邀请人才能拿到"的地方（QQ 邮箱或民间 bot 私聊），
+  且**猜错次数有上限**（默认 5 次即作废），防止穷举；
 * 绑定成功后骰娘会通过 `ctx.Notice` 给你发**通知**（和 `.send` 用的是同一套通知通道），
   你会在第一时间知道谁绑了谁；
-* 绑定关系**只影响读取**，权限判定（master / 群管）始终用真实的新身份，不会因为绑定而提权。
-* 群绑定需要管理权限，普通成员无法改群级数据指向。
+* 绑定关系**只影响读取**，权限判定（master / 群管）始终用真实的新身份，不会因为绑定而提权；
+* 群绑定（含 `.group unbind` / `.group cancel`）都需要管理权限，普通成员改不了群级数据指向；
+* 两条通道都不通时，申请会转人工并私聊通知骰主，由骰主核实身份后确认。
 
 ---
 
@@ -474,12 +475,14 @@ docker build -t sealdice-core:local \
 
 | 界面上的名字 | 配置键 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| 官方QQ 请求超时（秒） | `officialQQRequestTimeoutSec` | 60 | 5~600，重启后生效 |
+| 官方QQ 请求超时（秒） | `officialQQRequestTimeoutSec` | 60 | 5~600 |
 | 本地文件使用分片上传 | `officialQQChunkedUploadEnable` | 关 | 开启后本地文件保留文件名 |
 | 启用身份绑定 | `identityBindEnable` | 关 | 总开关，关掉后 `.bind` 不可用 |
-| 身份绑定题目数量 | `identityBindQuestionCount` | 1 | 1~5 |
 | 身份绑定发起间隔（秒） | `identityBindCooldownSec` | 60 | 0~86400 |
-| 身份绑定答错锁定（秒） | `identityBindFailCooldownSec` | 43200 | 1~86400，答错后锁定 |
+| 验证码位数 | `identityBindCodeLength` | 6 | 4~8 |
+| 验证码有效期（秒） | `identityBindCodeExpireSec` | 600 | 60~3600 |
+| 优先用邮箱发验证码 | `identityBindPreferEmailCode` | 关 | 两条通道都可用时谁优先，默认私聊优先 |
+| 日志去重窗口（秒） | `logMultiBotDedupWindowSec` | 5 | **建议保持 5**，调大目前并不能跨 bot 去重，反而会合并重复正文（见 3.2 说明） |
 
 改动只涉及两个文件：
 
@@ -607,8 +610,10 @@ pnpm 10 以后默认不执行依赖的安装脚本，而 `esbuild` 是原生模�
 让骰子去旧群收到一条消息即可恢复。
 
 **Q：同时开了官方 bot 和民间 bot，日志记了两遍？**
-见「七点八」。把 `logMultiBotDedupWindowSec` 调到 `30` 可跨连接去重，
-但要接受"同一人窗口内发的两条相同消息会并成一条"这个代价。
+见「七点八」情况 A。目前的 `logMultiBotDedupWindowSec` **不能**跨 bot 去重
+（判定键用的是各连接上报的真实 ID，两边算出来的键不同），
+调大它只会把"同一人窗口内两条相同正文"并成一条。真要处理双 bot 重复，
+请等这个键改成按归一身份判重，或者干脆别把两个 bot 挂在同一个群里。
 
 **Q：绑定关系存在哪？**
 `data/default/identity-bindings.json`，纯文本，可以直接看、可以备份。
@@ -903,17 +908,20 @@ officialQQChunkedUploadEnable: true
 重复的根因：去重键用的是 `msg.RawID`，而**两个 bot 收到同一条消息时 RawID 是各自的**，
 根本对不上。原来 5 秒的窗口只能挡住「同一个连接的重复推送」。
 
-需要这个场景时，把窗口调大：
+需要这个场景时**目前没有可用的开关**（原以为调大窗口就行，第二轮排查证明不行）：
 
 ```yaml
-logMultiBotDedupWindowSec: 30
+# 目前的 logMultiBotDedupWindowSec 做不到跨 bot 去重，别指望它
+logMultiBotDedupWindowSec: 5
 ```
 
-调大（> 5）之后才会切换成按「群 + 人 + 正文」**跨连接去重**。
+原因：判定键用的是各连接上报的**真实**ID（官方侧 `OpenQQ-Group:…`/`OpenQQ:…`，
+民间侧 `QQ-Group:…`/`QQ:…`），同一条消息经两条连接各收一次时两边算出的键不同，
+永远匹配不上；而调大窗口反而会把"同一人在窗口内两条相同正文"并成一条。
+真要做跨 bot 去重，得先把这个键改成按归一后的身份判重。
 
-> ⚠️ 代价：同一个人在窗口内发的两条**内容完全相同**的消息会被并成一条
-> （例如连打两个「1」）。日志是永久记录，所以这个模式**默认不开**，
-> 必须由使用者主动开启。一般人不会同时开两个 bot，保持默认即可。
+> ⚠️ 也就是说：**双 bot 挂在同一个群里时，目前无法去重**，日志会记两份。
+> 一般用法（官方 bot 在官方群、民间 bot 在旧群）不受影响。见下面情况 B。
 
 ### 情况 B：同一个海豹实例，官方 bot 在官方群、民间 bot 在旧群（**主流用法**）
 

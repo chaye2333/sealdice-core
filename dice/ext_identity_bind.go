@@ -881,7 +881,9 @@ func identityBindCancelSession(ctx *MsgContext, msg *Message, clearAll bool) Cmd
 	}{
 		{identityBindActionUser, ctx.Player.UserID},
 	}
-	if clearAll && ctx.Group != nil {
+	// 群维度同样要管理权限：否则群里任何人一句 .group cancel
+	// 就能把管理员正在进行的群绑定验证码清掉（个人维度不用管，那是自己的）。
+	if clearAll && ctx.Group != nil && ctx.PrivilegeLevel >= 50 {
 		targets = append(targets, struct {
 			action identityBindAction
 			id     string
@@ -1264,6 +1266,14 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 
 	if !identityBindSupported(ctx.EndPoint) {
 		ReplyToSender(ctx, msg, "身份绑定仅用于 QQ 官方机器人，当前连接方式无需解绑。")
+		return solved
+	}
+
+	// 群维度是**整个群**的绑定，必须和 .group bind 一样要求管理权限。
+	// 之前这里漏了这道门：群里任何一个普通成员敲一句 .group unbind
+	// 就能把大家共用的群绑定删掉（个人维度无所谓，本来就是自己的东西）。
+	if action == identityBindActionGroup && ctx.PrivilegeLevel < 50 {
+		ReplyToSender(ctx, msg, "解除群绑定需要管理权限（群主或管理员）。")
 		return solved
 	}
 

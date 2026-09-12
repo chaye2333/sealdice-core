@@ -19,6 +19,11 @@ func newOfficialQQBarTestCtx(t *testing.T, sheetType string, values map[string]*
 	d, ep, _, cleanup := newExecuteNewTestDice(t)
 	ep.Platform = "QQ"
 	ep.ProtocolType = "official"
+	// 状态栏是一段 Markdown 数学公式，只有按 markdown 发送时客户端才会渲染；
+	// 适配器关掉 markdown 时走纯文本通道，那时状态栏必须自动隐藏
+	// （否则玩家看到的是 `$\scriptsize\textcolor{...}$` 字面量）。
+	// 这里显式打开，模拟"确实要用状态栏"的部署；隐藏行为另有用例覆盖。
+	d.Config.OfficialQQUseMarkdown = true
 
 	// 属性查询需要 attrs 表存在，否则骰点引擎内部的断言会 panic。
 	if operator, ok := d.DBOperator.(*mockDatabaseOperator); ok {
@@ -324,6 +329,8 @@ func newOfficialQQRollEnv(t *testing.T, groupID, userID, template string, attrs 
 	d, ep, _, cleanup := newExecuteNewTestDice(t)
 	ep.Platform = "QQ"
 	ep.ProtocolType = "official"
+	// 同 newOfficialQQBarTestCtx：状态栏要求按 markdown 发送
+	d.Config.OfficialQQUseMarkdown = true
 
 	if operator, ok := d.DBOperator.(*mockDatabaseOperator); ok {
 		if err := operator.GetDataDB(constant.WRITE).AutoMigrate(&model.AttributesItemModel{}); err != nil {

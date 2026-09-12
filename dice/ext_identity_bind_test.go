@@ -826,10 +826,11 @@ func TestIdentityBindLogOffTogglesSharedState(t *testing.T) {
 
 // TestDefaultConfigValuesLandOnTheRightFields 锁定 DefaultConfig 的默认值。
 //
-// DefaultConfig 是**位置字面量**（没写字段名），所以字段顺序和字面量顺序必须严格对应。
-// 一旦有人往 BaseConfig 中间插字段、或调整了字面量顺序，而错位后的类型恰好相同，
-// Go 不会报错，只会把默认值静默赋给错误的字段——这类 bug 极难发现。
-// 这个测试把 fork 新增字段和几个相邻的上游字段一起钉住，顺序一动就会红。
+// 注意：DefaultConfig 里**各配置段是带字段名的 keyed 字面量**，所以往中间插字段
+// 并不会让默认值错位；真正没写字段名的只有最外层 Config{nil, ConfigVersion, …}，
+// 而它一旦增删会因各段类型不同直接编译报错。这个测试的价值在于：
+// 它是"默认值本身"的回归网 —— 有人改默认值、或把某个字段从一段挪到另一段时，
+// 这里会红，不需要去读那一大坨字面量。
 //
 //nolint:staticcheck // QF1008：这里刻意写全嵌入字段名，就是为了直接验证「哪一段」有没有串位
 func TestDefaultConfigValuesLandOnTheRightFields(t *testing.T) {
@@ -853,7 +854,7 @@ func TestDefaultConfigValuesLandOnTheRightFields(t *testing.T) {
 			c.LogMultiBotDedupWindowSec, logDedupDefaultWindowSec)
 	}
 
-	// 字面量里紧邻 fork 字段的上游字段，用来确认没有整体错位
+	// 顺手钉住几个上游字段，防止有人把某个字段从一段挪到另一段
 	if !c.PlayerNameWrapEnable {
 		t.Fatal("PlayerNameWrapEnable = false, want true (literal likely shifted)")
 	}
@@ -872,7 +873,7 @@ func TestDefaultConfigValuesLandOnTheRightFields(t *testing.T) {
 	if c.OfficialQQMigrationEnable {
 		t.Fatal("OfficialQQMigrationEnable should default to false")
 	}
-	// 位置字面量最容易被忽略的相邻嵌入：确认后面几个 config 段没有整体串位
+	// 再确认后面几个 config 段没被挪动
 	if c.RateLimitConfig.PersonalReplenishRateStr != "@every 3s" {
 		t.Fatalf("RateLimitConfig shifted: %q", c.RateLimitConfig.PersonalReplenishRateStr)
 	}

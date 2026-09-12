@@ -54,6 +54,22 @@ func isOfficialQQEndpoint(ep *EndPointInfo) bool {
 	return ep.Platform == "QQ" && ep.ProtocolType == "official"
 }
 
+// officialQQStatusBarAllowed 状态栏是否真的能显示。
+//
+// 状态栏是一段 QQ Markdown 数学公式（`$\scriptsize\textcolor{...}$`），
+// 只有适配器**按 markdown 发送**时客户端才会渲染它。
+// 关掉「使用 Markdown」时适配器走的是纯文本 Content 通道
+// （见 platform_adapter_official_qq.go 的 finalizeMessageToCreate），
+// 这时把公式塞进去只会让玩家看到一长串 `$\scriptsize\textcolor{#E5484D}{\text{...}}$`。
+// 所以这里必须跟 markdown 开关联动 —— 否则默认配置（markdown 关闭）下，
+// 任何设过 .sn 的玩家都会在每条掷骰回复顶部看到这段乱码。
+func officialQQStatusBarAllowed(ctx *MsgContext) bool {
+	if ctx == nil || ctx.Dice == nil || !isOfficialQQEndpoint(ctx.EndPoint) {
+		return false
+	}
+	return ctx.Dice.Config.OfficialQQUseMarkdown
+}
+
 // officialQQEscapeMathText 转义要放进 QQ Markdown 数学片段里的文本。
 func officialQQEscapeMathText(text string) string {
 	return officialQQMathEscapeReplacer.Replace(text)
@@ -124,7 +140,7 @@ func officialQQCharacterStatusBar(ctx *MsgContext) string {
 	if ctx == nil || ctx.Player == nil {
 		return ""
 	}
-	if !isOfficialQQEndpoint(ctx.EndPoint) {
+	if !officialQQStatusBarAllowed(ctx) {
 		return ""
 	}
 	// 做过身份绑定时，角色名也取绑定另一侧（旧QQ号）的，这样状态栏和角色卡数据一致。

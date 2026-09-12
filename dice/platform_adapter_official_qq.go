@@ -396,6 +396,26 @@ func (pa *PlatformAdapterOfficialQQ) failConnect() int {
 	return 1
 }
 
+// warnNotConnected 记录"连接不可用，消息没发出去"。
+//
+// 存在的意义：连接失败后 pa.Api 为 nil，但端点的 Enable 还是 true，
+// 于是任何"照常发消息"的调用都会踩到 nil 接口 panic。
+// 与其逐个调用点补 val == nil，不如在发送入口统一挡住并留下日志。
+func (pa *PlatformAdapterOfficialQQ) warnNotConnected(action, target string) {
+	if pa == nil {
+		return
+	}
+	if pa.EndPoint == nil || pa.EndPoint.Session == nil || pa.EndPoint.Session.Parent == nil {
+		return
+	}
+	parent := pa.EndPoint.Session.Parent
+	if parent.Logger == nil {
+		return
+	}
+	parent.Logger.Warnf(
+		"QQ官方连接未就绪，消息未发出: %s 目标=%s（连接已断开，重连成功后需重发）", action, target)
+}
+
 func (pa *PlatformAdapterOfficialQQ) Serve() int {
 	ep := pa.EndPoint
 	log := pa.EndPoint.Session.Parent.Logger
@@ -1616,6 +1636,11 @@ func (pa *PlatformAdapterOfficialQQ) SendSegmentToPerson(ctx *MsgContext, userID
 }
 
 func (pa *PlatformAdapterOfficialQQ) SendToPerson(ctx *MsgContext, uid string, text string, flag string) {
+	// 同 SendToGroup：pa.Api 可能为 nil（连接失败后 Enable 仍是 true）
+	if pa.Api == nil {
+		pa.warnNotConnected("SendToPerson", uid)
+		return
+	}
 	userID, idType := pa.mustExtractID(uid)
 
 	maxLen := 900
@@ -2270,6 +2295,14 @@ func (pa *PlatformAdapterOfficialQQ) waitGroupActiveQuota(ctx context.Context, g
 }
 
 func (pa *PlatformAdapterOfficialQQ) SendToGroup(ctx *MsgContext, uid string, text string, flag string) {
+	// 连接失败时 failConnect() 会把 pa.Api 置 nil，但**不清 Enable**，
+	// 所以"配置里还挂着、其实已经掉线"的端点依然会被调用。
+	// 这里必须挡住：nil 接口调方法会 panic，而 panic 又会顺着调用栈
+	// 把官方 SDK 的事件 goroutine / 整条 websocket 带走。
+	if pa.Api == nil {
+		pa.warnNotConnected("SendToGroup", uid)
+		return
+	}
 	groupId, idType := pa.mustExtractID(uid)
 
 	maxLen := 900

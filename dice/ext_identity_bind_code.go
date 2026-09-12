@@ -890,6 +890,9 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	// 扫描所有已投递、未过期的挑战，找验证码匹配、且**通道与当前端点相符**的那一条
 	var matched *identityBindCodeChallenge
 	var matchedKey string
+	// 码猜错时也要计次（见下面 identityBindIsExpectedConfirmer）：
+	// 邮箱通道曾经完全没有失败上限，4 位码 + 1 小时有效期时是可以被硬猜穿的。
+	var wrongGuessKeys []string
 	globalIdentityBindCodes.Range(func(key string, c *identityBindCodeChallenge) bool {
 		if c == nil || c.Status != identityBindCodeDelivered || c.expired() {
 			return true
@@ -914,9 +917,32 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 			matchedKey = key
 			return false
 		}
+		if identityBindIsExpectedConfirmer(c, msg.Sender.UserID, onOfficial, isPrivate) {
+			wrongGuessKeys = append(wrongGuessKeys, key)
+		}
 		return true
 	})
 	if matched == nil {
+		// 猜错了：只对"本来就该由这个人确认"的挑战计次。
+		// 为什么不给所有人计次——群里随便一个人连发五个数字就能把别人的验证码作废，
+		// 那是白送的骚扰手段。
+		for _, key := range wrongGuessKeys {
+			c, ok := globalIdentityBindCodes.Load(key)
+			if !ok || c == nil || c.Status != identityBindCodeDelivered {
+				continue
+			}
+			c.Attempts++
+			c.Reason = fmt.Sprintf("验证码错误 %d/%d 次", c.Attempts, identityBindCodeMaxAttempts)
+			if c.Attempts >= identityBindCodeMaxAttempts {
+				c.Status = identityBindCodeUsed
+				c.FinishedAt = time.Now().Unix()
+				c.Reason = "验证码错误次数过多，已作废"
+				d.Logger.Warnf("身份绑定验证码错误次数过多已作废: 目标=%s 发起者=%s",
+					identityBindChallengeTargetText(c), c.New.UserID)
+				identityBindReplyPerson(ctx, msg.Sender.UserID,
+					"验证码错误次数过多，这条申请已作废。请重新发起绑定。")
+			}
+		}
 		// 不是验证码回复，交回给正常指令流程。
 		// 不做任何提示：随手发个数字不该被骰子插嘴。
 		return false
@@ -961,6 +987,35 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 		Old:     matched.Old,
 		Created: time.Now().Unix(),
 		Creator: matched.New.UserID,
+	}
+	// 落库前再查一次唯一性：从"发起挑战"到"确认"之间可能隔了很久，
+	// 期间同一个旧号/旧群可能已经被别的挑战绑走了。两个挑战都提交会破坏
+	// "一个旧身份只属于一个人"这条不变量。
+	oldID := matched.Old.UserID
+	newID := matched.New.UserID
+	if matched.Action == identityBindActionGroup {
+		oldID = matched.Old.GroupID
+		newID = matched.New.GroupID
+	}
+	if existing, ok := identityBindStoreOf(d).find(d, oldID); ok {
+		matched.Status = identityBindCodeUsed
+		matched.FinishedAt = time.Now().Unix()
+		matched.Reason = "确认时该旧身份已被绑定"
+		globalIdentityBindCodes.Store(matchedKey, matched)
+		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
+			"绑定失败：%s 已经被绑定到 %s 了，请先解除那边的绑定。",
+			oldID, identityBindRecordEndpointID(existing)))
+		return true
+	}
+	if existing, ok := identityBindStoreOf(d).find(d, newID); ok {
+		matched.Status = identityBindCodeUsed
+		matched.FinishedAt = time.Now().Unix()
+		matched.Reason = "确认时发起者已有绑定"
+		globalIdentityBindCodes.Store(matchedKey, matched)
+		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
+			"绑定失败：当前身份已经绑定了 %s，请先发送 `.unbind`。",
+			identityBindRecordOldID(existing)))
+		return true
 	}
 	if err := identityBindStoreOf(d).put(d, record); err != nil {
 		matched.Attempts++
@@ -1041,8 +1096,16 @@ func identityBindNotifyNewSide(d *Dice, c *identityBindCodeChallenge) {
 			"发送 `.pc list` / `.st show` 即可看到旧角色卡。", c.New.UserID, c.Old.UserID)
 	}
 
-	if c.New.GroupID == "" {
-		// 没有群可发（理论上不会出现），至少别让它崩
+	if c.New.GroupID == "" && c.New.UserID == "" {
+		// 没地方可发（理论上不会出现），至少别让它崩
+		return
+	}
+	// 私聊里发起的绑定：New.GroupID 是 "PG-<用户ID>" 这种**伪群号**，
+	// 发给 SendToGroup 会被判成 Unknown 只剩一行错误日志，用户什么也收不到。
+	// 这种情况直接私聊回复本人。
+	if strings.HasPrefix(c.New.GroupID, "PG-") || c.New.GroupID == "" {
+		sendCtx := identityBindSafeSendCtx(d, ep, "", c.New.UserID)
+		ep.Adapter.SendToPerson(sendCtx, c.New.UserID, text, "skip")
 		return
 	}
 	sendCtx := identityBindSafeSendCtx(d, ep, c.New.GroupID, c.New.UserID)
@@ -1083,6 +1146,13 @@ func identityBindSafeSendCtx(d *Dice, ep *EndPointInfo, groupID, userID string) 
 }
 
 // identityBindFindNewBotEndPoint 找官方 bot 那条连接（用于发通知）。
+//
+// 与 identityBindFindOldBotEndPoint 一样，**必须**要求 State == StateConnected。
+// 原因很硬：官方适配器连接失败时走 failConnect()，它把 pa.Api 置 nil、State 置 3，
+// 但**不会**清 Enable（配置里那条连接还在）。此时如果照发消息，
+// 适配器内部会调 nil 接口的 PostGroupMessage → panic，
+// 而这个 panic 发生在 botgo 的事件 goroutine 里，会把整条 websocket 带走
+// （日志表现为 close 4004 / invalid session，机器人得重连）。
 func identityBindFindNewBotEndPoint(session *IMSession) *EndPointInfo {
 	if session == nil {
 		return nil
@@ -1091,11 +1161,37 @@ func identityBindFindNewBotEndPoint(session *IMSession) *EndPointInfo {
 		if ep == nil || !ep.Enable || ep.Adapter == nil {
 			continue
 		}
+		if ep.State != StateConnected {
+			continue
+		}
 		if identityBindSupported(ep) {
 			return ep
 		}
 	}
 	return nil
+}
+
+// identityBindIsExpectedConfirmer 判断"这条猜错的码"该不该记到这条挑战头上。
+//
+// 只有"本来就有资格确认的人"猜错才计次：
+//
+//	邮箱通道 → 发起者本人（码进了他声称的那个号的邮箱，他最有动机去猜）
+//	私聊通道 → 被声明的旧账号
+//
+// 换成"任何人都计次"会有反效果：群里任意一个人连发五个数字，
+// 就能把别人的验证码作废掉。
+func identityBindIsExpectedConfirmer(c *identityBindCodeChallenge, senderID string, onOfficial, isPrivate bool) bool {
+	if c == nil || strings.TrimSpace(senderID) == "" {
+		return false
+	}
+	switch c.Channel {
+	case identityBindCodeChannelEmail:
+		return onOfficial && identityBindSameIdentity(senderID, c.New.UserID)
+	case identityBindCodeChannelDM:
+		return !onOfficial && isPrivate && identityBindSameIdentity(senderID, c.ConfirmBy)
+	default:
+		return false
+	}
 }
 
 // identityBindReplyPerson 直接给某个号发私聊（用于回执，不依赖指令上下文）。

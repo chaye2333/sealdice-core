@@ -230,7 +230,16 @@ func RegisterBuiltinExtLog(self *Dice) {
 	//
 	// 默认（窗口为 5 秒）直接用 msg.RawID，与上游行为一致：
 	// 只去重同一连接内的重复推送，绝不合并真实发言。
-	// 只有显式调大窗口后才换成「群+人+正文」，用来跨连接去重。
+	//
+	// ⚠️ 已知限制：窗口调大后这里用的是**真实**群号与发送者号
+	// （官方侧 OpenQQ:… / 民间侧 QQ:…）。同一条消息经两条连接各收一次时，
+	// 两边算出的键并不相同，所以「跨 bot 去重」实际上不会命中；
+	// 能命中的只有同一连接被重复推送的情况。真正的代价是：
+	// 同一个人在窗口内发的两条**正文完全相同**的消息只会留下一条。
+	// 想真正跨 bot 去重，键必须改用归一后的身份
+	// （identityBindDataGroupID / identityBindDataUserID），见 TODO。
+	// TODO(identity-bind): 用归一 ID 重做跨连接去重，否则应删掉这个开关、
+	// 把窗口钉死 5 秒，避免"以为开了其实没开，却付了合并代价"。
 	logDedupKey := func(ctx *MsgContext, msg *Message) any {
 		if msg == nil {
 			return nil
@@ -467,8 +476,13 @@ func RegisterBuiltinExtLog(self *Dice) {
 				if name == "" {
 					return CmdExecuteResult{Matched: true, Solved: true, ShowHelp: true}
 				}
+				// 别名解析与真正的删除都必须落在**归一后**的群上：
+				// 群绑定之后日志行在旧群名下，用真实群去解析会一直"找不到"；
+				// 而官方群如果恰好有一份同名旧日志（绑定时被隐藏的那份），
+				// 删掉的就是它 —— 连 log_items 一起没了，还回一句"删除成功"。
+				delGroupID := identityBindLogReadGroupID(ctx, stateGroup.GroupID)
 				var ok bool
-				name, ok = resolveLogNameWithReply(group.GroupID, name)
+				name, ok = resolveLogNameWithReply(delGroupID, name)
 				if !ok {
 					return CmdExecuteResult{Matched: true, Solved: true}
 				}
@@ -479,7 +493,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 				if name == getGroupLogName(stateGroup) {
 					ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_删除_失败_正在进行"))
 				} else {
-					err := service.LogDelete(ctx.Dice.DBOperator, group.GroupID, name)
+					err := service.LogDelete(ctx.Dice.DBOperator, delGroupID, name)
 					if err == nil {
 						ReplyToSender(ctx, msg, DiceFormatTmpl(ctx, "日志:记录_删除_成功"))
 					} else if errors.Is(err, service.ErrLogNotFound) {
@@ -546,7 +560,12 @@ func RegisterBuiltinExtLog(self *Dice) {
 
 				time.Sleep(time.Duration(0.3 * float64(time.Second)))
 				// Note: 2024-10-15 经过简单测试，似乎能缓解#1034的问题，但无法根本解决。
-				uploadGroupID := group.GroupID
+				//
+				// 上传目标必须是**归一后**的群：群绑定之后日志行与条目都在旧群名下，
+				// 用真实群去查只会得到"此log不存在"；更糟的是官方群如果恰好有一份
+				// 同名旧日志，会把那份旧内容当成刚结束的记录上传上去
+				// （它若上传过，还会直接返回当年的缓存链接，看起来像成功了）。
+				uploadGroupID := identityBindLogReadGroupID(ctx, stateGroup.GroupID)
 				uploadName := state.Name
 				go getAndUpload(uploadGroupID, uploadName)
 				stateGroup.ClearLogState()
@@ -737,9 +756,9 @@ func RegisterBuiltinExtLog(self *Dice) {
 						}
 						if len(rightEmails) > 0 {
 							emailMsg := DiceFormatTmpl(ctx, "日志:记录_导出_邮件附言")
-							// SendMailRow 现在会返回 SMTP 错误（身份绑定的邮箱通道要用它
-							// 判断验证码到底寄出去没有）。这里保持原有行为：
-							// 失败了也只是记日志，不让 .log export 直接报错。
+							// SendMailRow 返回 SMTP 错误时**不能**再回"已发送"：
+							// 临时导出文件在这段代码之后就被删掉了，用户既没收到邮件
+							// 也没法从别处拿回日志，等于日志白导出一场。
 							if err := dice.SendMailRow(
 								fmt.Sprintf("Seal 记录提取: %s", logFileNamePrefix),
 								rightEmails,
@@ -747,6 +766,10 @@ func RegisterBuiltinExtLog(self *Dice) {
 								[]string{logFile},
 							); err != nil {
 								dice.Logger.Errorf("导出日志的邮件发送失败: %v", err)
+								ReplyToSenderRaw(ctx, msg, fmt.Sprintf(
+									"邮件发送失败：%v\n请检查「邮箱通知」配置（发件邮箱 / 密钥 / SMTP），或改用不加邮箱参数的导出方式。",
+									err), "skip")
+								return CmdExecuteResult{Matched: true, Solved: true}
 							}
 							text := DiceFormatTmpl(ctx, "日志:记录_导出_邮箱发送前缀") + strings.Join(rightEmails, "\n")
 							ReplyToSenderRaw(ctx, msg, text, "skip")
@@ -801,7 +824,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					}
 					name = resolved
 				}
-				items, err := service.LogGetCommandInfoStrList(ctx.Dice.DBOperator, group.GroupID, name)
+				items, err := service.LogGetCommandInfoStrList(ctx.Dice.DBOperator, statGroupID, name)
 				if err == nil && len(items) > 0 {
 					// showDetail := cmdArgs.GetKwarg("detail")
 					// var showDetail *Kwarg
@@ -816,12 +839,17 @@ func RegisterBuiltinExtLog(self *Dice) {
 						}
 					} else */{
 						isShowAll := showAll != nil
-						text := LogRollBriefByPCV2(ctx, items, isShowAll, ctx.Player.Name)
+						// 与 .log stat 保持一致：绑定了的话，日志里存的是旧号那边的昵称
+						statPlayerName := ctx.Player.Name
+						if boundPlayer := identityBindReadPlayer(ctx); boundPlayer != nil && boundPlayer.Name != "" {
+							statPlayerName = boundPlayer.Name
+						}
+						text := LogRollBriefByPCV2(ctx, items, isShowAll, statPlayerName)
 						if text == "" {
 							if isShowAll {
 								ReplyToSender(ctx, msg, fmt.Sprintf("没有找到故事“%s”的检定记录", name))
 							} else {
-								ReplyToSender(ctx, msg, fmt.Sprintf("没有找到角色<%s>的任何记录\n若需查看全团，请在指令后加 --all", ctx.Player.Name))
+								ReplyToSender(ctx, msg, fmt.Sprintf("没有找到角色<%s>的任何记录\n若需查看全团，请在指令后加 --all", statPlayerName))
 							}
 						} else {
 							if !isShowAll {
