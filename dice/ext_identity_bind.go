@@ -1011,6 +1011,12 @@ func identityBindStartCodeChallenge(
 		CreatedAt: now.Unix(),
 		ExpiresAt: now.Add(identityBindCodeExpiry(d)).Unix(),
 	}
+	// 记下发起那条消息的原始 ID：确认成功时可以用它把通知当**被动回复**发出，
+	// 绕过官方平台对"主动群消息"的权限/额度限制（用户实测通知发不出来就是这个原因）。
+	if msg != nil && msg.RawID != nil {
+		challenge.NewMsgID = fmt.Sprintf("%v", msg.RawID)
+		challenge.NewMsgAt = now.Unix()
+	}
 	identityBindPutCode(challenge)
 	identityBindMarkAttempt(ctx.EndPoint.ID, ctx.Player.UserID, action)
 

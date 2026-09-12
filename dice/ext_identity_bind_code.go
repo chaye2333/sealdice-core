@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	ds "github.com/sealdice/dicescript"
 )
 
 // 本文件实现「私聊验证码」身份验证。
@@ -81,6 +83,10 @@ const (
 	// 比普通挑战长得多：它卡在"等人操作"，10 分钟就丢掉的话骰主一觉醒来
 	// 就再也找不到这条申请了。
 	identityBindCodeKeepForMaster = 12 * time.Hour
+
+	// identityBindPassiveReplyWindow 「绑定成功」通知还能当被动回复发出去的时限。
+	// 官方平台的被动回复窗口约 5 分钟，这里留 1 分钟余量。
+	identityBindPassiveReplyWindow = 4 * time.Minute
 )
 
 // identityBindCodeChallenge 一次等待确认的绑定。
@@ -128,6 +134,13 @@ type identityBindCodeChallenge struct {
 	MasterNotifiedTo []string
 	// ConfirmedBy 实际确认这条验证码的身份（审计用：邮箱通道允许代确认）
 	ConfirmedBy string
+
+	// NewMsgID 发起绑定时那条指令消息的原始 ID（官方侧）。
+	// 用来把"绑定成功"通知当作**被动回复**发出去：官方平台的主动消息有权限/额度限制，
+	// 而被动回复（引用一条刚收到的消息）一定能发。超过被动窗口就只能退回主动消息。
+	NewMsgID string
+	// NewMsgAt 发起时间（NewMsgID 的新鲜度判断用）
+	NewMsgAt int64
 }
 
 func (c *identityBindCodeChallenge) expired() bool {
@@ -1046,17 +1059,18 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	identityBindClearSession(identityBindSessionKey(ctx.EndPoint.ID, matched.New.UserID, matched.Action))
 
 	// 回执给确认人。
-	// 私聊通道：确认人是民间 bot 侧那个旧号 → 私聊回复他。
-	// 邮箱通道：确认人就是官方侧发起者，而他正在官方群里等消息，
-	//           identityBindNotifyNewSide 已经会通知到，这里不必再私聊一次。
-	if matched.Channel == identityBindCodeChannelDM {
-		if matched.Action == identityBindActionGroup {
-			identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
-				"验证通过！官方群已经和旧群 %s 绑定，双方现在共用同一份日志。", matched.Old.GroupID))
-		} else {
-			identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
-				"验证通过！你的官方身份 %s 现在与旧 QQ 号共用同一份数据。", matched.New.UserID))
-		}
+	//
+	// 两种通道都回：这是**被动回复**（引用对方刚发的那条消息），一定能发出去，
+	// 是"绑定已完成"最可靠的一次确认。之前只给私聊通道回执，
+	// 而邮箱通道靠官方群里的主动通知——那条通知受"群内主动发言"权限/额度限制，
+	// 发不出去时用户就完全收不到任何反馈（用户实测正是这个症状）。
+	if matched.Action == identityBindActionGroup {
+		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
+			"验证通过！官方群已经和旧群 %s 绑定，双方现在共用同一份日志。", matched.Old.GroupID))
+	} else {
+		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
+			"验证通过！你的官方身份 %s 现在与旧 QQ 号 %s 共用同一份数据。",
+			matched.New.UserID, matched.Old.UserID))
 	}
 
 	// 通知官方 bot 侧的发起者
@@ -1078,12 +1092,20 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 //
 // 所以这里明确地"自己拼一个上下文，然后直接调适配器"：
 // Player 一定非 nil，Group 拿不到真实对象时就置 nil（适配器会跳过需要群的分支）。
+//
+// 发送方式：优先当**被动回复**（引用发起绑定那条指令消息），因为官方平台的
+// 主动群消息受"主动发言"权限与额度限制，常常发不出去（用户实测正是这个症状）；
+// 超出被动窗口时再退回主动消息，并把结果写进日志便于排查。
 func identityBindNotifyNewSide(d *Dice, c *identityBindCodeChallenge) {
 	if d == nil || c == nil || c.New.GroupID == "" && c.New.UserID == "" {
 		return
 	}
 	ep := identityBindFindNewBotEndPoint(d.ImSession)
 	if ep == nil || ep.Adapter == nil {
+		if d.Logger != nil {
+			d.Logger.Warnf("身份绑定成功通知未发出：官方 bot 连接不可用（目标=%s）",
+				identityBindChallengeTargetText(c))
+		}
 		return
 	}
 
@@ -1104,12 +1126,35 @@ func identityBindNotifyNewSide(d *Dice, c *identityBindCodeChallenge) {
 	// 发给 SendToGroup 会被判成 Unknown 只剩一行错误日志，用户什么也收不到。
 	// 这种情况直接私聊回复本人。
 	if strings.HasPrefix(c.New.GroupID, "PG-") || c.New.GroupID == "" {
-		sendCtx := identityBindSafeSendCtx(d, ep, "", c.New.UserID)
+		sendCtx := identityBindSafeSendCtx(d, ep, "", c.New.UserID, c.NewMsgID)
 		ep.Adapter.SendToPerson(sendCtx, c.New.UserID, text, "skip")
 		return
 	}
-	sendCtx := identityBindSafeSendCtx(d, ep, c.New.GroupID, c.New.UserID)
+
+	replyMsgID := identityBindPassiveReplyMsgID(c)
+	sendCtx := identityBindSafeSendCtx(d, ep, c.New.GroupID, c.New.UserID, replyMsgID)
+	if d.Logger != nil {
+		mode := "主动消息"
+		if replyMsgID != "" {
+			mode = "被动回复"
+		}
+		d.Logger.Infof("发送身份绑定成功通知: 群=%s 方式=%s", c.New.GroupID, mode)
+	}
 	ep.Adapter.SendToGroup(sendCtx, c.New.GroupID, text, "skip")
+}
+
+// identityBindPassiveReplyMsgID 判断能否把通知当作被动回复发出。
+//
+// 官方平台的被动回复要求"引用一条最近收到的消息"（窗口约 5 分钟、每个消息 ID 有次数上限）。
+// 这里留 4 分钟余量：超过就老实走主动消息，免得撞上"msg_id 已过期"。
+func identityBindPassiveReplyMsgID(c *identityBindCodeChallenge) string {
+	if c == nil || c.NewMsgID == "" || c.NewMsgAt <= 0 {
+		return ""
+	}
+	if time.Since(time.Unix(c.NewMsgAt, 0)) > identityBindPassiveReplyWindow {
+		return ""
+	}
+	return c.NewMsgID
 }
 
 // identityBindSafeSendCtx 为"后台主动通知"拼一个不会 panic 的群上下文。
@@ -1118,12 +1163,24 @@ func identityBindNotifyNewSide(d *Dice, c *identityBindCodeChallenge) {
 //   - Group 取内存里的真实群对象；取不到就留 nil（官方适配器会在 ctx.Group == nil
 //     时跳过取 `$tMsgID` 那一段，转而走主动消息），绝不塞壳对象；
 //   - Player **保证非 nil**：上游有多处会直接读 ctx.Player 的字段，
-//     nil 会 panic 并连带干掉官方 bot 的连接。拿不到真实玩家就放一个占位。
-func identityBindSafeSendCtx(d *Dice, ep *EndPointInfo, groupID, userID string) *MsgContext {
+//     nil 会 panic 并连带干掉官方 bot 的连接。拿不到真实玩家就放一个占位；
+//   - replyMsgID 非空时塞进 `$tMsgID`，让官方适配器把它当**被动回复**发出
+//     （主动消息受"群内主动发言"权限/额度限制，常常根本发不出去）。
+func identityBindSafeSendCtx(d *Dice, ep *EndPointInfo, groupID, userID, replyMsgID string) *MsgContext {
+	// 私聊（groupID 为空）时要标成 private：官方适配器的 SendToPerson
+	// 只在 ctx.MessageType == "private" 且 ctx.Player.UserID 对得上时
+	// 才把消息当被动回复发。
+	msgType := "group"
+	isPrivate := false
+	if groupID == "" {
+		msgType = "private"
+		isPrivate = true
+	}
 	ctx := &MsgContext{
 		Dice:            d,
 		EndPoint:        ep,
-		MessageType:     "group",
+		MessageType:     msgType,
+		IsPrivate:       isPrivate,
 		IsCurGroupBotOn: true,
 	}
 	if ep != nil {
@@ -1141,6 +1198,12 @@ func identityBindSafeSendCtx(d *Dice, ep *EndPointInfo, groupID, userID string) 
 	}
 	if ctx.Player == nil {
 		ctx.Player = &GroupPlayerInfo{UserID: userID}
+	}
+	if replyMsgID != "" {
+		// 与官方适配器自己的 newEventMsgContext 用同一套写法（见 platform_adapter_official_qq.go），
+		// 这样 SendToGroup 里的 VarGetValueStr(ctx, "$tMsgID") 就能取到值。
+		ctx.vm = ds.NewVM()
+		ctx.vm.Attrs.Store("$tMsgID", ds.NewStrVal(replyMsgID))
 	}
 	return ctx
 }
