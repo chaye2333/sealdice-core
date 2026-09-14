@@ -129,6 +129,60 @@ func officialQQCharacterAttributeLine(ctx *MsgContext) string {
 	return text
 }
 
+// officialQQCurrentCardName 取「当前正在使用的角色卡名」。
+//
+// 为什么不能直接用 ctx.Player.Name：
+//   - QQ 官方机器人**改不了群名片**（platform_adapter_official_qq.go 的
+//     SetGroupCardName 是空实现），所以 ctx.Player.Name 在官方侧并不是一个
+//     随平台实时更新的字段；
+//   - 做过身份绑定之后它还可能来自另一侧（旧群）的残留名片；
+//   - 结果就是玩家 .pc tag 换卡之后，状态栏里的名字还停在上一次/另一侧，
+//     看起来像"换卡不生效"。
+//
+// 真正权威的「当前卡」是**数据层的角色卡绑定**：它按
+// (数据层群ID, 数据层用户ID) 存，两侧共用同一份，换卡立刻生效
+// （.pc list 里那个 [√] 标记用的就是同一个查询）。
+func officialQQCurrentCardName(ctx *MsgContext) string {
+	if ctx == nil || ctx.Dice == nil || ctx.Player == nil || ctx.Group == nil {
+		return ""
+	}
+	am := ctx.Dice.AttrsManager
+	if am == nil {
+		return ""
+	}
+	// LoadByCtx 与 .st / 属性求值用的是同一个来源：先看"当前绑定的角色卡"，
+	// 没有再退回本群的默认卡。用它有两个好处：
+	//  1. 名字和属性永远来自**同一张卡**，不会出现"名字是 A、属性是 B"；
+	//  2. 只有一次查询（状态栏是每条掷骰回复都要渲染的热路径）。
+	item, err := am.LoadByCtx(ctx)
+	if err != nil || item == nil {
+		return ""
+	}
+	return strings.TrimSpace(item.Name)
+}
+
+// officialQQStatusBarPlayerName 状态栏里显示的角色名。
+//
+// 取值优先级（从"最权威"到"兜底"）：
+//  1. 当前绑定的角色卡名 —— 换卡立刻跟着变，这是玩家期望的语义；
+//  2. ctx.Player.Name —— 没绑卡时用它（官方侧通常是玩家昵称/上次设的名字）；
+//  3. 绑定另一侧（旧群旧号）的玩家名 —— 迁移过来还没设过任何名字时的兜底。
+func officialQQStatusBarPlayerName(ctx *MsgContext) string {
+	if name := officialQQCurrentCardName(ctx); name != "" {
+		return name
+	}
+	if ctx == nil || ctx.Player == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(ctx.Player.Name); name != "" {
+		return name
+	}
+	if bound := identityBindReadPlayer(ctx); bound != nil && bound != ctx.Player {
+		return strings.TrimSpace(bound.Name)
+	}
+	return ""
+}
+
 // officialQQCharacterStatusBar 生成完整的状态栏文本（角色名 + 属性，同一行）。
 //
 // 输出形如：
@@ -143,13 +197,7 @@ func officialQQCharacterStatusBar(ctx *MsgContext) string {
 	if !officialQQStatusBarAllowed(ctx) {
 		return ""
 	}
-	// 做过身份绑定时，角色名也取绑定另一侧（旧QQ号）的，这样状态栏和角色卡数据一致。
-	name := strings.TrimSpace(ctx.Player.Name)
-	if bound := identityBindReadPlayer(ctx); bound != nil && bound != ctx.Player {
-		if boundName := strings.TrimSpace(bound.Name); boundName != "" {
-			name = boundName
-		}
-	}
+	name := officialQQStatusBarPlayerName(ctx)
 	if name == "" {
 		return ""
 	}
