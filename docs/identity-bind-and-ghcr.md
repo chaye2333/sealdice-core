@@ -483,7 +483,7 @@ docker build -t sealdice-core:local \
 | 界面上的名字 | 配置键 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | 官方QQ 请求超时（秒） | `officialQQRequestTimeoutSec` | 60 | 5~600 |
-| 本地文件使用分片上传 | `officialQQChunkedUploadEnable` | 关 | 开启后本地文件保留文件名 |
+| 本地文件使用分片上传 | `officialQQChunkedUploadEnable` | 关 | 开启后本地文件保留文件名（**发文件必走分片**） |
 | 启用身份绑定 | `identityBindEnable` | 关 | 总开关，关掉后 `.bind` 不可用 |
 | 身份绑定发起间隔（秒） | `identityBindCooldownSec` | 60 | 0~86400 |
 | 验证码位数 | `identityBindCodeLength` | 6 | 4~8 |
@@ -906,8 +906,10 @@ officialQQChunkedUploadEnable: true
 > ⚠️ **不打开这一行，文件照样能发，但名字仍是「未命名」**——
 > 关着时走的是旧的 `file_data` 路径，而那条路径腾讯不给文件名。
 
-**打开后的行为**：本地文件走分片（可保留文件名）；**远程 URL** 仍走 URL 上传；
-语音/图片等既有路径**完全不变**。所以这个开关是安全的，出问题关掉即可回退。
+**打开后的行为**：**发文件（`file_type=4` 文件卡片）一定走分片**，不看体积——
+哪怕只有几百 KB 也走，因为 base64 路径根本没有文件名字段（806KB 的 `.xlsx` 走 base64
+同样会变成「未命名」）；**远程 URL** 仍走 URL 上传；图片/语音这类不显示文件名的类型，
+小于 1MB 仍走 base64（省掉四次往返），≥1MB 才走分片。所以这个开关是安全的，出问题关掉即可回退。
 
 **排查清单**（名字还是「未命名」时逐条看）：
 

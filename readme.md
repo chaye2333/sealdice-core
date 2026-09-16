@@ -71,7 +71,7 @@ $\scriptsize\textcolor{#E5484D}{\text{马丁·弗卢吉尔 SAN69 HP12/12 DEX65}}
 
 | 改动 | 说明 |
 |---|---|
-| 分片上传 | `officialQQChunkedUploadEnable` 打开后，本地文件（≥1MB）走分片上传，**能保留文件名**；默认关 |
+| 分片上传 | `officialQQChunkedUploadEnable` 打开后，**发文件（文件卡片）一定走分片上传，能保留文件名**（base64 路径腾讯没有文件名字段，会显示"未命名"）；图片/语音等 ≥1MB 才走；默认关 |
 | 请求超时可配 | `officialQQRequestTimeoutSec`（默认 60 秒，与上游一致），5~600 |
 | 掉线防崩 | 连接失败后端点 `Enable` 仍为 true，旧实现发消息会 nil 接口 panic 并**冲掉整条 websocket**；现在发送入口有守卫 |
 | 邮件 | SMTP 支持 `host` 或 `host:port`，默认 465（隐式 TLS）、587 强制 STARTTLS，失败会如实报错 |
@@ -139,7 +139,7 @@ powershell -File scripts\build-windows.ps1
 | `identityBindCodeExpireSec` | `600` | 60~3600 秒 |
 | `identityBindCooldownSec` | `60` | 同一用户两次发起的最小间隔 |
 | `officialQQRequestTimeoutSec` | `60` | 官方 QQ 请求超时（5~600） |
-| `officialQQChunkedUploadEnable` | `false` | 本地文件分片上传（保留文件名） |
+| `officialQQChunkedUploadEnable` | `false` | 本地文件分片上传（**发文件必走，保留文件名**；图片/语音 ≥1MB 才走） |
 | `logMultiBotDedupWindowSec` | `5` | **建议保持 5**：调大并不能跨 bot 去重，只会把同一人窗口内的重复正文并成一条 |
 
 已删除的历史配置项：`identityBindQuestionCount`、`identityBindKeepQuiz`、

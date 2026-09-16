@@ -166,12 +166,8 @@ func hexOf(h io.Writer, data []byte) string {
 
 // ---------- 端到端：群聊分片上传 ----------
 //
-// 这几个用例刻意用 8 字节的小文件（假服务器固定下发 2×4 字节分片），而
-// officialQQShouldUseChunkedUpload 会把**小于 1MB** 的本地文件正确地路由到
-// base64 路径 —— 也就是说真正的入口 uploadGroupMedia / uploadC2CMedia 不会走分片
-// （那条路需要真实 API 客户端，单测里没有）。所以这里直接调用分片函数，
-// 测的是**分片协议本身**；路由判断由 TestOfficialQQChunkedUploadGating 和
-// TestOfficialQQChunkedUploadHonorsSizeThreshold 覆盖。
+// 这些用例的文件只有 8 字节，但仍然走真实入口 —— 因为是 file_type=4（文件卡片），
+// 路由规则里它**无条件**走分片（见 officialQQShouldUseChunkedUpload）。
 
 func TestOfficialQQChunkedUploadGroupEndToEnd(t *testing.T) {
 	fake := newFakeTencentQQAPI(t)
@@ -190,7 +186,7 @@ func TestOfficialQQChunkedUploadGroupEndToEnd(t *testing.T) {
 	}
 
 	// 调用链上 SendToGroup 已剥掉前缀，所以这里传的是裸 GroupOpenID
-	media, err := pa.uploadGroupMediaChunked(context.Background(), "groupopenid", elem, 4)
+	media, err := pa.uploadGroupMedia(context.Background(), "groupopenid", elem, 4)
 	if err != nil {
 		t.Fatalf("uploadGroupMedia: %v", err)
 	}
@@ -287,7 +283,7 @@ func TestOfficialQQChunkedUploadC2CEndToEnd(t *testing.T) {
 		t.Fatalf("FilepathToFileElement: %v", err)
 	}
 
-	if _, err := pa.uploadC2CMediaChunked(context.Background(), "user-openid", elem, 4); err != nil {
+	if _, err := pa.uploadC2CMedia(context.Background(), "user-openid", elem, 4); err != nil {
 		t.Fatalf("uploadC2CMedia: %v", err)
 	}
 
@@ -301,8 +297,6 @@ func TestOfficialQQChunkedUploadC2CEndToEnd(t *testing.T) {
 }
 
 // ---------- 失败处理 ----------
-//
-// 同上一节：小文件会被路由到 base64 路径，所以这里也直接调用分片函数。
 
 func TestOfficialQQChunkedUploadPrepareFailure(t *testing.T) {
 	fake := newFakeTencentQQAPI(t)
@@ -319,7 +313,7 @@ func TestOfficialQQChunkedUploadPrepareFailure(t *testing.T) {
 		t.Fatalf("FilepathToFileElement: %v", err)
 	}
 
-	_, err = pa.uploadGroupMediaChunked(context.Background(), "g", elem, 4)
+	_, err = pa.uploadGroupMedia(context.Background(), "g", elem, 4)
 	if err == nil {
 		t.Fatal("expected an error when upload_prepare fails")
 	}
@@ -348,7 +342,7 @@ func TestOfficialQQChunkedUploadPartFailure(t *testing.T) {
 		t.Fatalf("FilepathToFileElement: %v", err)
 	}
 
-	_, err = pa.uploadGroupMediaChunked(context.Background(), "g", elem, 4)
+	_, err = pa.uploadGroupMedia(context.Background(), "g", elem, 4)
 	if err == nil {
 		t.Fatal("expected an error when a part PUT fails")
 	}
@@ -370,34 +364,36 @@ func TestOfficialQQChunkedUploadGating(t *testing.T) {
 	plainFile := &message.FileElement{File: "a.xlsx"}
 
 	// 默认关闭：任何文件都不走分片
-	if pa.officialQQShouldUseChunkedUpload(localFile) {
+	if pa.officialQQShouldUseChunkedUpload(localFile, officialQQFileTypeFile) {
 		t.Fatal("分片上传默认应关闭")
 	}
 
 	d.Config.OfficialQQChunkedUploadEnable = true
-	if !pa.officialQQShouldUseChunkedUpload(localFile) {
+	if !pa.officialQQShouldUseChunkedUpload(localFile, officialQQFileTypeFile) {
 		t.Fatal("开关打开后本地文件应走分片")
 	}
-	if !pa.officialQQShouldUseChunkedUpload(plainFile) {
+	if !pa.officialQQShouldUseChunkedUpload(plainFile, officialQQFileTypeFile) {
 		t.Fatal("只有本地路径的文件也应走分片")
 	}
 	// 远程 URL 仍走 URL 上传（腾讯推荐的整文件方式），不走分片
-	if pa.officialQQShouldUseChunkedUpload(remoteFile) {
+	if pa.officialQQShouldUseChunkedUpload(remoteFile, officialQQFileTypeFile) {
 		t.Fatal("远程 URL 不应走分片上传")
 	}
 	// nil 不能 panic
-	if pa.officialQQShouldUseChunkedUpload(nil) {
+	if pa.officialQQShouldUseChunkedUpload(nil, officialQQFileTypeFile) {
 		t.Fatal("nil 文件不应走分片上传")
 	}
 }
 
-// TestOfficialQQChunkedUploadHonorsSizeThreshold 体积门槛必须真的生效。
+// TestOfficialQQChunkedUploadRoutingByTypeAndSize 路由规则：**文件卡片必走分片**，
+// 图片/语音按体积走。
 //
-// 回归：海豹解析本地路径时 FileElement.File 只放 **basename**，绝对路径在
-// FileElement.URL（file:// 形式）。门槛如果先 stat File，os.Stat 必然失败，
-// 于是"小于 1MB 走 base64"这条判断被静默跳过 —— 开关一开，连几 KB 的图片
-// 都要走四步分片上传，与设计正好相反。
-func TestOfficialQQChunkedUploadHonorsSizeThreshold(t *testing.T) {
+// 两条回归都在这里：
+//  1. 体积门槛曾经先 stat FileElement.File，而海豹填的是 basename（绝对路径在 URL），
+//     os.Stat 必然失败 → 门槛被静默跳过；
+//  2. 门槛修好之后又反过来把 806KB 的 .xlsx 挡回了 base64 路径 —— base64(file_data)
+//     没有文件名字段，腾讯只能显示「未命名」。所以文件卡片必须无条件走分片。
+func TestOfficialQQChunkedUploadRoutingByTypeAndSize(t *testing.T) {
 	d := &Dice{Logger: sealdiceLogger.M()}
 	d.Config.OfficialQQChunkedUploadEnable = true
 	ep := &EndPointInfo{}
@@ -440,8 +436,13 @@ func TestOfficialQQChunkedUploadHonorsSizeThreshold(t *testing.T) {
 		t.Fatalf("体积门槛没读到真实文件: size=%d err=%v (File=%q URL=%q)",
 			got, err, small.File, small.URL)
 	}
-	if pa.officialQQShouldUseChunkedUpload(small) {
-		t.Fatalf("小于 1MB 的本地文件不该走分片上传: %s", small.URL)
+	// 文件卡片：再小也必须走分片，否则客户端收到的是「未命名」
+	if !pa.officialQQShouldUseChunkedUpload(small, officialQQFileTypeFile) {
+		t.Fatalf("文件卡片必须走分片上传（否则文件名会丢）: %s", small.URL)
+	}
+	// 图片：这类消息不显示文件名，小文件走 base64 更快
+	if pa.officialQQShouldUseChunkedUpload(small, 1) {
+		t.Fatalf("小于 1MB 的图片不该走分片上传: %s", small.URL)
 	}
 
 	big := localElement("big.bin", officialQQChunkedUploadMinBytes)
@@ -449,8 +450,8 @@ func TestOfficialQQChunkedUploadHonorsSizeThreshold(t *testing.T) {
 		t.Fatalf("体积门槛没读到真实文件: size=%d err=%v (File=%q URL=%q)",
 			got, err, big.File, big.URL)
 	}
-	if !pa.officialQQShouldUseChunkedUpload(big) {
-		t.Fatalf("达到 1MB 的本地文件应走分片上传: %s", big.URL)
+	if !pa.officialQQShouldUseChunkedUpload(big, 1) {
+		t.Fatalf("达到 1MB 的图片应走分片上传: %s", big.URL)
 	}
 }
 

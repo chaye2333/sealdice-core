@@ -272,6 +272,8 @@ type BaseConfig struct {
 	// 默认关闭：先用旧路径保证稳定，测通后再打开。
 	// 打开后本地文件走 upload_prepare → 分片 PUT → upload_part_finish → 合并，
 	// 好处是**能保留文件名**（file_data/base64 方式腾讯不支持自定义文件名，会显示"未命名"）。
+	// 发文件（file_type=4 文件卡片）时**一定**走这条路，不看体积；图片/语音这类
+	// 不显示文件名、且小于 1MB 的仍走 base64，省掉四次往返。
 	OfficialQQChunkedUploadEnable bool `json:"officialQQChunkedUploadEnable" yaml:"officialQQChunkedUploadEnable"`
 
 	// IdentityBindEnable 是否允许用户使用 .bind 系列指令，把 QQ 官方机器人的身份

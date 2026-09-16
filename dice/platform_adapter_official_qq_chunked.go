@@ -27,7 +27,9 @@ import (
 	"sealdice-core/message"
 )
 
-// 本文件实现官方 QQ 的「大文件分片上传」，用于在发送本地文件时保留文件名。
+// 本文件实现官方 QQ 的分片上传，用于在发送本地文件时**保留文件名**。
+// 发文件（file_type=4 文件卡片）一定走这条路 —— base64(file_data) 没有文件名字段，
+// 客户端只会显示「未命名」；图片/语音等不显示文件名的类型则按体积决定（见门槛注释）。
 //
 // 背景：file_data(base64) 方式上传时，腾讯的上传接口没有文件名字段，
 // 收到的文件在客户端会显示成「未命名」。官方文档给出的方案是分片上传：
@@ -131,20 +133,30 @@ func (pa *PlatformAdapterOfficialQQ) officialQQChunkedUploadEnabled() bool {
 	return pa.EndPoint.Session.Parent.Config.OfficialQQChunkedUploadEnable
 }
 
+// officialQQFileTypeFile 官方接口的 file_type 取值之一：文件卡片。
+// （1=图片、2=视频、3=语音、4=文件，见腾讯文档。）
+const officialQQFileTypeFile = 4
+
 // officialQQChunkedUploadMinBytes 走分片上传的最小文件体积。
-// 小文件走原有 base64 路径**更快**，四步流程（prepare→PUT→finish→发消息）
-// 纯属浪费，而且每一步都可能失败。
+//
+// **只对不显示文件名的类型（图片/语音）生效**：小文件走 base64 路径更快，
+// 四步流程（prepare→PUT→finish→发消息）纯属浪费。
+// 文件卡片（file_type=4）不看体积 —— 原因见 officialQQShouldUseChunkedUpload。
 const officialQQChunkedUploadMinBytes = 1 << 20 // 1MB
 
 // officialQQShouldUseChunkedUpload 判断本次上传是否走分片。
 //
-// 只有同时满足下面三点才走：
+// 走分片要同时满足：
 //  1. 开关已打开（officialQQChunkedUploadEnable，默认关闭）；
 //  2. 是本地文件（file:// 或普通路径）——远程 URL 走 URL 上传更省事，也是腾讯推荐的整文件方式；
-//  3. 文件不小于 1MB——小文件走原有 base64 路径更快，四步流程纯属浪费。
+//  3. 满足下面任一条：
+//     · file_type=4（文件卡片）：**无条件走分片**。base64(file_data) 路径压根没有文件名
+//     字段，腾讯只能显示「未命名」，而"发文件"要的正是文件名 —— 所以哪怕只有几百 KB
+//     也必须走分片（806KB 的 .xlsx 走 base64 就会变成"未命名"）。
+//     · 其它类型（图片/语音）：不小于 1MB 才走。这类消息不显示文件名，小文件走 base64 更快。
 //
 // 不满足时返回 false，调用方继续走原有路径，因此语音/图片等既有能力不受影响。
-func (pa *PlatformAdapterOfficialQQ) officialQQShouldUseChunkedUpload(file *message.FileElement) bool {
+func (pa *PlatformAdapterOfficialQQ) officialQQShouldUseChunkedUpload(file *message.FileElement, fileType int) bool {
 	if !pa.officialQQChunkedUploadEnabled() || file == nil {
 		return false
 	}
@@ -154,7 +166,10 @@ func (pa *PlatformAdapterOfficialQQ) officialQQShouldUseChunkedUpload(file *mess
 	if file.URL == "" && file.File == "" {
 		return false
 	}
-	// 第 3 条：体积门槛。读一下大小即可；读不到（文件不存在/无权限）
+	if fileType == officialQQFileTypeFile {
+		return true
+	}
+	// 体积门槛：读一下大小即可；读不到（文件不存在/无权限）
 	// 就交给原路径去报错，避免这里把错误吞掉。
 	if size, err := officialQQLocalFileSize(file); err == nil && size < officialQQChunkedUploadMinBytes {
 		return false

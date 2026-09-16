@@ -1994,8 +1994,8 @@ func decodeOfficialQQFileInfo(fileInfo string) []byte {
 func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOpenID string, file *message.FileElement, fileType int) (*dto.MediaInfo, error) {
 	// 本地文件 + 开关打开时走分片上传：这是唯一能保留文件名的路径
 	// （file_data/base64 方式腾讯不支持自定义文件名，客户端会显示"未命名"）。
-	// 其余情况（远程 URL、开关关闭、文件过小）完全走上游原逻辑。
-	if pa.officialQQShouldUseChunkedUpload(file) {
+	// 文件卡片（file_type=4）无条件走分片；远程 URL、开关关闭等其余情况完全走上游原逻辑。
+	if pa.officialQQShouldUseChunkedUpload(file, fileType) {
 		return pa.uploadC2CMediaChunked(qctx, userOpenID, file, fileType)
 	}
 
@@ -2023,8 +2023,8 @@ func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOp
 }
 
 func (pa *PlatformAdapterOfficialQQ) uploadGroupMedia(qctx context.Context, groupID string, file *message.FileElement, fileType int) (*dto.MediaInfo, error) {
-	// 与单聊一致：本地文件 + 开关打开 + 体积达标时走分片上传，以保留文件名。
-	if pa.officialQQShouldUseChunkedUpload(file) {
+	// 与单聊一致：本地文件 + 开关打开时走分片上传（文件卡片无条件走），以保留文件名。
+	if pa.officialQQShouldUseChunkedUpload(file, fileType) {
 		return pa.uploadGroupMediaChunked(qctx, groupID, file, fileType)
 	}
 
