@@ -182,7 +182,6 @@ func officialQQLocalFileSize(file *message.FileElement) (int64, error) {
 
 // uploadGroupMediaChunked 用分片上传的方式上传群文件，可自定义文件名。
 // 仅对「本地文件」使用：远程 URL 走 URL 上传更省事，也是腾讯推荐的整文件方式。
-// uploadGroupMediaChunked 用分片上传的方式上传群文件，可自定义文件名。
 //
 // 注意 groupID 的形态：调用链是 SendToGroup -> sendQQGroupMsgRaw -> 这里，
 // 而 SendToGroup 开头就调用了 mustExtractID，所以传进来的是**剥掉前缀的裸 GroupOpenID**

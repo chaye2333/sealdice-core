@@ -9,14 +9,14 @@
 ## 一、一句话结论
 
 **部署可以随时回退，而且是「换个镜像 tag」级别的操作；
-代码回退也不是重写，但需要处理 11 个上游文件的改动。**
+代码回退也不是重写，但需要处理 15 个上游文件的改动（其中 13 个是 Go 文件）。**
 
 关键是这两件事要分开看：
 
 | 层次 | 回退难度 | 说明 |
 |---|---|---|
 | **你的部署 / 数据** | ⭐ 极低 | 换镜像即可，`data/` 和 `serve.yaml` 都不用动 |
-| **代码（想丢掉这个 fork）** | ⭐⭐⭐ 中等 | 新增文件直接删；11 个上游文件要撤掉改动 |
+| **代码（想丢掉这个 fork）** | ⭐⭐⭐ 中等 | 24 个新增文件直接删；15 个上游文件要撤掉改动 |
 
 ---
 
@@ -176,43 +176,67 @@ docker compose pull && docker compose up -d
 | `dice/ext_identity_bind_code_test.go` | 验证码测试 |
 | `dice/ext_identity_bind_email_test.go` | 邮箱通道测试 |
 | `dice/ext_identity_bind_master_test.go` | 通道诚实性 + 骰主兜底测试 |
+| `dice/ext_identity_bind_hardening_test.go` | 并发投递只发一次、按目标限频、取消释放额度等加固测试 |
+| `dice/ext_identity_bind_round3_test.go` | 第三轮：私聊 PG- 归一、暗骰日志落在归一后的群、邀请人打码 |
 | `dice/ext_log_share_test.go` | 群绑定后日志共通的锁定测试 |
 | `dice/official_qq_character_roll_markdown.go` | 虚拟角色状态栏 |
 | `dice/official_qq_character_roll_markdown_test.go` | 状态栏测试 |
+| `dice/official_qq_statusbar_name_test.go` | 状态栏名字必须取「当前角色卡」的锁定测试 |
 | `dice/help_title_test.go` | `.help` 标题锁定 |
 | `dice/platform_adapter_official_qq_chunked.go` | 分片上传 |
 | `dice/platform_adapter_official_qq_chunked_test.go` | 分片上传测试 |
-| `dice/platform_adapter_official_qq_media_test.go` | 富媒体测试 |
-| `dice/utils_email_test.go` | SMTP 端口/加密方式测试 |
+| `dice/platform_adapter_official_qq_media_test.go` | 富媒体：请求超时、file_info 契约（群聊解码 / 单聊透传）、CQ:file 转义与往返 |
+| `scripts/build-windows.ps1` | 本地 Windows 构建脚本（把 UI 装进 `static/frontend`，避免编出占位页） |
 | `Dockerfile` / `.dockerignore` / `docker-compose.example.yml` | 镜像构建 |
 | `.github/workflows/docker-ghcr.yml` | CI |
 | `ui/pnpm-workspace.yaml` | UI 依赖授权 |
 | `docs/identity-bind-and-ghcr.md` / `docs/how-to-revert-to-upstream.md` | 文档 |
 | `docs/official-qq-improvements.md` | **本地草稿，从未入库**（`.gitignore` 之外，注意别 commit） |
 
-**但注意**：删掉新增文件后，下面 14 个上游文件会**编译失败**（引用了被删的符号），
-所以两边必须一起处理。
+**但注意**：删掉新增文件后，下面 15 个上游文件里的 13 个 Go 文件会**编译失败**
+（引用了被删的符号），所以两边必须一起处理。另外两个（`.gitignore`、`readme.md`）
+只影响构建产物与说明文字，撤不撤随你。
 
-### 3.2 改过的 14 个上游文件
+### 3.2 改过的 15 个上游文件
 
-（数字可用 `git diff --stat upstream/master...HEAD -- <文件>` 复核。）
+（数字用 `git diff --numstat upstream/master...HEAD -- <文件>` 复核。）
 
-| 文件 | 改动量 | 撤掉什么 |
+| 文件 | 改动量(+) | 撤掉什么 |
 |---|---|---|
-| `dice/ext_log.go` | ~300 行 | `stateGroup` 归一、日志写入归一、去重窗口可配置、`EvalPlayerGroupCardTemplate` 抽取 |
-| `dice/platform_adapter_official_qq.go` | ~136 行 | 超时可配置、`file_type=4`、`file_info` 解码、`apiDomainOverride`、`officialQQGroupIDPrefix` |
-| `dice/dice_config.go` | ~122 行 | 新增字段 + `FixIdentityBindConfig()` / `FixOfficialQQConfig()` |
-| `dice/builtin_commands.go` | ~84 行 | `.bind`/`.unbind`/`.group` 注册、`.pc` 系列改用数据层 ID、`.help` 标题 |
-| `api/dice_config.go` | ~72 行 | 新键的解析 |
-| `dice/dice_config_default.go` | ~29 行 | 新字段的默认值（**位置字面量，见第四节**） |
-| `dice/im_helpers.go` | ~35 行 | `identityBindFillDataIDs` 调用 + 状态栏消费 |
-| `dice/rollvm_migrate.go` | ~21 行 | 状态栏标记置位 |
-| `dice/im_session.go` | ~28 行 | `DataUserID`/`DataGroupID`/`OfficialQQStatusBarPending` 字段 + 验证码拦截钩子 |
-| `dice/utils_email.go` | ~68 行 | SMTP 端口可配、默认 465+SSL、`SendMailRow` 返回 error |
-| `dice/im_vars.go` | ~13 行 | `VarGetValue` 的 nil 守卫（防止后台通知 panic 打崩官方 bot 连接） |
-| `dice/dice_attrs_manager.go` | ~8 行 | `LoadByCtx` 改用数据层 ID |
-| `dice/dice.go` | ~7 行 | `IdentityBindStore` 字段 + 验证码 worker 启动 |
-| `dice/ext_dnd5e.go` | ~1 行 | 一个空行（无实际影响） |
+| `dice/ext_log.go` | 274 | `stateGroup` 归一、日志写入归一、去重窗口可配置、`EvalPlayerGroupCardTemplate` 抽取 |
+| `dice/dice_config.go` | 143 | 新增绑定/日志去重/官方QQ超时字段 + `FixIdentityBindConfig()` / `FixOfficialQQConfig()` |
+| `dice/platform_adapter_official_qq.go` | 87 | 请求超时可配（`officialQQRequestTimeoutSec`）、`apiDomainOverride` 测试钩子、`warnNotConnected` 与 `Api == nil` 守卫、分片上传钩子 |
+| `api/dice_config.go` | 75 | 新键的解析 |
+| `dice/builtin_commands.go` | 59 | `.bind`/`.unbind`/`.group` 注册、`.pc` 系列改用数据层 ID、`.help` 标题 |
+| `dice/im_helpers.go` | 35 | `identityBindFillDataIDs` 调用 + 状态栏消费 |
+| `dice/dice_config_default.go` | 29 | 新字段的默认值（**位置字面量，见第四节**） |
+| `dice/im_session.go` | 28 | `DataUserID`/`DataGroupID`/`OfficialQQStatusBarPending` 字段 + 验证码拦截钩子 |
+| `dice/rollvm_migrate.go` | 21 | 状态栏标记置位 |
+| `dice/im_vars.go` | 13 | `VarGetValue` 的 nil 守卫（防止后台通知 panic 打崩官方 bot 连接） |
+| `dice/dice.go` | 7 | `IdentityBindStore` 字段 + 验证码 worker 启动 |
+| `dice/dice_attrs_manager.go` | 6 | `LoadByCtx` 改用数据层 ID |
+| `dice/ext_dnd5e.go` | 1 | 一个空行（无实际影响） |
+| `readme.md` | 133 | 重写为本 fork 自己的说明 |
+| `.gitignore` | 3 | 忽略本地构建产物（`dist-build/` 等） |
+
+> `officialQQGroupIDPrefix` 这个常量**已经不在适配器里**了：合并上游 `#1819` 时它被删掉，
+> 本 fork 改为在 `dice/ext_identity_bind.go` 里自己持有 `identityBindOfficialGroupIDPrefix`
+> （上游的群 ID 前缀是直接写字面量的，没有导出常量，跟着它走容易在下次合并时断掉）。
+
+### 3.2.1 已经交还给上游的部分（2026-09-16 合并之后）
+
+下面这些**曾经**是本 fork 的差异，现在上游自己实现了，所以**不在上表**里，
+回退时也不需要处理：
+
+| 能力 | 上游来源 | 现状 |
+|---|---|---|
+| SMTP 端口/加密方式、`SendMailRow` 返回 error | #1817 | `utils_email.go` + `utils_email_smtp.go` + `utils_email_auth.go`：裸主机名默认 465 隐式 TLS、587 强制 STARTTLS、地址格式校验。fork 那份实现被上游覆盖，`dice/utils_email.go` 现在与上游一致 |
+| `.log export` 邮件失败提示 | #1817 | 文案换成上游版本（比 fork 那版短），行为一致：失败会如实告诉用户 |
+| 日志缓存链接失效后重新上传 | #1811 | `dice/storylog/`：上传前先探测旧链接，失效就重传；探测结果不确定时才回退旧链接 |
+| 文件消息 `file_type=4`、`SendFileTo*`、`file_info` 处理 | #1819 | 上游自己实现了 `[CQ:file,file=...]`（本地路径）与 `[CQ:file,url=...]`（http(s)）两条分支 |
+
+> 也就是说：fork 与上游的差异**只会随合并变小**。下次合并后如果某一行失效，
+> 用 `git diff --name-status upstream/master...HEAD | findstr ^M` 重算这张表即可。
 
 ### 3.3 撤掉顺序（建议）
 
@@ -222,11 +246,11 @@ docker compose pull && docker compose up -d
 2. `dice/dice_attrs_manager.go` —— `LoadByCtx` 恢复 `am.Load(ctx.Group.GroupID, ctx.Player.UserID)`
 3. `dice/ext_log.go` —— 删 `stateGroup`，恢复用 `group`；删去重窗口，恢复硬编码 5 秒 + `msg.RawID`
 4. `dice/im_helpers.go` / `dice/im_session.go` / `dice/rollvm_migrate.go` / `dice/im_vars.go` —— 删字段与调用
-5. `dice/platform_adapter_official_qq.go` —— 超时、file、前缀
-6. `dice/utils_email.go` —— 恢复 `SendMailRow` 无返回值（或保留返回值，它向后兼容）
-7. `dice/dice_config*.go` / `api/dice_config.go` —— 删新字段与 Fix 函数
-8. 删所有新增文件
-9. `go build ./...` + `go test ./...` 确认干净
+5. `dice/platform_adapter_official_qq.go` —— 超时覆盖、`apiDomainOverride`、分片钩子
+   （文件发送与 `file_info` 处理已归上游，不用动）
+6. `dice/dice_config*.go` / `api/dice_config.go` —— 删新字段与 Fix 函数
+7. 删所有新增文件
+8. `go build ./...` + `go test ./...` 确认干净
 
 > 其实**不用手工做这些**：`git checkout upstream/master -- .` 之类一条命令就到位了
 > （见第五节的合并式做法，或者直接切到官方 tag 重新部署）。

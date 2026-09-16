@@ -794,7 +794,12 @@ officialQQRequestTimeoutSec: 60
 
 * 群聊 `sendQQGroupMsgRaw` 增加 `case *message.FileElement`，以 `file_type=4` 上传；
 * 单聊 `sendC2CMsgRaw` 同样增加该分支；
-* `SendFileToPerson` / `SendFileToGroup` 改为构造 `[CQ:file,file=...]` 交给正常发送链路。
+* `SendFileToPerson` / `SendFileToGroup` 改为构造 `[CQ:file,...]` 交给正常发送链路，
+  并且**按路径形态分支**：本地路径用 `file=`，`http(s)://` 用 `url=`。
+
+> **2026-09-16 合并后，这段能力由上游 #1819 提供**（上游自己加了 file 分支、`SendFileTo*`
+> 也自己构造 CQ 码）。fork 早期那份 `officialQQFileCQCode` 已删除，行为以上游实现为准；
+> `dice/platform_adapter_official_qq_media_test.go` 锁定的就是这份契约。
 
 需要注意：
 
@@ -807,45 +812,53 @@ officialQQRequestTimeoutSec: 60
   `upload_prepare` 分片上传。
 * **频道（QQ-CH）场景不支持文件**，官方文档里就是 ❌，本补丁不动频道。
 
-### 7.6.3 file_info 必须解码后再发（一次被回滚的"优化"）
+### 7.6.3 file_info 的编解码：群聊要解码，单聊要透传
 
-这块**踩过一次坑**，写下来免得以后有人再改错。
+这块**踩过一次坑**，合并上游后又澄清过一次，写清楚免得再改错。
 
-上传接口返回的 `file_info`，**必须经过一次 base64 解码**再交给发送接口：
+规则**按上传接口返回的字段类型**分，两条路不一样：
+
+| 路径 | 上传接口返回 | 适配器传出 | 要不要手动解码 |
+|---|---|---|---|
+| 群聊 `uploadGroupMedia` | `dto.Media.FileInfo` = `string`（base64 文本） | `dto.MediaInfo.FileInfo` = `[]byte` | **要**，自己解一次 |
+| 单聊 `uploadC2CMedia` | `dto.Message.FileInfo` = `[]byte` | 同上 | **不要**，原样透传 |
+
+差异来自 `encoding/json`：`[]byte` 字段在反序列化时**已经**被自动 base64 解码过一次
+（再解一次就是双重解码），而 `string` 字段拿到的仍是 base64 文本。
+
+发送接口序列化时 Go 又会对 `[]byte` 做一次 base64，所以「群聊先解一次、单聊不动」
+最终落到接口上的形态才是对的。合并上游后的写法就是：
 
 ```go
+// 群聊：内联解一次
 decodedFileInfo, decodeErr := base64.StdEncoding.DecodeString(media.FileInfo)
 if decodeErr != nil {
     decodedFileInfo = []byte(media.FileInfo)
 }
 return &dto.MediaInfo{FileInfo: decodedFileInfo}, nil
+
+// 单聊：原样透传（media.FileInfo 本来就是 []byte）
+return &dto.MediaInfo{FileInfo: media.FileInfo}, nil
 ```
 
-原因是类型叠加：
-
-| 环节 | 字段类型 | 说明 |
-|---|---|---|
-| 上传接口返回 | `dto.Media.FileInfo` = `string` | 内容是 base64 文本 |
-| 适配器传出 | `dto.MediaInfo.FileInfo` = `[]byte` | 装的是**解码后的字节** |
-| 发送接口序列化 | Go 的 `encoding/json` | 对 `[]byte` 自动做一次 base64 |
-
-所以「先解码、再由 JSON 编码一次」正好还原成接口期望的形态。
+`decodeOfficialQQFileInfo` 这个 helper 现在只剩**分片上传**（`*_chunked.go`）在用：
+分片那条路的合并响应是 base64 文本（`string`），仍然要解一次。
 
 **曾经**有人（就是我）照着官方文档里「file_info 内部为序列化二进制，开发者无需解析，
-直接透传即可」的注释，把这步解码当成 bug 删掉了，结果发送立刻开始报：
+直接透传即可」的注释，把**群聊**那步解码当成 bug 删掉了，结果发送立刻开始报：
 
 ```
 code:400, {"message":"请求参数file_info无效","code":40034032}
 ```
 
-图片和语音**全部发不出去**。已回滚，并加了测试锁定这个行为：
+图片和语音**全部发不出去**。已回滚，并加了测试把两条路的差异钉死：
 
-* `TestOfficialQQUploadGroupMediaDecodesFileInfo`
-* `TestOfficialQQUploadC2CMediaDecodesFileInfo`
-* `TestOfficialQQUploadGroupMediaFallsBackWhenFileInfoNotBase64`
+* `TestOfficialQQUploadGroupMediaDecodesFileInfo`（群聊必须解码）
+* `TestOfficialQQUploadGroupMediaFallsBackWhenFileInfoNotBase64`（解不开时按原样返回，不丢内容）
+* `TestOfficialQQUploadC2CMediaPassesFileInfoThrough`（单聊**必须透传**，多解一次会报同一个错）
 
-**另外顺手修了一个真实的不一致**：单聊路径（`uploadC2CMedia`）上游**从来没有做过这步解码**，
-和群聊路径行为不同。现在两条路径统一走 `decodeOfficialQQFileInfo`。
+> 早期结论曾是「两条路统一解码」，那是把单聊的 `[]byte` 也当成了 base64 文本；
+> 合并上游 #1819 时按 SDK 的真实字段类型改成了现在的分路处理。
 
 > 教训：官方文档的这句话描述的是「file_info 的语义」，但没描述 SDK 的字段类型；
 > 判断这类问题时，**能跑的实测行为优先于文档注释**。
@@ -1002,7 +1015,7 @@ logMultiBotDedupWindowSec: 5
 | `dice/builtin_commands.go` | 注册全局指令 `.bind` / `.unbind` / `.group`（含 `.groupbind`）；**`.pc` 系列（list/new/rename/save/load/untagAll/del）改用数据层 ID**；`.help` 标题改为 `鲸娘与豹`（硬编码，不带 fork 说明） |
 | `dice/dice_attrs_manager.go` | `LoadByCtx` 改用 `identityBindDataUserID/GroupID`（属性读写双向共通） |
 | `dice/ext_log.go` | `.log` 状态统一挂在归一后的群对象（`stateGroup`）；骰子/玩家发言都写归一后的群；删除/编辑按归一后的群查找；日志去重窗口可配置且**跨 bot 模式为可选**；抽出 `EvalPlayerGroupCardTemplate` |
-| `dice/platform_adapter_official_qq.go` | `officialQQGroupIDPrefix` 常量；请求超时可配置；群聊/单聊支持 `[CQ:file]`（file_type=4）；`SendFileTo*` 真正发文件；统一 file_info 解码；新增 `apiDomainOverride` 测试钩子 |
+| `dice/platform_adapter_official_qq.go` | 请求超时可配置（`officialQQRequestTimeoutSec`，默认与上游一致）；掉线后发消息的 `warnNotConnected` + `Api == nil` 守卫；分片上传钩子；新增 `apiDomainOverride` 测试钩子。（`file_type=4`、`SendFileTo*`、`file_info` 处理自 2026-09-16 合并起归上游 #1819） |
 | `api/dice_config.go` | WebUI 保存绑定配置项、官方 QQ 请求超时、日志去重窗口 |
 
 新增测试（重点）：
@@ -1011,7 +1024,7 @@ logMultiBotDedupWindowSec: 5
 |---|---|
 | `dice/ext_identity_bind_test.go` | 出题、答案解析、冷却、答错锁定、持久化、平台隔离、群/个人独立、**两侧收敛同一 key**、**旧号侧也能解析**、**抢号被拒**、**只有用户绑定时两个群保持隔离**、**日志状态共通**、**日志写入归一**、**`.log off` 作用在归一后的对象上（已验证能抓到回归）**、**自检报告** |
 | `dice/official_qq_character_roll_markdown_test.go` | 状态栏：渲染、转义、实时更新、平台隔离、任意规则系统通用挂载 |
-| `dice/platform_adapter_official_qq_media_test.go` | 官方 QQ 富媒体：超时默认/收敛、file_info 解码、CQ:file 转义与往返、频道不受影响 |
+| `dice/platform_adapter_official_qq_media_test.go` | 官方 QQ 富媒体：超时默认/收敛、file_info 契约（群聊解码 / 单聊透传）、CQ:file 转义与往返、频道不受影响 |
 | `dice/platform_adapter_official_qq_chunked.go` | 大文件分片上传：预上传/分片 PUT/分片完成/合并，保留文件名 |
 | `dice/platform_adapter_official_qq_chunked_test.go` | 分片上传测试：假腾讯服务器端到端、失败处理、开关路由、文件名推断 |
 
