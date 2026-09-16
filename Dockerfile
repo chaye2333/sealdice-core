@@ -126,14 +126,20 @@ LABEL org.opencontainers.image.source="https://github.com/${UI_REPO}" \
 
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -g 1000 sealdice && \
-    adduser -u 1000 -G sealdice -s /bin/sh -D sealdice
+    adduser -u 1000 -G sealdice -s /bin/sh -D sealdice && \
+    mkdir -p /app/data /app/extra && \
+    chown -R sealdice:sealdice /app
 
 WORKDIR /app
 
-COPY --from=core-builder /out/sealdice-core /app/sealdice-core
-
-# 数据目录：数据库、serve.yaml、日志、extra 等都写在这里
-RUN mkdir -p /app/data /app/extra && chown -R sealdice:sealdice /app
+# ⚠️ 必须用 COPY --chown，**不要** COPY 之后再 `chown -R`。
+#
+# 踩过的坑：`COPY` 一个 73MB 的二进制、下一层再 `chown -R sealdice:sealdice /app`，
+# chown 会把整个文件**复制进新层**，镜像里就存了两份二进制 ——
+# 实测未压缩 155MB（其中两份 73MB），压缩后 59.4MB；改成 --chown 后
+# 未压缩约 83MB、压缩约 31MB，少掉整整一个二进制的体积。
+# 用户/目录也已经在上一步建好并 chown 过，这里不需要再动。
+COPY --chown=sealdice:sealdice --from=core-builder /out/sealdice-core /app/sealdice-core
 
 USER sealdice
 
