@@ -48,10 +48,12 @@ var officialQQAtRegex = regexp.MustCompile(`(?:<qqbot-at-user\s+id="([^"]+)"\s*/
 const (
 	officialQQPassiveMsgLimit = 5
 	officialQQBatchPageSize   = 4
+	// officialQQAPITimeout 定义 OpenAPI 请求超时时间。富媒体通过 URL 上传时需等待服务端拉取完整文件，官方文档建议放宽超时。
+	officialQQAPITimeout = 60 * time.Second
 )
 
-// officialQQMediaCodeRe 匹配富媒体 CQ 码(图片/语音)，用于消息单元化。
-var officialQQMediaCodeRe = regexp.MustCompile(`^\[CQ:(image|record)[,\]]`)
+// officialQQMediaCodeRe 匹配富媒体 CQ 码(图片/语音/文件)，用于消息单元化。
+var officialQQMediaCodeRe = regexp.MustCompile(`^\[CQ:(image|record|file)[,\]]`)
 
 type officialQQMsgUnit struct {
 	text  string
@@ -118,6 +120,7 @@ type PlatformAdapterOfficialQQ struct {
 	CancelFunc     context.CancelFunc   `json:"-" yaml:"-"`
 	tokenSource    oauth2.TokenSource   `json:"-" yaml:"-"`
 	botID          string               `json:"-" yaml:"-"`
+
 	// apiDomainOverride 仅用于测试：覆盖 OpenAPI 域名（分片上传的请求由适配器自己发，
 	// 需要一个可注入的域名才能用本地 httptest 服务器端到端验证）。生产环境留空。
 	apiDomainOverride string `json:"-" yaml:"-"`
@@ -398,8 +401,9 @@ func (pa *PlatformAdapterOfficialQQ) failConnect() int {
 
 // warnNotConnected 记录"连接不可用，消息没发出去"。
 //
-// 存在的意义：连接失败后 pa.Api 为 nil，但端点的 Enable 还是 true，
-// 于是任何"照常发消息"的调用都会踩到 nil 接口 panic。
+// 存在的意义：failConnect() 之后 pa.Api 为 nil，但端点的 Enable 还是 true，
+// 于是任何"照常发消息"的调用都会踩到 nil 接口 panic —— 而 panic 会顺着调用栈
+// 把官方 SDK 的事件 goroutine / 整条 websocket 带走。
 // 与其逐个调用点补 val == nil，不如在发送入口统一挡住并留下日志。
 func (pa *PlatformAdapterOfficialQQ) warnNotConnected(action, target string) {
 	if pa == nil {
@@ -445,12 +449,11 @@ func (pa *PlatformAdapterOfficialQQ) Serve() int {
 
 // requestTimeout 返回官方 QQ OpenAPI 的单次请求超时。
 //
-// 这个超时作用在 SDK 的 resty client 上，覆盖全部请求（文本、富媒体上传、拉取机器人信息）。
-// 旧版本硬编码 3 秒，导致用 URL 发送语音/文件时经常报 "context deadline exceeded"——
-// 因为腾讯要先把整个文件下载完才返回响应头。现在默认 60 秒，并可通过
-// officialQQRequestTimeoutSec 配置调整。
+// 默认值直接用上游的 officialQQAPITimeout（60 秒），行为与主线一致；
+// fork 额外允许通过 officialQQRequestTimeoutSec 覆盖（管理界面可改），
+// 目的是现场排障时不必重新编译。
 func (pa *PlatformAdapterOfficialQQ) requestTimeout() time.Duration {
-	sec := DefaultConfig.OfficialQQRequestTimeoutSec
+	sec := int64(officialQQAPITimeout / time.Second)
 	if pa != nil && pa.EndPoint != nil && pa.EndPoint.Session != nil && pa.EndPoint.Session.Parent != nil {
 		if configured := pa.EndPoint.Session.Parent.Config.OfficialQQRequestTimeoutSec; configured > 0 {
 			sec = configured
@@ -489,6 +492,8 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 		return pa.failConnect()
 	}
 
+	// 超时优先取配置（fork 新增的 officialQQRequestTimeoutSec，管理界面可改），
+	// 没配就用上游的 officialQQAPITimeout —— 也就是默认行为与上游完全一致。
 	pa.Api = qqbot.NewOpenAPI(pa.AppID, pa.tokenSource).WithTimeout(pa.requestTimeout())
 
 	botInfo := probe
@@ -1977,9 +1982,7 @@ func (pa *PlatformAdapterOfficialQQ) sendQQGuildDirectMsgRaw(ctx *MsgContext, ro
 //
 // 而 dto.MediaInfo.FileInfo 是 []byte，装的是**解码后的字节**；后续发送接口
 // 序列化时 Go 会对 []byte 再做一次 base64，二者叠加正好是接口期望的形态。
-// 曾经误按「官方文档说原样透传」去掉这一步，结果发送开始报
-// 40034032「请求参数file_info无效」，图片与语音全部发不出去。
-// 因此这里必须解码，解码失败时回退为原文以免丢失内容。
+// 解不出来时按原样返回，避免把个别格式差异当成致命错误。
 func decodeOfficialQQFileInfo(fileInfo string) []byte {
 	decoded, err := base64.StdEncoding.DecodeString(fileInfo)
 	if err != nil {
@@ -1989,7 +1992,9 @@ func decodeOfficialQQFileInfo(fileInfo string) []byte {
 }
 
 func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOpenID string, file *message.FileElement, fileType int) (*dto.MediaInfo, error) {
-	// 与群聊保持一致：本地文件 + 开关打开时走分片上传，以保留文件名。
+	// 本地文件 + 开关打开时走分片上传：这是唯一能保留文件名的路径
+	// （file_data/base64 方式腾讯不支持自定义文件名，客户端会显示"未命名"）。
+	// 其余情况（远程 URL、开关关闭、文件过小）完全走上游原逻辑。
 	if pa.officialQQShouldUseChunkedUpload(file) {
 		return pa.uploadC2CMediaChunked(qctx, userOpenID, file, fileType)
 	}
@@ -2012,18 +2017,13 @@ func (pa *PlatformAdapterOfficialQQ) uploadC2CMedia(qctx context.Context, userOp
 	if err != nil {
 		return nil, err
 	}
-	// 与 uploadGroupMedia 保持一致：接口返回的 file_info 是 base64 文本，
-	// 先解码再交给后续发送接口；解不开时回退为原文。
-	// 单聊接口返回的是 []byte，转成 string 后按同一套逻辑处理。
 	return &dto.MediaInfo{
-		FileInfo: decodeOfficialQQFileInfo(string(media.FileInfo)),
+		FileInfo: media.FileInfo,
 	}, nil
 }
 
 func (pa *PlatformAdapterOfficialQQ) uploadGroupMedia(qctx context.Context, groupID string, file *message.FileElement, fileType int) (*dto.MediaInfo, error) {
-	// 本地文件 + 开关打开时走分片上传：这是唯一能保留文件名的路径
-	// （file_data/base64 方式腾讯不支持自定义文件名，客户端会显示"未命名"）。
-	// 其余情况（远程 URL、语音/图片依赖的 base64 路径、开关关闭）完全走原逻辑。
+	// 与单聊一致：本地文件 + 开关打开 + 体积达标时走分片上传，以保留文件名。
 	if pa.officialQQShouldUseChunkedUpload(file) {
 		return pa.uploadGroupMediaChunked(qctx, groupID, file, fileType)
 	}
@@ -2046,8 +2046,12 @@ func (pa *PlatformAdapterOfficialQQ) uploadGroupMedia(qctx context.Context, grou
 	if err != nil {
 		return nil, err
 	}
+	decodedFileInfo, decodeErr := base64.StdEncoding.DecodeString(media.FileInfo)
+	if decodeErr != nil {
+		decodedFileInfo = []byte(media.FileInfo)
+	}
 	return &dto.MediaInfo{
-		FileInfo: decodeOfficialQQFileInfo(media.FileInfo),
+		FileInfo: decodedFileInfo,
 	}, nil
 }
 
@@ -2130,7 +2134,6 @@ func (pa *PlatformAdapterOfficialQQ) sendC2CMsgRaw(ctx *MsgContext, rowMsgID, us
 			toCreate.MsgType = 7
 			toCreate.Media = media
 		case *message.FileElement:
-			// file_type=4：任意格式，发送后展示为文件卡片。
 			media, err := pa.uploadC2CMedia(qctx, userOpenID, e, 4)
 			if err != nil {
 				pa.EndPoint.Session.Parent.Logger.Error("official qq 发送单聊消息时，准备文件信息失败：" + err.Error())
@@ -2545,9 +2548,6 @@ func (pa *PlatformAdapterOfficialQQ) sendQQGroupMsgRaw(ctx *MsgContext, rowMsgID
 			toCreate.MsgType = 7
 			toCreate.Media = media
 		case *message.FileElement:
-			// file_type=4：任意格式，发送后展示为文件卡片。
-			// 注意 file_data(base64) 模式腾讯不支持自定义文件名，
-			// 想自定义文件名必须走 upload_prepare 分片上传。
 			media, err := pa.uploadGroupMedia(qctx, groupID, elem, 4)
 			if err != nil {
 				pa.EndPoint.Session.Parent.Logger.Error("official qq 发送群聊消息时，准备文件信息失败：" + err.Error())
@@ -2628,12 +2628,6 @@ func formatDiceIDOfficialQQChannel(guildID, channelID string) string {
 }
 
 const officialQQUserIDPrefix = "OpenQQ:"
-
-// officialQQGroupIDPrefix 官方 QQ 群 ID 前缀。
-// 群 ID 形如 "OpenQQ-Group:<UIN>-<GroupOpenID>"，注意它并不是
-// officialQQUserIDPrefix + "Group:"（那是 "OpenQQ:Group:"）而是 "OpenQQ-Group:"，
-// 所以必须单独定义，不能靠拼接推导。
-const officialQQGroupIDPrefix = "OpenQQ-Group:"
 
 func formatDiceIDOfficialQQ(uin string) string {
 	return fmt.Sprintf("%s%s", officialQQUserIDPrefix, uin)
@@ -2766,32 +2760,30 @@ func (pa *PlatformAdapterOfficialQQ) mustExtractTwoID(text string) (string, stri
 	return "", "", OpenQQUnknown
 }
 
-// SendFileToPerson 通过 [CQ:file] 发送文件。
-//
-// 官方 QQ 支持 file_type=4 的文件消息（发送后展示为文件卡片），这里不再返回
-// 「不支持」，而是构造 CQ 码交给正常的发送链路；CQ 解析会调用
-// FilepathToFileElement 做路径校验（只允许程序目录或系统临时目录内的文件）。
-//
-// 不直接返回错误提示是为了保持「发送文件」指令的原有语义：路径不合法时
-// CQ 解析层会跳过该消息并写日志，与其它平台的行为一致。
 func (pa *PlatformAdapterOfficialQQ) SendFileToPerson(ctx *MsgContext, uid string, path string, flag string) {
-	pa.SendToPerson(ctx, uid, officialQQFileCQCode(path), flag)
+	if path == "" {
+		pa.EndPoint.Session.Parent.Logger.Error("official qq 发送私聊文件失败：文件路径为空")
+		return
+	}
+	parsed, err := url.Parse(path)
+	if err == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) {
+		pa.SendToPerson(ctx, uid, fmt.Sprintf("[CQ:file,url=%s]", message.EscapeCQParam(path)), flag)
+	} else {
+		pa.SendToPerson(ctx, uid, fmt.Sprintf("[CQ:file,file=%s]", message.EscapeCQParam(path)), flag)
+	}
 }
 
-// SendFileToGroup 通过 [CQ:file] 发送文件。说明同 SendFileToPerson。
 func (pa *PlatformAdapterOfficialQQ) SendFileToGroup(ctx *MsgContext, uid string, path string, flag string) {
-	pa.SendToGroup(ctx, uid, officialQQFileCQCode(path), flag)
-}
-
-// officialQQFileCQCode 构造文件消息的 CQ 码。
-//
-// 注意不要用 message.SealCodeToCqCode 生成：它只认 [img:/图:/文本:/语音:/视频:]，
-// 不认识 file，直接写 CQ 码字符串更直接。
-//
-// 路径里可能包含逗号或方括号，必须按 CQ 码规范转义（&#44; / &#91; 等），
-// 否则参数会被截断成一个不存在的路径。
-func officialQQFileCQCode(path string) string {
-	return fmt.Sprintf("[CQ:file,file=%s]", message.EscapeCQParam(path))
+	if path == "" {
+		pa.EndPoint.Session.Parent.Logger.Error("official qq 发送群聊文件失败：文件路径为空")
+		return
+	}
+	parsed, err := url.Parse(path)
+	if err == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) {
+		pa.SendToGroup(ctx, uid, fmt.Sprintf("[CQ:file,url=%s]", message.EscapeCQParam(path)), flag)
+	} else {
+		pa.SendToGroup(ctx, uid, fmt.Sprintf("[CQ:file,file=%s]", message.EscapeCQParam(path)), flag)
+	}
 }
 
 func (pa *PlatformAdapterOfficialQQ) QuitGroup(_ *MsgContext, _ string) {
@@ -2894,10 +2886,6 @@ type C2CRichMediaMessage struct {
 	URL        string `json:"url,omitempty"`
 	SrvSendMsg bool   `json:"srv_send_msg"`
 	FileData   []byte `json:"file_data,omitempty"`
-	// FileName 文件名。分片上传合并时由本字段指定（file_data 方式腾讯不支持自定义文件名）。
-	FileName string `json:"file_name,omitempty"`
-	// UploadID 分片上传任务 ID，来自 upload_prepare。传入后走分片合并路径，url 可为空。
-	UploadID string `json:"upload_id,omitempty"`
 }
 
 func (msg *C2CRichMediaMessage) GetEventID() string {
@@ -2935,8 +2923,8 @@ func getElementBytes(elem *message.FileElement) ([]byte, error) {
 	if elem == nil {
 		return nil, errors.New("nil element")
 	}
-	// 限制文件大小在30MB以下
-	const maxLimit = 30 * 1024 * 1024
+	// 限制文件大小在50MB以下，与 message.maxFileSize 保持一致
+	const maxLimit = 50 * 1024 * 1024
 
 	readLimitBytes := func(r io.Reader) ([]byte, error) {
 		limitedReader := io.LimitReader(r, maxLimit+1)
@@ -2945,7 +2933,7 @@ func getElementBytes(elem *message.FileElement) ([]byte, error) {
 			return nil, err
 		}
 		if int64(len(data)) > maxLimit {
-			return nil, errors.New("file size exceeds the maximum limit of 30MB")
+			return nil, errors.New("file size exceeds the maximum limit of 50MB")
 		}
 		return data, nil
 	}

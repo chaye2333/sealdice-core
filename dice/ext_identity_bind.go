@@ -45,6 +45,10 @@ const (
 	// Sealdice 把私聊当成 "PG-<用户ID>" 的群来处理（见 GetPlayerInfoBySenderRaw），
 	// 属性/默认卡的「群维度」key 用的就是它，所以归一化时必须单独照顾。
 	identityBindPrivateGroupPrefix = "PG-"
+
+	// identityBindOfficialGroupIDPrefix 官方 QQ 群 ID 的前缀。
+	// 形如 OpenQQ-Group:<UIN>-<GroupOpenID>（对应上游 formatDiceIDOfficialQQGroupOpenID）。
+	identityBindOfficialGroupIDPrefix = "OpenQQ-Group:"
 )
 
 // identityBindAction 绑定类型。
@@ -376,8 +380,11 @@ func (s *identityBindStore) saveLocked(d *Dice) error {
 // 这里刻意**不看 EndPoint**，只看 ID 前缀：绑定查询必须能从两侧都能命中，
 // 如果依赖「当前端点是不是官方」，旧号（民间 bot）那一侧就永远查不到记录，
 // 双向共享也就无从谈起。
+//
+// 群前缀自己持有（而不是复用适配器里的常量）：上游的 formatDiceIDOfficialQQGroupOpenID
+// 是直接写 "OpenQQ-Group:%s-%s" 字面量的，没有导出常量，跟着它走容易在合并时断掉。
 func isOfficialQQID(id string) bool {
-	return strings.HasPrefix(id, officialQQUserIDPrefix) || strings.HasPrefix(id, officialQQGroupIDPrefix)
+	return strings.HasPrefix(id, officialQQUserIDPrefix) || strings.HasPrefix(id, identityBindOfficialGroupIDPrefix)
 }
 
 // identityBindRecordEndpointID 取一条记录在指定类型下的「新身份」ID。

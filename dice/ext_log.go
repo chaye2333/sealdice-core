@@ -756,19 +756,13 @@ func RegisterBuiltinExtLog(self *Dice) {
 						}
 						if len(rightEmails) > 0 {
 							emailMsg := DiceFormatTmpl(ctx, "日志:记录_导出_邮件附言")
-							// SendMailRow 返回 SMTP 错误时**不能**再回"已发送"：
-							// 临时导出文件在这段代码之后就被删掉了，用户既没收到邮件
-							// 也没法从别处拿回日志，等于日志白导出一场。
 							if err := dice.SendMailRow(
 								fmt.Sprintf("Seal 记录提取: %s", logFileNamePrefix),
 								rightEmails,
 								emailMsg,
 								[]string{logFile},
 							); err != nil {
-								dice.Logger.Errorf("导出日志的邮件发送失败: %v", err)
-								ReplyToSenderRaw(ctx, msg, fmt.Sprintf(
-									"邮件发送失败：%v\n请检查「邮箱通知」配置（发件邮箱 / 密钥 / SMTP），或改用不加邮箱参数的导出方式。",
-									err), "skip")
+								ReplyToSenderRaw(ctx, msg, "日志邮件发送失败，请联系骰主检查邮件配置和运行日志", "skip")
 								return CmdExecuteResult{Matched: true, Solved: true}
 							}
 							text := DiceFormatTmpl(ctx, "日志:记录_导出_邮箱发送前缀") + strings.Join(rightEmails, "\n")
