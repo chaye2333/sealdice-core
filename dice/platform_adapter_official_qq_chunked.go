@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -163,13 +164,7 @@ func (pa *PlatformAdapterOfficialQQ) officialQQShouldUseChunkedUpload(file *mess
 
 // officialQQLocalFileSize 取本地文件大小（分片上传的体积门槛用）。
 func officialQQLocalFileSize(file *message.FileElement) (int64, error) {
-	if file == nil {
-		return 0, errors.New("文件为空")
-	}
-	path := file.File
-	if path == "" {
-		path = strings.TrimPrefix(file.URL, "file://")
-	}
+	path := officialQQLocalFilePath(file)
 	if path == "" {
 		return 0, errors.New("文件路径为空")
 	}
@@ -178,6 +173,38 @@ func officialQQLocalFileSize(file *message.FileElement) (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+// officialQQLocalFilePath 取本地文件的**真实路径**。
+//
+// 坑在这里：海豹解析本地路径时 file.File 只放 **basename**，绝对路径放在
+// file.URL（file:// 形式，见 message.FilepathToFileElement / localPathToFileURL）。
+// 所以必须先解 URL —— 先看 File 的话拿到的是相对当前工作目录的一个文件名，
+// os.Stat 必然失败，于是体积门槛静默失效（开关一开，连几 KB 的图片都去走
+// 四步分片上传，与"小文件走 base64 更快"的设计正好相反）。
+//
+// 解析写法与 message.localPathFromResourceReference 保持一致：net/url 负责百分号
+// 解码，Windows 盘符要去掉 URL 路径的前导斜杠。
+func officialQQLocalFilePath(file *message.FileElement) string {
+	if file == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(file.URL)
+	if raw != "" && strings.HasPrefix(strings.ToLower(raw), "file://") {
+		if parsed, err := url.Parse(raw); err == nil && strings.EqualFold(parsed.Scheme, "file") {
+			localPath := parsed.Path
+			if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+				localPath = "//" + parsed.Host + parsed.Path
+			}
+			if runtime.GOOS == "windows" && len(localPath) >= 3 && localPath[0] == '/' && localPath[2] == ':' {
+				localPath = localPath[1:]
+			}
+			if localPath != "" {
+				return filepath.FromSlash(localPath)
+			}
+		}
+	}
+	return strings.TrimSpace(file.File)
 }
 
 // uploadGroupMediaChunked 用分片上传的方式上传群文件，可自定义文件名。

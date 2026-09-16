@@ -401,19 +401,32 @@ func identityBindMarkTargetAttempt(target string, now int64) {
 	globalIdentityBindTargetLast.Store(target, now)
 }
 
-// identityBindGlobalRateAllow 全局限频（滑动窗口换成固定窗口，够用且简单）。
-func identityBindGlobalRateAllow(now int64) bool {
+// identityBindGlobalRateExceeded 全局限频**只检查、不记账**（固定窗口，够用且简单）。
+//
+// 记账必须发生在"真的发出去了"那一刻（identityBindGlobalRateRecord），否则会出这种事：
+// 骰主的 SMTP 配错了，用户每 60 秒试一次，20 分钟就把这一小时的额度烧光，
+// 之后所有用户都被"发送过于频繁"挡住 —— 而实际上一条验证码都没发出去。
+func identityBindGlobalRateExceeded(now int64) bool {
+	globalIdentityBindRateMu.Lock()
+	defer globalIdentityBindRateMu.Unlock()
+	if now-globalIdentityBindRateWindowStart >= identityBindGlobalRateWindowSec {
+		// 窗口已过期：顺手重置，避免旧计数影响下一秒的判断
+		globalIdentityBindRateWindowStart = now
+		globalIdentityBindRateCount = 0
+		return false
+	}
+	return globalIdentityBindRateCount >= identityBindGlobalRateLimit
+}
+
+// identityBindGlobalRateRecord 记一次"验证码确实投递成功"。
+func identityBindGlobalRateRecord(now int64) {
 	globalIdentityBindRateMu.Lock()
 	defer globalIdentityBindRateMu.Unlock()
 	if now-globalIdentityBindRateWindowStart >= identityBindGlobalRateWindowSec {
 		globalIdentityBindRateWindowStart = now
 		globalIdentityBindRateCount = 0
 	}
-	if globalIdentityBindRateCount >= identityBindGlobalRateLimit {
-		return false
-	}
 	globalIdentityBindRateCount++
-	return true
 }
 
 // identityBindPruneTargetThrottle 清掉过期的限频记录，避免 SyncMap 无限增长。
@@ -790,7 +803,9 @@ func identityBindDeliverPendingCodes(d *Dice) {
 		if delivered {
 			// 真正发出去了才记限频额度：防的是"拿骰子当发信机"，
 			// 而不是"用户想重试"。
-			identityBindMarkTargetAttempt(identityBindChallengeTargetKey(c), time.Now().Unix())
+			nowSec := time.Now().Unix()
+			identityBindMarkTargetAttempt(identityBindChallengeTargetKey(c), nowSec)
+			identityBindGlobalRateRecord(nowSec)
 			identityBindFinishDelivery(item.key, identityBindCodeDelivered, c.Channel, sentTo, sentByEP, "", false, nil)
 			continue
 		}

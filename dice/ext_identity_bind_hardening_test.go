@@ -2,6 +2,7 @@
 package dice
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -412,5 +413,100 @@ func TestOfficialQQStatusBarHiddenWhenMarkdownOff(t *testing.T) {
 	ctx.Dice.Config.OfficialQQUseMarkdown = false
 	if bar := officialQQCharacterStatusBar(ctx); bar != "" {
 		t.Fatalf("markdown off must hide the status bar, got %q", bar)
+	}
+}
+
+// TestIdentityBindListAndDoctorRequireMaster list / doctor 会打印**全部**绑定记录
+// （新身份 ID + 旧 QQ 号），只能给骰主看。
+//
+// 回归：门槛原来是 50，而 fillPrivilege 给**任何私聊**都置 50（群管理员也是 50），
+// 于是随便找骰子私聊一句 `.bind list` 就能拿到所有人的绑定表。
+func TestIdentityBindListAndDoctorRequireMaster(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+
+	// 准备一条"别人"的绑定记录：它的旧 QQ 号就是不该泄露的东西
+	codeRecordFor(t, env, bindTestNewUserID, bindTestOldUserID)
+
+	orig := env.ctx.PrivilegeLevel
+	defer func() { env.ctx.PrivilegeLevel = orig }()
+
+	// 普通用户：私聊里权限就是 50，必须被拒且看不到任何号码
+	env.ctx.PrivilegeLevel = 50
+	for _, arg := range []string{"list", "doctor"} {
+		before := env.recorder.groupCount()
+		runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{arg}})
+		reply := env.recorder.waitGroupReply(t, before)
+		if !strings.Contains(reply, "骰主") {
+			t.Fatalf("非骰主的 .bind %s 应被拒，got %q", arg, reply)
+		}
+		if strings.Contains(reply, bindTestOldUserID) {
+			t.Fatalf("绑定信息泄露给了普通用户（.bind %s）: %q", arg, reply)
+		}
+	}
+
+	// 骰主（100）能看，而且能看到那条记录
+	env.ctx.PrivilegeLevel = 100
+	before := env.recorder.groupCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"list"}})
+	if got := env.recorder.waitGroupReply(t, before); !strings.Contains(got, bindTestOldUserID) {
+		t.Fatalf("骰主应能看到绑定列表，got %q", got)
+	}
+}
+
+// TestIdentityBindGlobalRateCountsOnlySuccessfulDelivery 全局额度只在真的发出去时记账。
+//
+// 回归：额度原来在"发起"那一刻就扣掉，于是骰主 SMTP 配错时，一个用户每 60 秒试一次，
+// 20 分钟就能把这一小时的 20 次额度烧光，之后所有人都被"发送过于频繁"挡住 ——
+// 而实际上一条验证码都没发出去。
+func TestIdentityBindGlobalRateCountsOnlySuccessfulDelivery(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+	enableMailConfig(env.d) // 邮箱通道"配置齐全"，否则根本不会尝试投递
+
+	// 只留邮箱一条通道：把民间 bot 置为掉线，免得私聊通道先把码发出去
+	codeOldEndPoint(t, env).State = StateConnectionFailed
+
+	prev := identityBindMailSender
+	t.Cleanup(func() { identityBindMailSender = prev })
+	identityBindMailSender = func(d *Dice, subject string, to []string, body string) error {
+		return errors.New("SMTP 服务器拒绝连接")
+	}
+
+	rate := func() int {
+		globalIdentityBindRateMu.Lock()
+		defer globalIdentityBindRateMu.Unlock()
+		return globalIdentityBindRateCount
+	}
+	resetRate := func() {
+		globalIdentityBindRateMu.Lock()
+		globalIdentityBindRateCount = 0
+		globalIdentityBindRateWindowStart = 0
+		globalIdentityBindRateMu.Unlock()
+	}
+
+	// ① 发起一次、但两条通道都发不出去：额度不能被扣
+	resetRate()
+	before := env.recorder.groupCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
+	reply := env.recorder.waitGroupReply(t, before)
+	if got := rate(); got != 0 {
+		t.Fatalf("投递失败不该占用全局额度，got %d", got)
+	}
+	if strings.Contains(reply, "已寄到") {
+		t.Fatalf("投递失败却回复\"已寄到\": %q", reply)
+	}
+
+	// ② 同样的发起、这次真的寄出去了：记一次
+	identityBindMailSender = func(d *Dice, subject string, to []string, body string) error { return nil }
+	resetRate()
+	before = env.recorder.groupCount()
+	runIdentityBindCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"2001"}})
+	reply = env.recorder.waitGroupReply(t, before)
+	if got := rate(); got != 1 {
+		t.Fatalf("投递成功应记一次全局额度，got %d", got)
+	}
+	if !strings.Contains(reply, "已寄到") {
+		t.Fatalf("投递成功应回执\"已寄到\"，got %q", reply)
 	}
 }

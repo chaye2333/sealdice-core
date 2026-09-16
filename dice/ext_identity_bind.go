@@ -947,9 +947,15 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 		return solved
 	}
 
+	// list / doctor 会打印**全部**绑定记录（新身份 ID + 旧 QQ 号），属于全实例信息，
+	// 所以只给骰主看。
+	//
+	// 注意门槛不能用 50：fillPrivilege 给**任何私聊**都置 50（群管理员也是 50），
+	// 用 50 等于"随便找骰子私聊一句就能拿到所有人的绑定表"。骰主本身是 100
+	// （MasterCheck），改 100 不影响骰主在群里或私聊里使用。
 	if cmdArgs.IsArgEqual(1, "list") {
-		if ctx.PrivilegeLevel < 50 {
-			ReplyToSender(ctx, msg, "你不具备管理权限")
+		if ctx.PrivilegeLevel < 100 {
+			ReplyToSender(ctx, msg, "只有骰主能查看全部绑定记录。")
 			return solved
 		}
 		ReplyToSender(ctx, msg, identityBindFormatList(d))
@@ -957,8 +963,8 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 	}
 
 	if cmdArgs.IsArgEqual(1, "doctor") || cmdArgs.IsArgEqual(1, "检查") {
-		if ctx.PrivilegeLevel < 50 {
-			ReplyToSender(ctx, msg, "你不具备管理权限")
+		if ctx.PrivilegeLevel < 100 {
+			ReplyToSender(ctx, msg, "只有骰主能运行绑定自检。")
 			return solved
 		}
 		ReplyToSender(ctx, msg, identityBindDoctorReport(d, ctx))
@@ -1123,7 +1129,7 @@ func identityBindStartCodeChallenge(
 			identityBindFormatDuration(remaining)))
 		return solved
 	}
-	if !identityBindGlobalRateAllow(nowSec) {
+	if identityBindGlobalRateExceeded(nowSec) {
 		ReplyToSender(ctx, msg, "短时间内验证码发送过于频繁，请稍后再试。")
 		return solved
 	}
@@ -1133,8 +1139,10 @@ func identityBindStartCodeChallenge(
 		ReplyToSender(ctx, msg, "生成验证码失败，请稍后重试或联系骰主。")
 		return solved
 	}
-	// 限频额度在**真正投递成功**时才记账（见 identityBindDeliverPendingCodes）：
-	// 两条通道都不通的时候什么都没发出去，没理由把用户挡在门外。
+	// 这里只检查"还有没有额度"。额度在**真正投递成功**时才记账
+	// （见 identityBindDeliverPendingCodes 里的 identityBindGlobalRateRecord）：
+	// 两条通道都不通的时候什么都没发出去，没理由把用户挡在门外，
+	// 更不该让一个人把这一小时的额度烧光、把其他人都锁在外面。
 
 	now := time.Now()
 	challenge := &identityBindCodeChallenge{
