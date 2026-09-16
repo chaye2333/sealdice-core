@@ -2741,7 +2741,7 @@ func (d *Dice) registerCoreCommands() {
 	identityBindHelpText := identityBindUserHelp()
 	cmdBind := &CmdItemInfo{
 		Name:      "bind",
-		ShortHelp: ".bind <旧QQ号> <旧群号> // 把官方机器人身份绑定到迁移前的 QQ 号\n.unbind // 解除绑定",
+		ShortHelp: ".bind <旧QQ号> // 绑定个人身份，角色卡/属性与旧 QQ 号共用\n.group bind <旧群号> // 绑定当前群，日志与旧群共用\n.unbind // 解除绑定",
 		Help:      "身份绑定指令:\n" + identityBindHelpText,
 		Solve:     runIdentityBindCommand,
 	}
@@ -2760,7 +2760,7 @@ func (d *Dice) registerCoreCommands() {
 	groupBindHelpText := identityBindLogHelp()
 	cmdGroupBind := &CmdItemInfo{
 		Name:      "groupbind",
-		ShortHelp: ".group bind <旧群号> // 把当前群绑定到旧群\n.group unbind // 解除群绑定",
+		ShortHelp: ".group bind <旧群号> // 绑定当前群，日志与旧群共用\n.bind <旧QQ号> // 绑定个人身份，角色卡/属性与旧号共用\n.group unbind // 解除群绑定",
 		Help:      "群绑定指令:\n" + groupBindHelpText,
 		Solve:     runIdentityBindGroupCommand,
 	}

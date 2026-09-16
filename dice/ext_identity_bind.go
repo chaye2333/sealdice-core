@@ -843,17 +843,29 @@ func identityBindMarkAttempt(epID, userID string, action identityBindAction) {
 // ---------- .bind 指令 ----------
 
 func identityBindUserHelp() string {
-	return `.bind <旧QQ号> [旧群号] // 绑定你的个人身份，之后你的角色卡/属性与旧 QQ 号共用同一份
+	return `.bind <旧QQ号> // 绑定你的个人身份：角色卡/属性 与旧 QQ 号共用同一份
+.group bind <旧群号> // 绑定当前群：日志 与旧群共用同一份（需要管理权限）
+
+以上两条一起做，官方侧与旧侧才完全互通；只做一条会有半边读不到。
+
+【其余指令】
+.bind status // 查看自己的绑定
 .bind cancel // 取消进行中的绑定验证
 .bind reset // 同上，顺便清掉群绑定的验证
-.bind status // 查看自己的绑定
+.unbind // 解除自己的个人绑定
 .bind list // 查看所有绑定记录，需要管理权限
 .bind doctor // 自检所有绑定，需要管理权限
-.unbind // 解除自己的个人绑定
+
+.group status // 查看当前群的绑定
+.group cancel // 取消当前群进行中的验证
+.group unbind // 解除当前群的绑定（需要管理权限）
+.group doctor // 自检所有绑定（需要管理权限）
 
 【骰主专用】
 .bind pending // 列出所有待处理的绑定申请
-.bind approve <旧QQ号> // 人工确认一条申请（跳过验证码）
+.bind approve <旧QQ号> // 人工确认一条个人绑定申请（跳过验证码）
+.group pending // 同上，列出待处理申请
+.group approve <旧群号> // 人工确认一条群绑定申请（跳过验证码）
 
 【怎么验证身份】
 发起绑定后，会把一个验证码送到"只有那个旧 QQ 号的主人才能拿到"的地方，
@@ -862,22 +874,13 @@ func identityBindUserHelp() string {
   · 私聊通道：民间 bot（OneBot 连接）私聊发给旧 QQ 号，用那个号回复民间 bot。
 只有真正持有那个旧 QQ 号的人能拿到验证码，所以别人抢不走你的绑定。
 
+群绑定同理，验证码发给**旧群的邀请人**；拿到码的人在官方 bot 这边回复也能过。
+
 如果两条通道都发不出去（民间 bot 不在线、邮箱也没配），申请会转成人工：
-骰主会收到私聊通知，可以用 .bind approve <旧QQ号> 核实后确认。
+骰主会收到私聊通知，用 .bind approve / .group approve 核实后确认。
 
 个人绑定与群无关、全局生效：在任何官方群里绑定一次即可。
-旧群号只是可选参数（.bind <旧QQ号> <旧群号>），填了也只会用于展示。
-
-注意：个人绑定只管「用户维度」。要让整个群的数据（含日志）也共通，
-还需要再做一次群绑定：
-
-.group bind <旧群号> // 发起群绑定，需要管理权限
-.group pending // 列出待处理申请（骰主）
-.group approve <旧群号> // 人工确认（骰主）
-.group unbind
-.group status
-.group doctor // 自检所有绑定
-.group cancel`
+旧群号只是可选参数（.bind <旧QQ号> <旧群号>），填了只用于展示。`
 }
 
 // runIdentityBindCommand 处理 .bind / .unbind。
@@ -1468,17 +1471,23 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 // ---------- .log bind / .log unbind ----------
 
 func identityBindLogHelp() string {
-	return `【群绑定】把当前官方群指向迁移前的旧群。绑定后本群与旧群共用同一份群维度数据：
-日志状态（.log on / new / off）与日志内容都记在同一份记录里，两边都能读到。
+	return `.group bind <旧群号> // 绑定当前群到旧群：日志 与旧群共用同一份（需要管理权限）
+.bind <旧QQ号> // 绑定个人身份：角色卡/属性 与旧号共用同一份
 
-.group bind <旧群号> // 发起群绑定（需要管理权限）
+以上两条一起做才完全互通：群绑定管「群维度」（日志），个人绑定管「用户维度」（角色卡/属性）。
+
+【其余指令】
+.group status // 查看当前群的绑定
+.group cancel // 取消进行中的绑定验证（同时清掉个人绑定的验证）
+.group unbind // 解除当前群的绑定（需要管理权限）
+.group doctor // 自检所有绑定（需要管理权限）
 .group pending // 列出待处理的绑定申请（仅 master）
 .group approve <旧群号> // 骰主人工确认，跳过验证码（仅 master）
 .group bindforce <旧群号> // 同上，等价写法；区别是它绑"骰主当前所在的群"
-.group cancel // 取消进行中的绑定验证（同时清掉个人绑定的验证）
-.group unbind // 解除当前群的绑定（需要管理权限）
-.group status // 查看当前群的绑定
-.group doctor // 自检所有绑定（需要管理权限）
+
+【群绑定在做什么】
+把当前官方群指向迁移前的旧群。绑定后本群与旧群共用同一份群维度数据：
+日志状态（.log on / new / off）与日志内容都记在同一份记录里，两边都能读到。
 
 【怎么验证】
 发起后会把验证码送到旧群的**邀请人**（把骰子拉进旧群的那个人）手里，
@@ -1493,8 +1502,6 @@ func identityBindLogHelp() string {
 ——**请先自行核实对方身份**。
 
 说明：
-* 群绑定负责「群维度」，个人身份绑定（.bind）负责「用户维度」。
-  两个都做，官方身份与旧号才会完全共用同一套数据；只做一个会有半边读不到。
 * 数据不做任何搬移，规范位置固定在旧群 / 旧号名下，.unbind 后立刻恢复原状。
 * 兼容写法：.log bind / .log unbind / .log bindstatus 与上面等价。`
 }
