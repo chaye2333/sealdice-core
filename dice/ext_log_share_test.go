@@ -2,6 +2,7 @@
 package dice
 
 import (
+	"strings"
 	"testing"
 
 	"sealdice-core/dice/service"
@@ -39,14 +40,7 @@ func runLog(t *testing.T, env *bindTestEnv, ctx *MsgContext, args ...string) {
 }
 
 func joinArgs(args []string) string {
-	out := ""
-	for i, a := range args {
-		if i > 0 {
-			out += " "
-		}
-		out += a
-	}
-	return out
+	return strings.Join(args, " ")
 }
 
 func containsAny(s string, subs ...string) bool {

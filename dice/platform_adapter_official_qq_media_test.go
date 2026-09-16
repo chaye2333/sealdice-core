@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,8 +48,14 @@ func (s *officialQQStubAPI) PostC2CMessage(_ context.Context, _ string, msg dto.
 	if s.c2cFileErr != nil {
 		return nil, s.c2cFileErr
 	}
-	// dto.Message.FileInfo 是 []byte，适配器直接透传给 dto.MediaInfo
-	return &dto.Message{FileInfo: []byte(s.lastFileInfo)}, nil
+	// dto.Message.FileInfo 是 []byte，而 JSON 里的 file_info 是 base64 文本 ——
+	// encoding/json 在反序列化 []byte 时**已经自动解码**了，所以这里要模拟真实 SDK
+	// 的行为：先解 base64 再交给适配器（适配器是原样透传的）。
+	decoded, err := base64.StdEncoding.DecodeString(s.lastFileInfo)
+	if err != nil {
+		decoded = []byte(s.lastFileInfo)
+	}
+	return &dto.Message{FileInfo: decoded}, nil
 }
 
 // newOfficialQQMediaTestAdapter 构造带最小依赖的适配器：
@@ -168,7 +175,12 @@ func TestOfficialQQUploadGroupMediaFallsBackWhenFileInfoNotBase64(t *testing.T) 
 	}
 }
 
-func TestOfficialQQUploadC2CMediaDecodesFileInfo(t *testing.T) {
+// TestOfficialQQUploadC2CMediaPassesFileInfoThrough 单聊的 file_info 是**原样透传**。
+//
+// 原因：dto.Message.FileInfo 是 []byte，而接口返回的 JSON 里 file_info 是 base64 文本，
+// encoding/json 反序列化 []byte 时已经自动解码过了，再解一次就成了双重解码。
+// （群聊那边 dto.Media.FileInfo 是 string，才需要显式解一次。）
+func TestOfficialQQUploadC2CMediaPassesFileInfoThrough(t *testing.T) {
 	raw := []byte{0xDE, 0xAD, 0xBE, 0xEF}
 	encoded := base64.StdEncoding.EncodeToString(raw)
 
@@ -181,22 +193,33 @@ func TestOfficialQQUploadC2CMediaDecodesFileInfo(t *testing.T) {
 		t.Fatalf("uploadC2CMedia: %v", err)
 	}
 	if !bytes.Equal(media.FileInfo, raw) {
-		t.Fatalf("file_info should be base64-decoded before sending: want %v, got %v", raw, media.FileInfo)
+		t.Fatalf("c2c file_info should be passed through as-is: want %v, got %v", raw, media.FileInfo)
 	}
 	if len(stub.c2cFileTypes) != 1 || stub.c2cFileTypes[0] != 4 {
 		t.Fatalf("expected file_type=4 to be uploaded, got %v", stub.c2cFileTypes)
 	}
 }
 
-// ---------- ②-3 文件 CQ 码的构造与转义 ----------
+// ---------- ②-3 文件 CQ 码的格式与转义 ----------
+//
+// 具体的拼装由**上游**实现（SendFileToPerson / SendFileToGroup：本地路径用 file=、
+// http(s) 链接用 url=），这里锁定的是格式契约本身 —— 格式写错会让 CQ 解析把参数截断成
+// 一个不存在的路径，所以转义必须闭环。合并上游 #1819 时删掉了 fork 自己的拼装函数。
 
 func TestOfficialQQFileCQCodeEscapesPath(t *testing.T) {
-	if got := officialQQFileCQCode("/tmp/a.txt"); got != "[CQ:file,file=/tmp/a.txt]" {
+	format := func(path string, isURL bool) string {
+		if isURL {
+			return fmt.Sprintf("[CQ:file,url=%s]", message.EscapeCQParam(path))
+		}
+		return fmt.Sprintf("[CQ:file,file=%s]", message.EscapeCQParam(path))
+	}
+
+	if got := format("/tmp/a.txt", false); got != "[CQ:file,file=/tmp/a.txt]" {
 		t.Fatalf("unexpected cq code %q", got)
 	}
 
 	// 含逗号的路径必须转义，否则 CQ 参数会被截断成一个不存在的路径
-	got := officialQQFileCQCode("/tmp/a,b.txt")
+	got := format("/tmp/a,b.txt", false)
 	if strings.Contains(got, "a,b") {
 		t.Fatalf("comma in path must be escaped, got %q", got)
 	}
@@ -205,7 +228,7 @@ func TestOfficialQQFileCQCodeEscapesPath(t *testing.T) {
 	}
 
 	// 含方括号的路径同理
-	got = officialQQFileCQCode("/tmp/a[1].txt")
+	got = format("/tmp/a[1].txt", false)
 	if strings.Contains(got, "[1]") {
 		t.Fatalf("brackets in path must be escaped, got %q", got)
 	}
@@ -219,7 +242,7 @@ func TestOfficialQQFileCQCodeRoundTripsThroughParser(t *testing.T) {
 		t.Fatalf("write temp file: %v", err)
 	}
 
-	elems := message.ConvertStringMessage(officialQQFileCQCode(path))
+	elems := message.ConvertStringMessage(fmt.Sprintf("[CQ:file,file=%s]", message.EscapeCQParam(path)))
 	if len(elems) != 1 {
 		t.Fatalf("expected 1 element, got %d", len(elems))
 	}
@@ -236,6 +259,9 @@ func TestOfficialQQFileCQCodeRoundTripsThroughParser(t *testing.T) {
 func TestOfficialQQSendFileNoLongerReportsUnsupported(t *testing.T) {
 	// 直接检查实现：SendFileToPerson / SendFileToGroup 必须构造文件 CQ 码，
 	// 而不是再回「但不支持」的提示。
+	//
+	// 注意：拼装方式随上游 #1819 变了 —— 本地路径用 file=、http(s) 链接用 url=，
+	// 所以这里断言的是这两种形态，而不是 fork 早期那个 officialQQFileCQCode 辅助函数。
 	src, err := os.ReadFile("platform_adapter_official_qq.go")
 	if err != nil {
 		t.Fatalf("read adapter source: %v", err)
@@ -256,8 +282,11 @@ func TestOfficialQQSendFileNoLongerReportsUnsupported(t *testing.T) {
 		if strings.Contains(rest, "但不支持") {
 			t.Fatalf("%s still reports file sending as unsupported:\n%s", fn, rest)
 		}
-		if !strings.Contains(rest, "officialQQFileCQCode") {
-			t.Fatalf("%s should build a file CQ code:\n%s", fn, rest)
+		if !strings.Contains(rest, "[CQ:file,file=") || !strings.Contains(rest, "[CQ:file,url=") {
+			t.Fatalf("%s should build both file= and url= CQ codes:\n%s", fn, rest)
+		}
+		if !strings.Contains(rest, "message.EscapeCQParam") {
+			t.Fatalf("%s must escape the path (otherwise CQ parsing truncates it):\n%s", fn, rest)
 		}
 	}
 }
@@ -271,15 +300,7 @@ func TestOfficialQQGroupAndC2CHandleFileElement(t *testing.T) {
 	}
 	body := string(src)
 
-	for name, marker := range map[string]string{
-		"群聊": "case *message.FileElement:\n\t\t\t// file_type=4",
-		"单聊": "case *message.FileElement:\n\t\t\t// file_type=4",
-	} {
-		if !strings.Contains(body, marker) {
-			t.Fatalf("%s 的 FileElement 分支缺失", name)
-		}
-	}
-	// 群聊与单聊各应有一处
+	// 群聊与单聊各应有一处 FileElement 分支
 	if got := strings.Count(body, "case *message.FileElement:"); got != 2 {
 		t.Fatalf("expected exactly 2 FileElement branches (group + c2c), got %d", got)
 	}
