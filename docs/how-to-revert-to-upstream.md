@@ -133,7 +133,7 @@ imageRenderWidth
 
 （出站掩码与帮助文档图片化的说明见
 [`docs/helpdoc-image-and-censor-mask.md`](./helpdoc-image-and-censor-mask.md)；
-渲染后端 `tools/helpdoc-render` 是独立进程，回退时停掉即可，海豹本体不受影响。）
+渲染后端 `helpdoc-render` 是独立进程，回退时停掉即可，海豹本体不受影响。）
 
 （`identityBindKeepQuiz` / `identityBindQuestionCount` / `identityBindFailCooldownSec`
 / `identityBindUseEmailCode` 这几个键已经从 fork 里删掉了；如果你手上还有残留，

@@ -87,9 +87,9 @@ imageRenderTimeoutSec: 15         # 0 视为 15
 imageRenderWidth: 820             # 0 视为 820
 ```
 
-**渲染后端**：`tools/helpdoc-render`（纯 Go、无浏览器、常驻内存十几 MB），
+**渲染后端**：`helpdoc-render`（纯 Go、无浏览器、常驻内存十几 MB），
 接口契约、编译与部署（systemd / docker compose）、字体安装都在
-[`tools/helpdoc-render/README.md`](../tools/helpdoc-render/README.md)。后端挂了只是不发图，
+[`helpdoc-render/README.md`](../helpdoc-render/README.md)。后端挂了只是不发图，
 不会影响海豹本体。
 
 **不足 / 风险（务必读完）**：

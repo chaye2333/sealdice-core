@@ -94,7 +94,7 @@ func helpConfigOf(d *Dice) *HelpConfig {
 	return d.Parent.Help.Config
 }
 
-// helpImageRenderRequest 渲染后端的请求体（契约见 tools/helpdoc-render/README.md）。
+// helpImageRenderRequest 渲染后端的请求体（契约见 helpdoc-render/README.md）。
 type helpImageRenderRequest struct {
 	Text   string `json:"text"`
 	Format string `json:"format"`

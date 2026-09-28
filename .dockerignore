@@ -27,3 +27,6 @@ sealdice-ui
 # 文档
 docs
 *.md
+
+# 帮助文档渲染后端：独立 Go module（自带 go.mod），不属于主程序构建，也不进镜像
+helpdoc-render

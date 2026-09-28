@@ -81,7 +81,7 @@ $\scriptsize\textcolor{#E5484D}{\text{马丁·弗卢吉尔 SAN69 HP12/12 DEX65}}
 | 改动 | 说明 |
 |---|---|
 | 出站敏感词打码 | `censorMaskEnable`：骰子**要发出的文本**命中敏感词时替换成**等长**口口（4 字词 → 口口口口），而不是整条拦截。**帮助文档只打码不计数**（否则骰主会被自己的文档拉黑），**其它出站打码同时照常计违规**。CQ 码/海豹码内部不动 |
-| 帮助文档图片化 | 帮助正文**命中敏感词**或**超过设定字数**时，改发一张现场渲染的图片（`imageRender*` 七个键）。一次性不缓存、失败自动回退文本。需要自部署渲染后端：`tools/helpdoc-render`（纯 Go、无浏览器、内存十几 MB） |
+| 帮助文档图片化 | 帮助正文**命中敏感词**或**超过设定字数**时，改发一张现场渲染的图片（`imageRender*` 七个键）。一次性不缓存、失败自动回退文本。需要自部署渲染后端：`helpdoc-render`（纯 Go、无浏览器、内存十几 MB） |
 
 详见 [`docs/helpdoc-image-and-censor-mask.md`](docs/helpdoc-image-and-censor-mask.md)。
 
@@ -172,7 +172,7 @@ powershell -File scripts\build-windows.ps1
   —— **回退到官方主线**的操作手册：数据可见性、`serve.yaml` 兼容性、改动清单
 - [`docs/helpdoc-image-and-censor-mask.md`](docs/helpdoc-image-and-censor-mask.md)
   —— 出站敏感词打码与帮助文档图片化：计数规则、自测清单、不足与合规风险
-- [`tools/helpdoc-render/README.md`](tools/helpdoc-render/README.md)
+- [`helpdoc-render/README.md`](helpdoc-render/README.md)
   —— 帮助文档图片化的自部署渲染后端（接口契约、字体、systemd / docker 部署）
 
 回退只需把镜像换成官方版本，`data/` 不用动；但绑定期间产生的数据全部记在**旧身份**名下，
