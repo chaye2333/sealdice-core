@@ -38,7 +38,7 @@ FROM node:22-alpine AS ui-builder
 # 改 UI 之后必须同步更新这里的 hash（见下面的「改 UI 流程」）。
 # CI 里还有一步烟雾测试会校验新 UI 的关键选项确实在镜像里，漏改会被拦下。
 ARG UI_REPO="chaye2333/sealdice-ui"
-ARG UI_REF="bd0a9b21a2f0d66c9c0309aff8bb2a530e20475f"
+ARG UI_REF="72cb7f243b8fb8cac3e1b20b42602389ad00f9b6"
 # 前端包管理器版本。仓库里的 pnpm-workspace.yaml 用 allowBuilds 控制哪些依赖允许跑
 # postinstall 脚本（esbuild / @tailwindcss/oxide 必须为 true，否则 vite 无法运行），
 # 这是 pnpm 10 的写法，所以固定用 pnpm 10。
@@ -119,7 +119,7 @@ FROM alpine:3.20
 # 记录前端来源，方便上线后核对镜像里到底是哪份 UI。
 # 注意这里的默认值必须和阶段 1 保持一致，否则 label 会误导排查。
 ARG UI_REPO="chaye2333/sealdice-ui"
-ARG UI_REF="bd0a9b21a2f0d66c9c0309aff8bb2a530e20475f"
+ARG UI_REF="72cb7f243b8fb8cac3e1b20b42602389ad00f9b6"
 LABEL org.opencontainers.image.source="https://github.com/${UI_REPO}" \
       sealdice.ui.repo="${UI_REPO}" \
       sealdice.ui.ref="${UI_REF}"

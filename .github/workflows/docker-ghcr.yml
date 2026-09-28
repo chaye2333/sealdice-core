@@ -178,8 +178,10 @@ jobs:
 
           echo "--- checking the bundled UI really contains our settings ---"
 
-          # 应当存在的：本 fork 新增的绑定设置
-          for NEEDLE in identityBindPreferEmailCode identityBindCodeExpireSec logMultiBotDedupWindowSec; do
+          # 应当存在的：本 fork 新增的设置项
+          # （2026-09-21 起加入拦截页的「出站掩码」与帮助文档页的「图片渲染」）
+          for NEEDLE in identityBindPreferEmailCode identityBindCodeExpireSec logMultiBotDedupWindowSec \
+                        maskEnable imageRenderEnable imageRenderUrl; do
             if ! grep -q "$NEEDLE" /tmp/all_assets.js; then
               fail "镜像里的 UI 缺少设置项 $NEEDLE —— 前端可能是旧缓存版本（检查 Dockerfile 的 UI_REF 是否匹配 sealdice-ui fork 的最新 commit）"
             fi
