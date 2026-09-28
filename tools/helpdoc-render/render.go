@@ -173,9 +173,9 @@ func (r *Renderer) runeWidth(size float64, ch rune) float64 {
 		cache = make(map[rune]float64)
 		r.rw[size] = cache
 	}
-	if w, ok := cache[ch]; ok {
+	if cached, found := cache[ch]; found {
 		r.mu.Unlock()
-		return w
+		return cached
 	}
 	f, ok := r.faces[size]
 	r.mu.Unlock()

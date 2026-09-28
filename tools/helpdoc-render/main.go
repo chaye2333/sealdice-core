@@ -21,11 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -55,7 +55,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("helpdoc-render 0.1.0")
+		log.Printf("helpdoc-render 0.1.0")
 		return
 	}
 
@@ -95,8 +95,8 @@ func main() {
 			return
 		}
 		var req renderRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "请求体不是合法 JSON: "+err.Error(), http.StatusBadRequest)
+		if decodeErr := json.Unmarshal(body, &req); decodeErr != nil {
+			http.Error(w, "请求体不是合法 JSON: "+decodeErr.Error(), http.StatusBadRequest)
 			return
 		}
 		if strings.TrimSpace(req.Text) == "" {
@@ -122,7 +122,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "no-store") // 明确告诉任何中间层：别缓存
-		w.Header().Set("Content-Length", fmt.Sprint(len(png)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(png)))
 		_, _ = w.Write(png)
 	})
 
