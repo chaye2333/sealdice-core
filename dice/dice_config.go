@@ -399,6 +399,20 @@ type CensorConfig struct {
 	CensorCaseSensitive  bool                   `json:"censorCaseSensitive"  yaml:"censorCaseSensitive"`  // 敏感词大小写敏感
 	CensorMatchPinyin    bool                   `json:"censorMatchPinyin"    yaml:"censorMatchPinyin"`    // 敏感词匹配拼音
 	CensorFilterRegexStr string                 `json:"censorFilterRegexStr" yaml:"censorFilterRegexStr"` // 敏感词过滤字符正则
+	// CensorMaskEnable 出站掩码：骰子**要发出的文本**命中敏感词时，把命中的词替换成等长掩码，
+	// 而不是把整条消息换成"完全拦截"文案。
+	//
+	// 计数规则（UI 的拦截词页面里也写了同样一段说明，改这里记得一起改）：
+	//   · 帮助文档（.help / .find 等）走**纯匹配**掩码 —— 不写命中记录、不计数、不拉黑。
+	//     否则骰主会被自己写的帮助文档拉黑，而且帮助文档本来就是骰主主动公开的内容。
+	//   · 其它出站（掷骰结果、自定义回复、合并转发等）在掩码的**同时照常计数**，
+	//     并按各等级阈值触发警告 / 拉黑 —— 风控强度与关闭掩码时一致。
+	//
+	// 只影响骰子的输出：用户自己发进来的敏感词平台早就看到了，掩码救不了。
+	CensorMaskEnable bool `json:"censorMaskEnable" yaml:"censorMaskEnable"`
+	// CensorMaskChar 掩码字符，默认「口」。命中词有几个字符就重复几次（等长替换），
+	// 例如 4 字词 → 口口口口。
+	CensorMaskChar string `json:"censorMaskChar" yaml:"censorMaskChar"`
 }
 
 type DirtyConfig struct {

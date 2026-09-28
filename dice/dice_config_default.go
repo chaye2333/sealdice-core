@@ -133,6 +133,9 @@ var DefaultConfig = Config{
 		CensorCaseSensitive:  false,
 		CensorMatchPinyin:    false,
 		CensorFilterRegexStr: "",
+		// 出站掩码默认关闭：行为与上游完全一致，骰主在 UI 里打开才生效。
+		CensorMaskEnable: false,
+		CensorMaskChar:   "口",
 	},
 	PublicDiceConfig{
 		Enable: false,

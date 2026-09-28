@@ -585,7 +585,7 @@ func (d *Dice) registerCoreCommands() {
 				if err == nil {
 					text.Content = ctx.TranslateSplit(text.Content)
 					content := d.Parent.Help.GetContent(text, 0)
-					ReplyToSender(ctx, msg, fmt.Sprintf("词条: %s:%s\n%s", text.PackageName, text.Title, content))
+					replyHelpText(ctx, msg, fmt.Sprintf("词条: %s:%s\n%s", text.PackageName, text.Title, content))
 				} else {
 					ReplyToSender(ctx, msg, "未发现对应ID的词条")
 				}
@@ -696,7 +696,7 @@ func (d *Dice) registerCoreCommands() {
 			// pgStart是下标闭左边界, 加1以获得序号; pgEnd是下标开右边界, 无需调整就是最后一条的序号
 			rplPageNum := fmt.Sprintf("共%d条结果, 当前显示第%d页(第%d条 到 第%d条)\n", total, page, pgStart+1, pgEnd)
 			rplPageHint := "使用\".find <词条> --page=<页码> 查看更多结果\n"
-			ReplyToSender(ctx, msg, prefix+groupStr+bestResult+rplCurPage+rplDetailHint+rplPageNum+rplPageHint)
+			replyHelpText(ctx, msg, prefix+groupStr+bestResult+rplCurPage+rplDetailHint+rplPageNum+rplPageHint)
 			return CmdExecuteResult{Matched: true, Solved: true}
 		},
 	}
@@ -791,7 +791,7 @@ func (d *Dice) registerCoreCommands() {
 						RelatedExt: nil,
 					}
 					content := d.Parent.Help.GetContent(a, 0)
-					ReplyToSender(ctx, msg, fmt.Sprintf("%s:%s\n%s", a.PackageName, a.Title, content))
+					replyHelpText(ctx, msg, fmt.Sprintf("%s:%s\n%s", a.PackageName, a.Title, content))
 				} else {
 					ReplyToSender(ctx, msg, "未找到搜索结果")
 				}

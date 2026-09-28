@@ -146,7 +146,20 @@ func TryReplyToSenderMergedForward(ctx *MsgContext, msg *Message, title string, 
 					msg.Sender.Nickname,
 					msg.Sender.UserID,
 				)
-				contents[i] = DiceFormatTmpl(ctx, "核心:拦截_完全拦截_发出的消息")
+				// 打开出站掩码时不再整条替换：下面统一打码，
+				// 而违规计数已经在上面这行 CensorMsg 里记过了。
+				if !ctx.Dice.Config.CensorMaskEnable {
+					contents[i] = DiceFormatTmpl(ctx, "核心:拦截_完全拦截_发出的消息")
+				}
+			}
+		}
+	}
+	// 出站掩码：与检测模式无关，开关打开就生效（纯匹配，不重复计数）
+	if ctx.Dice.Config.CensorMaskEnable {
+		for i, content := range contents {
+			if masked, replaced := ctx.Dice.CensorMaskOutgoing(content); len(replaced) > 0 {
+				ctx.Dice.Logger.Infof("出站掩码（合并转发）：命中「%s」已替换", strings.Join(replaced, "|"))
+				contents[i] = masked
 			}
 		}
 	}
@@ -464,7 +477,18 @@ func ReplyGroupRaw(ctx *MsgContext, msg *Message, text string, flag string) {
 					msg.Sender.Nickname,
 					msg.Sender.UserID,
 				)
-				text = DiceFormatTmpl(ctx, "核心:拦截_完全拦截_发出的消息")
+				// 打开出站掩码时不再整条替换成"完全拦截"文案：
+				// 违规计数已经在上面记过，这里只把命中词打码（见下方统一掩码）。
+				if !d.Config.CensorMaskEnable {
+					text = DiceFormatTmpl(ctx, "核心:拦截_完全拦截_发出的消息")
+				}
+			}
+		}
+		// 出站掩码：与检测模式无关，开关打开就生效（纯匹配，不重复计数）
+		if d.Config.CensorMaskEnable {
+			if masked, replaced := d.CensorMaskOutgoing(text); len(replaced) > 0 {
+				d.Logger.Infof("出站掩码（群%s）：命中「%s」已替换", msg.GroupID, strings.Join(replaced, "|"))
+				text = masked
 			}
 		}
 	}
@@ -538,7 +562,17 @@ func ReplyPersonRaw(ctx *MsgContext, msg *Message, text string, flag string) {
 					msg.Sender.Nickname,
 					msg.Sender.UserID,
 				)
-				text = DiceFormatTmpl(ctx, "核心:拦截_完全拦截_发出的消息")
+				// 打开出站掩码时不再整条替换：违规计数已记过，这里只打码（见下方统一掩码）
+				if !d.Config.CensorMaskEnable {
+					text = DiceFormatTmpl(ctx, "核心:拦截_完全拦截_发出的消息")
+				}
+			}
+		}
+		// 出站掩码：与检测模式无关，开关打开就生效（纯匹配，不重复计数）
+		if d.Config.CensorMaskEnable {
+			if masked, replaced := d.CensorMaskOutgoing(text); len(replaced) > 0 {
+				d.Logger.Infof("出站掩码（私聊 %s）：命中「%s」已替换", msg.Sender.UserID, strings.Join(replaced, "|"))
+				text = masked
 			}
 		}
 	}

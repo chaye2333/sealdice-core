@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/golang-module/carbon"
 	"github.com/labstack/echo/v4"
@@ -101,6 +102,8 @@ func censorGetConfig(c echo.Context) error {
 		"caseSensitive": config.CensorCaseSensitive,
 		"matchPinyin":   config.CensorMatchPinyin,
 		"filterRegex":   config.CensorFilterRegexStr,
+		"maskEnable":    config.CensorMaskEnable,
+		"maskChar":      config.CensorMaskChar,
 		"levelConfig":   levelConfig,
 	})
 }
@@ -194,6 +197,24 @@ func censorSetConfig(c echo.Context) error {
 		matchPinyin, ok := val.(bool)
 		if ok {
 			config.CensorMatchPinyin = matchPinyin
+		}
+	}
+	if val, ok := jsonMap["maskEnable"]; ok {
+		maskEnable, ok := val.(bool)
+		if ok {
+			config.CensorMaskEnable = maskEnable
+		}
+	}
+	if val, ok := jsonMap["maskChar"]; ok {
+		if maskChar, ok := val.(string); ok {
+			maskChar = strings.TrimSpace(maskChar)
+			if maskChar == "" {
+				maskChar = dice.DefaultCensorMaskChar
+			}
+			if utf8.RuneCountInString(maskChar) > 4 {
+				return Error(&c, "掩码字符最多 4 个字符", Response{})
+			}
+			config.CensorMaskChar = maskChar
 		}
 	}
 	if val, ok := jsonMap["levelConfig"]; ok { //nolint:nestif

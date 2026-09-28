@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"sealdice-core/dice/censor"
 	"sealdice-core/dice/service"
@@ -219,11 +221,10 @@ func (d *Dice) CensorMsg(mctx *MsgContext, msg *Message, checkContent string, se
 
 	hit = true
 	hitWords = checkResult.CurSensitiveWords
-	// TODO: 替换掉敏感词（先暂时不提供）
-	// placeholder := DiceFormatTmpl(mctx, "核心:拦截_替换内容")
-	// for _, word := range checkResult.CurSensitiveWords {
-	// 	newContent = strings.ReplaceAll(newContent, word, placeholder)
-	// }
+	// 注意：出站掩码**不在**这里做。本函数负责"写命中记录 + 计数 + 阈值 + 警告/拉黑"，
+	// 而掩码走的是另一条纯匹配路径（见 CensorMaskOutgoing）。调用方先调用本函数计数、
+	// 再对文本调掩码 —— 这样"掩码的同时照常计违规"才成立；
+	// 帮助文档只调掩码、不经过本函数，所以不会计数、不会把骰主自己拉黑。
 
 	if mctx.Censored {
 		return hit, hitWords, needToTerminate, newContent
@@ -346,6 +347,124 @@ func (d *Dice) CensorMsg(mctx *MsgContext, msg *Message, checkContent string, se
 		}
 	}
 	return hit, hitWords, needToTerminate, newContent
+}
+
+// ---------- 出站掩码 ----------
+
+// DefaultCensorMaskChar 掩码字符的默认值。
+// 命中词有几个字符就重复几次：4 字词 → 「口口口口」。
+const DefaultCensorMaskChar = "口"
+
+// censorMaskProtectedRe 出站掩码必须跳过的结构：CQ 码与海豹码。
+//
+// 命中词落在这两种结构内部时**不能**替换 —— 改坏一个 CQ 参数轻则图片/文件发不出去，
+// 重则把整个 CQ 码截断成一段乱文本发给用户。
+var censorMaskProtectedRe = regexp.MustCompile(`\[CQ:.+?]|\[(?:img|图|文本|text|语音|voice|视频|video):.+?]`)
+
+// CensorHitWords 纯匹配一遍文本，返回命中的敏感词（按长词优先排序）。
+//
+// 与 CensorManager.Check 的区别：**不写命中记录、不计数、不碰怒气值/拉黑**，
+// 也不受 CensorMaskEnable 影响 —— 需要"只是想看看有没有命中"的地方（出站掩码、
+// 帮助文档决定要不要转图片）都用它。
+func (d *Dice) CensorHitWords(text string) []string {
+	if d == nil || text == "" {
+		return nil
+	}
+	cm := d.CensorManager
+	if cm == nil || cm.Censor == nil || cm.IsLoading {
+		return nil
+	}
+	res := cm.Censor.Check(text)
+	if res.HighestLevel <= censor.Ignore || len(res.SensitiveWords) == 0 {
+		return nil
+	}
+	words := make([]string, 0, len(res.SensitiveWords))
+	for word := range res.SensitiveWords {
+		words = append(words, word)
+	}
+	// 长词优先：先替换「天主教」再替换「天主」，否则短词把长词切碎、掩码长度也算错。
+	sort.Slice(words, func(i, j int) bool {
+		if len(words[i]) != len(words[j]) {
+			return len(words[i]) > len(words[j])
+		}
+		return words[i] < words[j]
+	})
+	return words
+}
+
+// CensorMaskOutgoing 给**骰子要发出的文本**打码：命中的敏感词替换成等长掩码。
+//
+// 这是"纯匹配"路径：直接问引擎 cm.Censor.Check，不经过 CensorManager.Check，
+// 因此**不写命中记录、不计数、不影响怒气值与拉黑判定**。
+//
+// 两条调用路径的计数规则（UI 的拦截词页面里写了同样一段说明）：
+//   - 帮助文档（.help / .find）只调本函数 → 掩码但不计数。否则骰主会被自己写的
+//     帮助文档拉黑，而帮助文档本来就是骰主主动公开的内容。
+//   - 其它出站（掷骰结果 / 自定义回复 / 合并转发）在调用本函数**之前**会先走
+//     CensorMsg 计数与阈值处理 → 掩码的同时照常计违规，风控强度不变。
+//
+// 返回掩码后的文本，以及**实际被替换掉**的词（供日志排查）。
+// 注意：命中来自拼音匹配 / 过滤字符正则时，词表里的原词可能并不字面出现在文本里，
+// 那种情况下不会替换（但依然会计数），属于已知限制。
+func (d *Dice) CensorMaskOutgoing(text string) (string, []string) {
+	if d == nil || !d.Config.CensorMaskEnable || text == "" {
+		return text, nil
+	}
+	words := d.CensorHitWords(text)
+	if len(words) == 0 {
+		return text, nil
+	}
+	return censorMaskWords(text, words, d.Config.CensorMaskChar)
+}
+
+// censorMaskWords 把 words 逐个替换成等长掩码，只处理**非 CQ / 海豹码**的片段。
+//
+// 这里自己把词按长度降序排一遍（不改调用方的切片）：先替换「天主教」再替换「天主」，
+// 否则短词先把长词切碎，掩码长度也就跟着算错了。
+func censorMaskWords(text string, words []string, maskChar string) (string, []string) {
+	maskChar = strings.TrimSpace(maskChar)
+	if maskChar == "" {
+		maskChar = DefaultCensorMaskChar
+	}
+
+	sorted := make([]string, len(words))
+	copy(sorted, words)
+	sort.Slice(sorted, func(i, j int) bool {
+		if len(sorted[i]) != len(sorted[j]) {
+			return len(sorted[i]) > len(sorted[j])
+		}
+		return sorted[i] < sorted[j]
+	})
+
+	segments := censorMaskProtectedRe.Split(text, -1)
+	protected := censorMaskProtectedRe.FindAllString(text, -1)
+
+	var replaced []string
+	for i := range segments {
+		segment := segments[i]
+		for _, word := range sorted {
+			if word == "" || !strings.Contains(segment, word) {
+				continue
+			}
+			mask := strings.Repeat(maskChar, utf8.RuneCountInString(word))
+			segment = strings.ReplaceAll(segment, word, mask)
+			replaced = append(replaced, word)
+		}
+		segments[i] = segment
+	}
+	if len(replaced) == 0 {
+		return text, nil
+	}
+
+	var b strings.Builder
+	b.Grow(len(text))
+	for i, segment := range segments {
+		b.WriteString(segment)
+		if i < len(protected) {
+			b.WriteString(protected[i])
+		}
+	}
+	return b.String(), replaced
 }
 
 func (cm *CensorManager) DeleteCensorWordFiles(keys []string) {

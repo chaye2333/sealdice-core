@@ -85,6 +85,56 @@ const helpContentParserVersion = 1
 
 type HelpConfig struct {
 	Aliases map[string][]string `json:"aliases" yaml:"aliases"`
+
+	// ---------- 以下为 fork 新增：帮助文档图片化 ----------
+	//
+	// 背景：TRPG 帮助文档里可能有敏感词，或者一堆正常词组合起来像宗教传播。
+	// 命中敏感词、或正文过长时，改发一张**现场渲染**的图片（不缓存、一次性），
+	// 由骰主自部署的渲染后端出图（见 tools/helpdoc-render）。
+	//
+	// 只影响 .help / .find 这类**帮助文档正文**的发送，不碰掷骰结果与其它回复。
+	// 渲染失败一律回退成文本，不会把帮助功能整条挂掉。
+
+	// ImageRenderEnable 总开关。默认关闭：行为与上游一致。
+	ImageRenderEnable bool `json:"imageRenderEnable" yaml:"imageRenderEnable"`
+	// ImageRenderMinLength 正文超过这个**字符数**（rune 计，中文按 1 字）就转图片。
+	// 0 = 不按长度触发（只在命中敏感词时转）。
+	ImageRenderMinLength int `json:"imageRenderMinLength" yaml:"imageRenderMinLength"`
+	// ImageRenderMaskInImage 转图片时，图片里是否也把敏感词打码。
+	// 默认 false = 图片里保留原文 —— 命中敏感词还转图片，本来就是为了让内容送达；
+	// 打开它则图片里也是「口口」（更保守，但内容会缺一块）。
+	ImageRenderMaskInImage bool `json:"imageRenderMaskInImage" yaml:"imageRenderMaskInImage"`
+	// ImageRenderURL 自部署渲染后端地址，例如 http://127.0.0.1:3212/render
+	ImageRenderURL string `json:"imageRenderUrl" yaml:"imageRenderUrl"`
+	// ImageRenderToken 后端鉴权令牌（可选，以 Authorization: Bearer 发送）
+	ImageRenderToken string `json:"imageRenderToken" yaml:"imageRenderToken"`
+	// ImageRenderTimeoutSec 单次渲染超时（秒），0 视为 15
+	ImageRenderTimeoutSec int `json:"imageRenderTimeoutSec" yaml:"imageRenderTimeoutSec"`
+	// ImageRenderWidth 图片宽度（像素），0 视为 820
+	ImageRenderWidth int `json:"imageRenderWidth" yaml:"imageRenderWidth"`
+}
+
+// 帮助文档图片渲染的默认值（yaml 里没写这些键时用）。
+const (
+	helpImageRenderDefaultTimeoutSec = 15
+	helpImageRenderDefaultWidth      = 820
+)
+
+// imageRenderTimeout 渲染超时。
+func (c *HelpConfig) imageRenderTimeout() time.Duration {
+	sec := helpImageRenderDefaultTimeoutSec
+	if c != nil && c.ImageRenderTimeoutSec > 0 {
+		sec = c.ImageRenderTimeoutSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// imageRenderWidth 出图宽度。
+func (c *HelpConfig) imageRenderWidth() int {
+	if c != nil && c.ImageRenderWidth > 0 {
+		return c.ImageRenderWidth
+	}
+	return helpImageRenderDefaultWidth
 }
 
 type HelpDocFormat struct {
