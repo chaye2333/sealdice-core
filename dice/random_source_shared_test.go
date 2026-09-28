@@ -141,7 +141,7 @@ func TestGlobalRandSourceReportGetText(t *testing.T) {
 	))
 
 	got := globalRandSource.ReportGetText(20)
-	for mode, raw := range map[DiceRandomMode]uint64{
+	for mode, raw := range map[DiceRandomMode]uint64{ //nolint:exhaustive // 这里只挑三个代表模式做断言，未列出的模式走的是另一条分支，不需要在此覆盖
 		DiceRandomModePCG:  0,
 		DiceRandomModeNIST: 2,
 		DiceRandomModeCRNG: 3,
