@@ -144,6 +144,7 @@ func onReady() {
 		case <-mOpen.ClickedCh:
 			_ = exec.Command(`cmd`, `/c`, `start`, `http://localhost:`+getTrayPort()).Start()
 		case <-mOpenExeDir.ClickedCh:
+			//nolint:gosec // 参数为程序自身所在目录，不含外部输入，gosec G702 在此为误报
 			_ = exec.Command(`cmd`, `/c`, `explorer`, filepath.Dir(os.Args[0])).Start()
 		case <-mQuit.ClickedCh:
 			systray.Quit()
@@ -269,6 +270,7 @@ func showMsgBox(title string, message string) {
 }
 
 func executeWin(name string, arg ...string) *exec.Cmd {
+	//nolint:gosec // 调用方为托盘内的固定命令，参数不含外部输入，gosec G702 在此为误报
 	cmd := exec.Command(name, arg...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
