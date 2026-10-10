@@ -2842,6 +2842,14 @@ func (pa *PlatformAdapterOfficialQQ) handleWebhookCallback(w http.ResponseWriter
 		return
 	}
 
+	// 回调地址验证：开放平台配置回调地址时会先下发 op=13，必须回 plain_token + signature，
+	// 否则平台判定回调地址不可用，无法切换到 Webhook 接入方式。
+	// 签名体为 event_ts + plain_token（与事件推送的 timestamp + body 不同），签名算法为 Ed25519。
+	if payload.OPCode == dto.HTTPCallbackValidation {
+		pa.writeWebhookValidationResponse(w, &payload, body)
+		return
+	}
+
 	// 保存原始消息数据，ParseAndHandle 使用
 	payload.RawMessage = body
 	payload.Session = &dto.Session{AppID: pa.AppID}
@@ -2867,6 +2875,55 @@ func (pa *PlatformAdapterOfficialQQ) handleWebhookCallback(w http.ResponseWriter
 			log.Errorf("official qq webhook: 事件处理失败: %v", err)
 		}
 	}()
+}
+
+// writeWebhookValidationResponse 处理 op=13 回调地址验证，按开放平台要求回 plain_token 与签名。
+// 文档：https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html
+// 签名算法复用 botgo 的 signature.Generate：seed 由 AppSecret 反复 Repeat 到 32 字节，
+// 签名体为 event_ts + plain_token，输出 hex 编码的 Ed25519 签名。
+func (pa *PlatformAdapterOfficialQQ) writeWebhookValidationResponse(w http.ResponseWriter, payload *dto.WSPayload, body []byte) {
+	log := pa.EndPoint.Session.Parent.Logger
+
+	data, _ := payload.Data.(map[string]interface{})
+	plainToken, plainTokenOK := data["plain_token"].(string)
+	eventTs, eventTsOK := data["event_ts"].(string)
+	if !plainTokenOK || !eventTsOK || plainToken == "" || eventTs == "" {
+		log.Errorf("official qq webhook: 回调验证数据无效 %s", string(body))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// signature.Generate 依据 X-Signature-Timestamp 拼接签名体，这里用 event_ts 覆盖。
+	header := http.Header{}
+	header.Set(signature.HeaderTimestamp, eventTs)
+	sig, err := signature.Generate(pa.AppSecret, header, []byte(plainToken))
+	if err != nil {
+		log.Error("official qq webhook: 生成回调验证签名失败: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 按开放平台要求只返回 plain_token 与 signature 两个字段。
+	response, err := json.Marshal(struct {
+		PlainToken string `json:"plain_token"`
+		Signature  string `json:"signature"`
+	}{
+		PlainToken: plainToken,
+		Signature:  sig,
+	})
+	if err != nil {
+		log.Error("official qq webhook: 序列化回调验证响应失败: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(response); err != nil {
+		log.Error("official qq webhook: 回调验证响应写入失败: ", err)
+		return
+	}
+	log.Info("official qq webhook: 回调地址验证响应已发送")
 }
 
 // verifyWebhookSignature 验证Webhook签名

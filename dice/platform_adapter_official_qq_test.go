@@ -2,17 +2,22 @@
 package dice
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/sealdice/botgo/dto"
+	qqsignature "github.com/sealdice/botgo/interaction/signature"
 	ds "github.com/sealdice/dicescript"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
@@ -1153,5 +1158,136 @@ func assertOfficialQQMigrationMissing(t *testing.T, db interface {
 	}
 	if count != 0 {
 		t.Fatalf("query %q %v returned %d rows, want 0", query, args, count)
+	}
+}
+
+const officialQQWebhookTestSecret = "DG5g3B4j9X2KOErG"
+
+// newOfficialQQWebhookTestAdapter 构造一个只用于 HTTP 回调处理的最小适配器。
+func newOfficialQQWebhookTestAdapter(appSecret string) *PlatformAdapterOfficialQQ {
+	pa := &PlatformAdapterOfficialQQ{
+		AppID:     "11111111",
+		AppSecret: appSecret,
+	}
+	pa.EndPoint = &EndPointInfo{
+		EndPointInfoBase: EndPointInfoBase{
+			ID:           "official-qq-webhook-test",
+			Platform:     "QQ",
+			ProtocolType: "official",
+			Session: &IMSession{
+				Parent: &Dice{
+					BaseConfig: BaseConfig{Name: "webhook-test"},
+					Logger:     sealdiceLogger.M(),
+				},
+			},
+		},
+		Adapter: pa,
+	}
+	return pa
+}
+
+// newOfficialQQWebhookRequest 按开放平台的规则对回调请求签名。
+// 签名体为 timestamp + body，seed 由 secret 反复 Repeat 到 32 字节。
+func newOfficialQQWebhookRequest(t *testing.T, secret string, body []byte, timestamp string) *http.Request {
+	t.Helper()
+
+	seed := secret
+	for len(seed) < ed25519.SeedSize {
+		seed += secret
+	}
+	_, privateKey, err := ed25519.GenerateKey(bytes.NewReader([]byte(seed[:ed25519.SeedSize])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(privateKey, append([]byte(timestamp), body...))
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
+	req.Header.Set(qqsignature.HeaderSig, hex.EncodeToString(signature))
+	req.Header.Set(qqsignature.HeaderTimestamp, timestamp)
+	return req
+}
+
+// TestOfficialQQWebhookValidationRespondsWithSignedPlainToken 覆盖 op=13 回调地址验证：
+// 开放平台要求返回 plain_token 与 signature，签名体为 event_ts + plain_token。
+// 缺少这一步时平台会判定回调地址不可用，Webhook 接入方式无法启用。
+func TestOfficialQQWebhookValidationRespondsWithSignedPlainToken(t *testing.T) {
+	t.Parallel()
+
+	const (
+		plainToken = "Arq0D5A61EgUu4OxUvOp"
+		eventTs    = "1725442341"
+	)
+	pa := newOfficialQQWebhookTestAdapter(officialQQWebhookTestSecret)
+	body := []byte(`{"d":{"plain_token":"` + plainToken + `","event_ts":"` + eventTs + `"},"op":13}`)
+	req := newOfficialQQWebhookRequest(t, officialQQWebhookTestSecret, body, eventTs)
+	rec := httptest.NewRecorder()
+
+	pa.handleWebhookCallback(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		PlainToken string `json:"plain_token"`
+		Signature  string `json:"signature"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal validation response: %v, body = %s", err, rec.Body.String())
+	}
+	if response.PlainToken != plainToken {
+		t.Fatalf("plain_token = %q, want %q", response.PlainToken, plainToken)
+	}
+	if response.Signature == "" {
+		t.Fatal("signature is empty")
+	}
+
+	// 独立验签：发布密钥由 AppSecret 推导，签名体必须是 event_ts + plain_token。
+	seed := officialQQWebhookTestSecret
+	for len(seed) < ed25519.SeedSize {
+		seed += officialQQWebhookTestSecret
+	}
+	publicKey, _, err := ed25519.GenerateKey(bytes.NewReader([]byte(seed[:ed25519.SeedSize])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := hex.DecodeString(response.Signature)
+	if err != nil {
+		t.Fatalf("signature is not hex: %v", err)
+	}
+	if !ed25519.Verify(publicKey, []byte(eventTs+plainToken), sig) {
+		t.Fatal("signature does not verify against event_ts + plain_token")
+	}
+}
+
+// TestOfficialQQWebhookValidationRejectsBadSignature 保证验证回包不会在验签失败时泄漏。
+func TestOfficialQQWebhookValidationRejectsBadSignature(t *testing.T) {
+	t.Parallel()
+
+	pa := newOfficialQQWebhookTestAdapter(officialQQWebhookTestSecret)
+	body := []byte(`{"d":{"plain_token":"abc","event_ts":"1725442341"},"op":13}`)
+	req := newOfficialQQWebhookRequest(t, "a-different-secret", body, "1725442341")
+	rec := httptest.NewRecorder()
+
+	pa.handleWebhookCallback(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOfficialQQWebhookValidationRejectsMalformedData 覆盖 op=13 但缺少验证字段的情况，
+// 此时必须明确报错，不能返回一个平台无法识别的回包。
+func TestOfficialQQWebhookValidationRejectsMalformedData(t *testing.T) {
+	t.Parallel()
+
+	pa := newOfficialQQWebhookTestAdapter(officialQQWebhookTestSecret)
+	body := []byte(`{"d":{"plain_token":"abc"},"op":13}`)
+	req := newOfficialQQWebhookRequest(t, officialQQWebhookTestSecret, body, "1725442341")
+	rec := httptest.NewRecorder()
+
+	pa.handleWebhookCallback(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
 	}
 }
