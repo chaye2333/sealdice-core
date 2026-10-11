@@ -754,6 +754,16 @@ func preprocessHelpText(text string) string {
 			out = append(out, "- "+rest)
 			continue
 		}
+		// search-result rows like "[94][COC]..." become list items
+		if isBracketNumberedList(trimmed) {
+			out = append(out, "- "+trimmed)
+			continue
+		}
+		// short label lines ending with ':' get bolded so they read as sub-headings
+		if isLabelLine(trimmed) {
+			out = append(out, "**"+trimmed+"**")
+			continue
+		}
 		// One huge unbroken paragraph: split at sentence ends and leave a blank
 		// line between chunks so the paragraph spacing kicks in.
 		for i, chunk := range splitLongParagraph(trimmed) {
@@ -889,10 +899,10 @@ var palettes = map[string]palette{
 	},
 	// paper: warm off-white, easier on the eyes for long help docs
 	"paper": {
-		bg: color.RGBA{0xF6, 0xEF, 0xE0, 0xFF}, fg: color.RGBA{0x2B, 0x26, 0x20, 0xFF},
+		bg: color.RGBA{0xFA, 0xF7, 0xF0, 0xFF}, fg: color.RGBA{0x2B, 0x26, 0x20, 0xFF},
 		muted: color.RGBA{0x7A, 0x70, 0x63, 0xFF}, codeBg: color.RGBA{0xF0, 0xEA, 0xDD, 0xFF},
 		rule: color.RGBA{0xE0, 0xD8, 0xC8, 0xFF}, quote: color.RGBA{0xC9, 0xBC, 0xA4, 0xFF},
-		link: color.RGBA{0x8A, 0x50, 0x18, 0xFF}, headBg: color.RGBA{0xE9, 0xDF, 0xC6, 0xFF},
+		link: color.RGBA{0x8A, 0x50, 0x18, 0xFF}, headBg: color.RGBA{0xF3, 0xEC, 0xDD, 0xFF},
 		accent: color.RGBA{0xC0, 0x7A, 0x2B, 0xFF},
 	},
 	"dark": {
@@ -916,7 +926,7 @@ func applyTheme(name string) string {
 	colHeadBg, colAccent = p.headBg, p.accent
 	switch name {
 	case "paper":
-		colBorder = color.RGBA{R: 0xE0, G: 0xD5, B: 0xBC, A: 0xFF}
+		colBorder = color.RGBA{}
 	case "dark":
 		colBorder = color.RGBA{R: 0x33, G: 0x39, B: 0x41, A: 0xFF}
 	default:
@@ -927,3 +937,27 @@ func applyTheme(name string) string {
 
 // Themes lists the available theme names (for -help).
 func Themes() string { return "light, paper, dark" }
+
+// isBracketNumberedList matches search-result rows such as "[94][COC]xxx 匹配度 32.92".
+func isBracketNumberedList(s string) bool {
+	r := []rune(s)
+	if len(r) < 4 || r[0] != '[' {
+		return false
+	}
+	i := 1
+	for i < len(r) && r[i] >= '0' && r[i] <= '9' {
+		i++
+	}
+	return i > 1 && i < len(r) && r[i] == ']'
+}
+
+// isLabelLine matches short label lines ending with ':' (e.g. "本页结果:"), which read
+// much better when bolded than when left in the body text weight.
+func isLabelLine(s string) bool {
+	r := []rune(s)
+	if len(r) < 2 || len(r) > 30 {
+		return false
+	}
+	last := r[len(r)-1]
+	return last == ':' || last == '\uFF1A'
+}
