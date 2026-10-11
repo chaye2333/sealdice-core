@@ -760,7 +760,7 @@ func preprocessHelpText(text string) string {
 			continue
 		}
 		// short label lines ending with ':' get bolded so they read as sub-headings
-		if isLabelLine(trimmed) {
+		if isLabelLine(trimmed) || hasLabelPrefix(trimmed) {
 			out = append(out, "**"+trimmed+"**")
 			continue
 		}
@@ -771,6 +771,25 @@ func preprocessHelpText(text string) string {
 				out = append(out, "")
 			}
 			out = append(out, chunk)
+		}
+	}
+	// Promote title-ish lines to real headings. In a .find result the first two
+	// content lines are "[全文搜索]最先结果:" and "词条: … (30%)" — bolding alone is not
+	// enough to tell them apart from the body, so they get the heading treatment
+	// (band + accent bar + larger font). Only the first few lines are considered.
+	const titleLineBudget = 3
+	seen := 0
+	for i, line := range out {
+		t := strings.TrimSpace(line)
+		if t == "" || t == "---" || strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if seen < titleLineBudget && hasLabelPrefix(strings.Trim(t, "*")) {
+			out[i] = "## " + strings.Trim(t, "*")
+		}
+		seen++
+		if seen >= titleLineBudget {
+			break
 		}
 	}
 	return strings.Join(out, "\n")
@@ -960,4 +979,19 @@ func isLabelLine(s string) bool {
 	}
 	last := r[len(r)-1]
 	return last == ':' || last == '\uFF1A'
+}
+
+// hasLabelPrefix reports whether the line starts with a short label followed by a
+// colon, e.g. "词条: COC技能查询;急救 (30%)". Such lines are titles/labels, not body
+// text, and bolding them (or promoting the first one to a heading) makes a help doc
+// scannable. The prefix is capped at 12 runes so ordinary sentences that merely
+// contain a colon are not affected.
+func hasLabelPrefix(s string) bool {
+	r := []rune(s)
+	for i := 1; i <= 12 && i < len(r); i++ {
+		if r[i] == ':' || r[i] == '\uFF1A' {
+			return true
+		}
+	}
+	return false
 }
