@@ -234,7 +234,7 @@ func (r *Renderer) RenderPNG(text string, width int) ([]byte, error) {
 	}
 
 	contentWidth := float64(width) - r.opts.Padding*2
-	lines := r.layout(text, contentWidth)
+	lines := r.layout(preprocessHelpText(text), contentWidth)
 
 	total := r.opts.Padding * 2
 	for _, ln := range lines {
@@ -653,6 +653,13 @@ func (r *Renderer) wrapSpans(spans []span, scale, maxWidth float64) [][]span {
 
 	for _, item := range runes {
 		w := r.runeWidth(size, item.ch)
+		// CJK line-start rule: never begin a line with closing punctuation (u3002uFF0CuFF1BuFF1Au3001...).
+		// Let the previous line run a character or two long instead.
+		if len(cur) > 0 && width+w > maxWidth && isClosingPunct(item.ch) {
+			cur = append(cur, item)
+			width += w
+			continue
+		}
 		if width+w > maxWidth && len(cur) > 0 {
 			if lastBreak > 0 && lastBreak < len(cur) {
 				rest := append([]styledRune(nil), cur[lastBreak:]...)
@@ -699,4 +706,143 @@ func isCJKBreakable(ch rune) bool {
 		unicode.Is(unicode.Hangul, ch) ||
 		(ch >= 0x3000 && ch <= 0x303F) || // CJK 标点
 		(ch >= 0xFF00 && ch <= 0xFFEF) // 全角
+}
+
+// ---------- plain-text helpdoc preprocessing ----------
+//
+// Real sealdice help docs are usually plain text, not Markdown: 【heading】 lines,
+// ==== separators, middle-dot bullets, and one huge unbroken paragraph. Rewriting
+// them into the Markdown subset layout() already understands is far safer than
+// teaching the layout engine every dialect.
+func preprocessHelpText(text string) string {
+	src := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(src))
+	for _, line := range src {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			out = append(out, "")
+			continue
+		case isPlainRule(trimmed):
+			out = append(out, "---")
+			continue
+		case isPlainHeading(trimmed):
+			out = append(out, "### "+strings.Trim(trimmed, "\u3010\u3011\u3016\u3017"))
+			continue
+		}
+		if rest, ok := plainListBody(trimmed); ok {
+			out = append(out, "- "+rest)
+			continue
+		}
+		// One huge unbroken paragraph: split at sentence ends and leave a blank
+		// line between chunks so the paragraph spacing kicks in.
+		for i, chunk := range splitLongParagraph(trimmed) {
+			if i > 0 {
+				out = append(out, "")
+			}
+			out = append(out, chunk)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// isPlainRule reports whether the line is a plain-text separator such as ==== or ━━━.
+func isPlainRule(s string) bool {
+	if utf8.RuneCountInString(s) < 3 {
+		return false
+	}
+	for _, ch := range []rune{'=', '\u2501', '\u2500'} {
+		if strings.Trim(s, string(ch)) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isPlainHeading reports whether the whole line is wrapped in 【】 or 〖〗.
+func isPlainHeading(s string) bool {
+	r := []rune(s)
+	if len(r) < 3 {
+		return false
+	}
+	first, last := r[0], r[len(r)-1]
+	return (first == '\u3010' && last == '\u3011') || (first == '\u3016' && last == '\u3017')
+}
+
+// plainListBody strips a plain-text list marker (·, ・, •, ◆, ◇, ※, ①-⑩, "1、").
+func plainListBody(s string) (string, bool) {
+	r := []rune(s)
+	if len(r) < 2 {
+		return "", false
+	}
+	switch r[0] {
+	case '\u00b7', '\u30fb', '\u2022', '\u25c6', '\u25c7', '\u203b':
+		return strings.TrimSpace(string(r[1:])), true
+	}
+	if r[0] >= '\u2460' && r[0] <= '\u2469' {
+		return strings.TrimSpace(string(r[1:])), true
+	}
+	i := 0
+	for i < len(r) && r[i] >= '0' && r[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(r) && (r[i] == '\u3001' || r[i] == ')' || r[i] == '.') {
+		return strings.TrimSpace(string(r[i+1:])), true
+	}
+	return "", false
+}
+
+// isSentenceEnd marks the cut points used by splitLongParagraph.
+func isSentenceEnd(ch rune) bool {
+	switch ch {
+	case '\u3002', '\uff01', '\uff1f', '\uff1b', '!', '?', ';':
+		return true
+	}
+	return false
+}
+
+const (
+	longParagraphThreshold = 180
+	longParagraphTarget    = 130
+)
+
+// splitLongParagraph cuts one long unbroken paragraph into several natural
+// paragraphs at sentence ends, so a wall of text becomes readable blocks.
+func splitLongParagraph(line string) []string {
+	if utf8.RuneCountInString(line) <= longParagraphThreshold {
+		return []string{line}
+	}
+	var (
+		out    []string
+		cur    []rune
+		curLen int
+	)
+	for _, ch := range line {
+		cur = append(cur, ch)
+		curLen++
+		if curLen >= longParagraphTarget && isSentenceEnd(ch) {
+			out = append(out, string(cur))
+			cur = cur[:0]
+			curLen = 0
+		}
+	}
+	if len(cur) > 0 {
+		out = append(out, string(cur))
+	}
+	if len(out) <= 1 {
+		return []string{line}
+	}
+	return out
+}
+
+// isClosingPunct lists punctuation that must not start a line (CJK line-start rule).
+func isClosingPunct(ch rune) bool {
+	switch ch {
+	case '\u3002', '\uFF0C', '\u3001', '\uFF1B', '\uFF1A', '\uFF01', '\uFF1F',
+		'\uFF09', '\u300B', '\u300D', '\u300F', '\u3011', '\u3017',
+		'\u2026', '\u2014', '\uFF5E', '%',
+		',', '.', ';', ':', '!', '?', ')', ']', '}':
+		return true
+	}
+	return false
 }
