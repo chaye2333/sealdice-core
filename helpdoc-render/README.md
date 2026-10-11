@@ -65,6 +65,7 @@ apk add --no-cache font-noto-cjk     # Alpine
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `-addr` | `127.0.0.1:3212` | 监听地址。**建议只监听回环**，用同一个 compose 网络或 nginx 反代暴露 |
+| `-theme` | `light` | 配色：`light` / `paper`（米白，长文更耐看）/ `dark` |
 | `-font` | 自动探测 | 字体文件（`.ttf`/`.otf`/`.ttc`） |
 | `-token` | 空 | 设置后要求 `Authorization: Bearer <token>` |
 | `-font-size` | `17` | 正文字号 |

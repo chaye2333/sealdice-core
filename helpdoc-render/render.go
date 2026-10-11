@@ -316,6 +316,15 @@ func (r *Renderer) drawLine(img *image.RGBA, width int, y, lineH float64, ln vli
 		rect := image.Rect(int(r.opts.Padding), int(y), int(right), int(y+lineH))
 		draw.Draw(img, rect, image.NewUniform(colCodeBg), image.Point{}, draw.Src)
 	}
+	if !ln.codeBlock && ln.scale >= 1.2 {
+		// heading band: tinted background + accent bar on the left
+		top := y - lineH*0.10
+		bottom := y + lineH*0.94
+		rect := image.Rect(int(r.opts.Padding)-12, int(top), int(right)+6, int(bottom))
+		draw.Draw(img, rect, image.NewUniform(colHeadBg), image.Point{}, draw.Src)
+		bar := image.Rect(int(r.opts.Padding)-12, int(top), int(r.opts.Padding)-7, int(bottom))
+		draw.Draw(img, bar, image.NewUniform(colAccent), image.Point{}, draw.Src)
+	}
 	if ln.quote {
 		rect := image.Rect(int(r.opts.Padding)+2, int(y), int(r.opts.Padding)+6, int(y+lineH))
 		draw.Draw(img, rect, image.NewUniform(colQuote), image.Point{}, draw.Src)
@@ -846,3 +855,55 @@ func isClosingPunct(ch rune) bool {
 	}
 	return false
 }
+
+// ---------- themes ----------
+
+var (
+	colHeadBg = color.RGBA{R: 0xF1, G: 0xF5, B: 0xFB, A: 0xFF}
+	colAccent = color.RGBA{R: 0x3B, G: 0x82, B: 0xF6, A: 0xFF}
+)
+
+type palette struct {
+	bg, fg, muted, codeBg, rule, quote, link, headBg, accent color.RGBA
+}
+
+var palettes = map[string]palette{
+	"light": {
+		bg: color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}, fg: color.RGBA{0x21, 0x25, 0x2B, 0xFF},
+		muted: color.RGBA{0x6B, 0x72, 0x80, 0xFF}, codeBg: color.RGBA{0xF2, 0xF3, 0xF5, 0xFF},
+		rule: color.RGBA{0xE3, 0xE6, 0xEA, 0xFF}, quote: color.RGBA{0xC9, 0xD1, 0xD9, 0xFF},
+		link: color.RGBA{0x1A, 0x56, 0xB0, 0xFF}, headBg: color.RGBA{0xF1, 0xF5, 0xFB, 0xFF},
+		accent: color.RGBA{0x3B, 0x82, 0xF6, 0xFF},
+	},
+	// paper: warm off-white, easier on the eyes for long help docs
+	"paper": {
+		bg: color.RGBA{0xFA, 0xF7, 0xF0, 0xFF}, fg: color.RGBA{0x2B, 0x26, 0x20, 0xFF},
+		muted: color.RGBA{0x7A, 0x70, 0x63, 0xFF}, codeBg: color.RGBA{0xF0, 0xEA, 0xDD, 0xFF},
+		rule: color.RGBA{0xE0, 0xD8, 0xC8, 0xFF}, quote: color.RGBA{0xC9, 0xBC, 0xA4, 0xFF},
+		link: color.RGBA{0x8A, 0x50, 0x18, 0xFF}, headBg: color.RGBA{0xF3, 0xEC, 0xDD, 0xFF},
+		accent: color.RGBA{0xC0, 0x7A, 0x2B, 0xFF},
+	},
+	"dark": {
+		bg: color.RGBA{0x1E, 0x22, 0x28, 0xFF}, fg: color.RGBA{0xE6, 0xE8, 0xEB, 0xFF},
+		muted: color.RGBA{0x9A, 0xA3, 0xAE, 0xFF}, codeBg: color.RGBA{0x2A, 0x2F, 0x36, 0xFF},
+		rule: color.RGBA{0x3A, 0x41, 0x49, 0xFF}, quote: color.RGBA{0x4A, 0x53, 0x5D, 0xFF},
+		link: color.RGBA{0x7A, 0xB0, 0xFF, 0xFF}, headBg: color.RGBA{0x26, 0x2C, 0x34, 0xFF},
+		accent: color.RGBA{0x5A, 0x9C, 0xFF, 0xFF},
+	},
+}
+
+// applyTheme switches the colour scheme; unknown names fall back to "light".
+func applyTheme(name string) string {
+	p, ok := palettes[name]
+	if !ok {
+		name = "light"
+		p = palettes["light"]
+	}
+	colBg, colFg, colMuted = p.bg, p.fg, p.muted
+	colCodeBg, colRule, colQuote, colLink = p.codeBg, p.rule, p.quote, p.link
+	colHeadBg, colAccent = p.headBg, p.accent
+	return name
+}
+
+// Themes lists the available theme names (for -help).
+func Themes() string { return "light, paper, dark" }

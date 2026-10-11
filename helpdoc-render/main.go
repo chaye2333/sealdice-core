@@ -51,6 +51,7 @@ func main() {
 		maxTextLen  = flag.Int("max-text-chars", 20000, "正文最大字符数，超过则截断（防止一次渲染吃掉太多内存）")
 		concurrency = flag.Int("concurrency", 2, "并发渲染上限（限制峰值内存）")
 		showVersion = flag.Bool("version", false, "打印版本并退出")
+		theme       = flag.String("theme", "light", "配色："+Themes())
 	)
 	flag.Parse()
 
@@ -70,7 +71,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("初始化渲染器失败：%v", err)
 	}
-	log.Printf("字体：%s（%.1fpx，行高 %.2f）", renderer.FontName(), *fontSize, *lineHeight)
+	appliedTheme := applyTheme(*theme)
+	log.Printf("配色：%s；字体：%s（%.1fpx，行高 %.2f）", appliedTheme, renderer.FontName(), *fontSize, *lineHeight)
 
 	sem := make(chan struct{}, max(1, *concurrency))
 
