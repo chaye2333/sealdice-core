@@ -250,6 +250,17 @@ func (r *Renderer) RenderPNG(text string, width int) ([]byte, error) {
 
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	draw.Draw(img, img.Bounds(), image.NewUniform(colBg), image.Point{}, draw.Src)
+	// 2px page border so the tinted background reads as a card
+	if colBorder.A > 0 {
+		for _, r := range []image.Rectangle{
+			image.Rect(0, 0, width, 2),
+			image.Rect(0, height-2, width, height),
+			image.Rect(0, 0, 2, height),
+			image.Rect(width-2, 0, width, height),
+		} {
+			draw.Draw(img, r, image.NewUniform(colBorder), image.Point{}, draw.Src)
+		}
+	}
 
 	y := r.opts.Padding
 	for _, ln := range lines {
@@ -860,6 +871,7 @@ func isClosingPunct(ch rune) bool {
 
 var (
 	colHeadBg = color.RGBA{R: 0xF1, G: 0xF5, B: 0xFB, A: 0xFF}
+	colBorder = color.RGBA{R: 0xE3, G: 0xE6, B: 0xEA, A: 0xFF}
 	colAccent = color.RGBA{R: 0x3B, G: 0x82, B: 0xF6, A: 0xFF}
 )
 
@@ -877,10 +889,10 @@ var palettes = map[string]palette{
 	},
 	// paper: warm off-white, easier on the eyes for long help docs
 	"paper": {
-		bg: color.RGBA{0xFA, 0xF7, 0xF0, 0xFF}, fg: color.RGBA{0x2B, 0x26, 0x20, 0xFF},
+		bg: color.RGBA{0xF6, 0xEF, 0xE0, 0xFF}, fg: color.RGBA{0x2B, 0x26, 0x20, 0xFF},
 		muted: color.RGBA{0x7A, 0x70, 0x63, 0xFF}, codeBg: color.RGBA{0xF0, 0xEA, 0xDD, 0xFF},
 		rule: color.RGBA{0xE0, 0xD8, 0xC8, 0xFF}, quote: color.RGBA{0xC9, 0xBC, 0xA4, 0xFF},
-		link: color.RGBA{0x8A, 0x50, 0x18, 0xFF}, headBg: color.RGBA{0xF3, 0xEC, 0xDD, 0xFF},
+		link: color.RGBA{0x8A, 0x50, 0x18, 0xFF}, headBg: color.RGBA{0xE9, 0xDF, 0xC6, 0xFF},
 		accent: color.RGBA{0xC0, 0x7A, 0x2B, 0xFF},
 	},
 	"dark": {
@@ -902,6 +914,14 @@ func applyTheme(name string) string {
 	colBg, colFg, colMuted = p.bg, p.fg, p.muted
 	colCodeBg, colRule, colQuote, colLink = p.codeBg, p.rule, p.quote, p.link
 	colHeadBg, colAccent = p.headBg, p.accent
+	switch name {
+	case "paper":
+		colBorder = color.RGBA{R: 0xE0, G: 0xD5, B: 0xBC, A: 0xFF}
+	case "dark":
+		colBorder = color.RGBA{R: 0x33, G: 0x39, B: 0x41, A: 0xFF}
+	default:
+		colBorder = color.RGBA{R: 0xE3, G: 0xE6, B: 0xEA, A: 0xFF}
+	}
 	return name
 }
 
