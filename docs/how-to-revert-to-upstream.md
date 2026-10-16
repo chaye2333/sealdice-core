@@ -16,7 +16,7 @@
 | 层次 | 回退难度 | 说明 |
 |---|---|---|
 | **你的部署 / 数据** | ⭐ 极低 | 换镜像即可，`data/` 和 `serve.yaml` 都不用动 |
-| **代码（想丢掉这个 fork）** | ⭐⭐⭐ 中等 | 24 个新增文件直接删；15 个上游文件要撤掉改动 |
+| **代码（想丢掉这个 fork）** | ⭐⭐⭐ 中等 | 新增文件直接删；23 个上游文件要撤掉改动 |
 
 ---
 
@@ -212,11 +212,11 @@ docker compose pull && docker compose up -d
 | `docs/identity-bind-and-ghcr.md` / `docs/how-to-revert-to-upstream.md` | 文档 |
 | `docs/official-qq-improvements.md` | **本地草稿，从未入库**（`.gitignore` 之外，注意别 commit） |
 
-**但注意**：删掉新增文件后，下面 15 个上游文件里的 13 个 Go 文件会**编译失败**
+**但注意**：删掉新增文件后，下面 23 个上游文件里的 20 个 Go 文件会**编译失败**
 （引用了被删的符号），所以两边必须一起处理。另外两个（`.gitignore`、`readme.md`）
 只影响构建产物与说明文字，撤不撤随你。
 
-### 3.2 改过的 15 个上游文件
+### 3.2 改过的 23 个上游文件
 
 （数字用 `git diff --numstat upstream/master...HEAD -- <文件>` 复核。）
 
@@ -242,7 +242,20 @@ docker compose pull && docker compose up -d
 > 本 fork 改为在 `dice/ext_identity_bind.go` 里自己持有 `identityBindOfficialGroupIDPrefix`
 > （上游的群 ID 前缀是直接写字面量的，没有导出常量，跟着它走容易在下次合并时断掉）。
 
-### 3.2.1 已经交还给上游的部分（2026-09-16 合并之后）
+> **2026-10 为「内容安全」新增的差异**（出站掩码 + 帮助文档图片化）：
+>
+> | 文件 | 撤掉什么 |
+> |---|---|
+> | `dice/dice_censor.go` | `CensorHitWords`（纯匹配，不写库不计数）与 `CensorMaskOutgoing`（等长打码、跳过 CQ/海豹码） |
+> | `api/censor.go` | 掩码开关的读取与保存（`maskEnable` / `maskChar`） |
+> | `dice/dice_help.go` | `HelpConfig` 的 7 个 imageRender 字段 |
+> | `dice/im_helpers.go` | 出站掩码接线；掩码模式下不再因 `needToTerminate` 吞掉回复（警告/拉黑照常） |
+> | `dice/dice_config.go` / `dice_config_default.go` | `censorMaskEnable` / `censorMaskChar` 两个键与默认值 |
+>
+> 新增文件：`dice/help_image_render.go`（帮助出口的决策与渲染调用）、
+> `helpdoc-render/`（**独立 module**，自带 go.mod，不进主程序构建与镜像）、
+> `dice/censor_mask_test.go`。都不涉及数据库。
+>### 3.2.1 已经交还给上游的部分（2026-09-16 合并之后）
 
 下面这些**曾经**是本 fork 的差异，现在上游自己实现了，所以**不在上表**里，
 回退时也不需要处理：
