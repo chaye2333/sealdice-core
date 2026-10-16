@@ -136,7 +136,7 @@ func TryReplyToSenderMergedForward(ctx *MsgContext, msg *Message, title string, 
 			checkText = cqCodeRe.ReplaceAllString(checkText, "")
 
 			hit, words, needToTerminate, _ := ctx.Dice.CensorMsg(ctx, msg, checkText, content)
-			if needToTerminate {
+			if needToTerminate && !ctx.Dice.Config.CensorMaskEnable {
 				return true
 			}
 			if hit {
@@ -465,7 +465,9 @@ func ReplyGroupRaw(ctx *MsgContext, msg *Message, text string, flag string) {
 			checkText = cqCodeRe.ReplaceAllString(checkText, "")
 
 			hit, words, needToTerminate, _ := d.CensorMsg(ctx, msg, checkText, text)
-			if needToTerminate {
+			// 出站掩码打开时：回复照发（里面命中的词已经/将被替换成口口），
+			// 计数、警告、拉黑仍在 CensorMsg 里照常执行 —— 只是不再把回复整个吞掉。
+			if needToTerminate && !d.Config.CensorMaskEnable {
 				return
 			}
 			if hit {
@@ -551,7 +553,9 @@ func ReplyPersonRaw(ctx *MsgContext, msg *Message, text string, flag string) {
 			checkText = cqCodeRe.ReplaceAllString(checkText, "")
 
 			hit, words, needToTerminate, _ := d.CensorMsg(ctx, msg, checkText, text)
-			if needToTerminate {
+			// 出站掩码打开时：回复照发（里面命中的词已经/将被替换成口口），
+			// 计数、警告、拉黑仍在 CensorMsg 里照常执行 —— 只是不再把回复整个吞掉。
+			if needToTerminate && !d.Config.CensorMaskEnable {
 				return
 			}
 			if hit {

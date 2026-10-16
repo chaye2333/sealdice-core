@@ -221,6 +221,7 @@ func (d *Dice) CensorMsg(mctx *MsgContext, msg *Message, checkContent string, se
 
 	hit = true
 	hitWords = checkResult.CurSensitiveWords
+
 	// 注意：出站掩码**不在**这里做。本函数负责"写命中记录 + 计数 + 阈值 + 警告/拉黑"，
 	// 而掩码走的是另一条纯匹配路径（见 CensorMaskOutgoing）。调用方先调用本函数计数、
 	// 再对文本调掩码 —— 这样"掩码的同时照常计违规"才成立；
