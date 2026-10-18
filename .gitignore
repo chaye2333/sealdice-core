@@ -24,12 +24,19 @@ configs/
 data/
 pegtest/
 temp/
+/docs/
 
 # 本地编译产物（Windows exe、打包目录、临时脚本），不要进仓库
 /dist-build/
 
 .goreleaser.yaml
 dist/
+ui/openapi.json
+ui/src/api/generated/
+static/v2ui/dist/
+static/frontend/*
+!static/frontend/index.html
+ui/dev-dist/
 go-cqhttp/
 lagrange/
 /frontend/
@@ -76,3 +83,11 @@ helpdoc-render/helpdoc-render-*
 *.zip
 *.7z
 *.tar.gz
+
+# ---- 上游 #1689（新 UI / api/v2）新增的忽略项 ----
+# 注：上游这里还加了 `/docs/`，我们保留 docs/ 入库（fork 的回退与绑定文档在里面）
+ui/openapi.json
+ui/src/api/generated/
+static/v2ui/dist/
+ui/dev-dist/
+ui/components.d.ts

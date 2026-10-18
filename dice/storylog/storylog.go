@@ -41,6 +41,7 @@ type UploadEnv struct {
 	UniformID string
 	GroupID   string
 	Token     string
+	Force     bool
 
 	// ForceReupload 跳过"缓存链接仍然有效"的判断，直接重新上传。
 	// 用于换了染色器前端域名、想刷新链接等场景。

@@ -1,6 +1,6 @@
 module sealdice-core
 
-go 1.25.0
+go 1.25.14
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -84,7 +84,7 @@ require (
 	github.com/yuin/goldmark v1.8.4
 	go.etcd.io/bbolt v1.4.3
 	go.uber.org/goleak v1.3.0
-	go.uber.org/zap v1.28.0
+	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976
 	golang.org/x/oauth2 v0.36.0
@@ -106,6 +106,7 @@ require (
 	github.com/emmansun/gmsm v0.44.1
 	github.com/mroth/weightedrand/v3 v3.0.0
 	github.com/sixafter/aes-ctr-drbg v1.16.0
+	github.com/tus/tusd/v2 v2.10.1
 )
 
 require (
@@ -157,7 +158,7 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
-	github.com/google/pprof v0.0.0-20260202012954-cb029daf43ef // indirect
+	github.com/google/pprof v0.0.0-20260604005048-7023385849c0 // indirect
 	github.com/hhrutter/lzw v1.0.0 // indirect
 	github.com/hhrutter/pkcs7 v0.2.0 // indirect
 	github.com/hhrutter/tiff v1.0.2 // indirect
@@ -173,7 +174,6 @@ require (
 	github.com/kamstrup/intmap v0.5.2 // indirect
 	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
-	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/labstack/gommon v0.5.0 // indirect
 	github.com/lxzan/gws v1.10.2 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
@@ -222,10 +222,10 @@ require (
 	golang.org/x/arch v0.21.0 // indirect
 	golang.org/x/image v0.41.0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/alexcesaro/quotedprintable.v3 v3.0.0-20150716171945-2caba252f4dc // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	modernc.org/libc v1.22.5 // indirect

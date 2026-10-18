@@ -1508,7 +1508,6 @@ func logSendToBackend(ctx *MsgContext, groupID string, logName string, skipResol
 
 func logSendToBackendForce(ctx *MsgContext, groupID string, logName string, skipResolve, force bool) (bool, string, string, error) {
 	dice := ctx.Dice
-	dirPath := filepath.Join(dice.BaseConfig.DataDir, "log-exports")
 
 	if !skipResolve {
 		resolvedName, err := resolveLogNameForGroup(dice.DBOperator, groupID, logName)
@@ -1519,6 +1518,22 @@ func logSendToBackendForce(ctx *MsgContext, groupID string, logName string, skip
 			logName = resolvedName
 		}
 	}
+
+	logInfo, err := service.LogGetByGroupIDAndName(dice.DBOperator, groupID, logName)
+	if err != nil {
+		return false, "", "", err
+	}
+	return uploadLogInfoToBackend(ctx, logInfo, false)
+}
+
+func LogSendToBackendByInfo(ctx *MsgContext, logInfo *model.LogInfo, force bool) (bool, string, error) {
+	unofficial, url, _, err := uploadLogInfoToBackend(ctx, logInfo, force)
+	return unofficial, url, err
+}
+
+func uploadLogInfoToBackend(ctx *MsgContext, logInfo *model.LogInfo, force bool) (bool, string, string, error) {
+	dice := ctx.Dice
+	dirPath := filepath.Join(dice.BaseConfig.DataDir, "log-exports")
 
 	var sealBackends []string
 	for _, sealBackend := range BackendUrls {
@@ -1532,10 +1547,11 @@ func logSendToBackendForce(ctx *MsgContext, groupID string, logName string, skip
 		Log:      dice.Logger,
 		Backends: sealBackends,
 
-		LogName:   logName,
+		LogName:   logInfo.Name,
 		UniformID: ctx.EndPoint.UserID,
-		GroupID:   groupID,
-
+		GroupID:   logInfo.GroupID,
+		Force:     force,
+		// ForceReupload 是我们 fork 的旧字段（“强制重传”），与上游 Force 等价，保留以兼容既有调用。
 		ForceReupload: force,
 	}
 	uploadCtx.Version = storylog.StoryVersionV1

@@ -128,6 +128,63 @@ func GetLogTxtAndParquetFile(env UploadEnv) (*os.File, *bytes.Buffer, error) {
 	return tempLog, buf, nil
 }
 
+func GetLogParquetBytes(env UploadEnv) (*bytes.Buffer, error) {
+	buf := new(bytes.Buffer)
+	writer := parquet.NewGenericWriter[model.LogOneItemParquet](
+		buf,
+		parquet.Compression(&zstd.Codec{}),
+		parquet.MaxRowsPerRowGroup(4000),
+	)
+
+	counter := 0
+	currentCursor := paginator.Cursor{}
+
+	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		defer close(resultCh)
+
+		for {
+			select {
+			case <-ctxWithTimeout.Done():
+				resultCh <- errors.New("日志导出超时（10秒限制），请尝试减少数据量或联系管理员")
+				return
+			default:
+				cursorLines, cursor, err0 := service.LogGetExportCursorLines(env.Db, env.GroupID, env.LogName, currentCursor)
+				if err0 != nil {
+					resultCh <- err0
+					return
+				}
+
+				counter += len(cursorLines)
+				if _, err0 = writer.Write(cursorLines); err0 != nil {
+					resultCh <- err0
+					return
+				}
+
+				if cursor.After == nil {
+					resultCh <- nil
+					return
+				}
+				currentCursor.After = cursor.After
+			}
+		}
+	}()
+
+	if err := <-resultCh; err != nil {
+		return nil, err
+	}
+	if counter == 0 {
+		return nil, errors.New("此log不存在，或条目数为空，名字是否正确？")
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
 // 一个不那么激进的改版
 func uploadV105(env UploadEnv) (string, string, error) {
 	_ = os.MkdirAll(env.Dir, 0o755)
@@ -135,26 +192,24 @@ func uploadV105(env UploadEnv) (string, string, error) {
 	url, uploadTS, updateTS, _ := service.LogGetUploadInfo(env.Db, env.GroupID, env.LogName)
 	cachedURL := url
 	probeResult := cachedLogProbeMissing
-	if env.ForceReupload {
-		// 骰主明确要求重传（例如换了染色器前端域名）
-		env.Log.Infof("强制重新上传日志 Log:%s.%s URL:%s", env.GroupID, env.LogName, url)
-	} else {
-		if len(url) > 0 && uploadTS > updateTS {
-			probeResult = checkCachedLogURL(env, url)
-		}
-		if probeResult == cachedLogProbeAlive {
-			// 已有URL且上传时间晚于Log更新时间（最后录入时间），直接返回
-			env.Log.Infof(
-				"查询到之前上传的URL, 直接使用 Log:%s.%s 上传时间:%s 更新时间:%s URL:%s",
-				env.GroupID, env.LogName,
-				time.Unix(uploadTS, 0).Format("2006-01-02 15:04:05"),
-				time.Unix(updateTS, 0).Format("2006-01-02 15:04:05"),
-				url,
-			)
-			return url, env.Notice, nil
-		}
+	if len(url) > 0 && uploadTS > updateTS {
+		probeResult = checkCachedLogURL(env, url)
 	}
-	if len(url) == 0 {
+	// Force 是上游字段，ForceReupload 是我们 fork 的旧字段，任一为真都强制重传。
+	if !env.Force && !env.ForceReupload && probeResult == cachedLogProbeAlive {
+		// 已有URL且上传时间晚于Log更新时间（最后录入时间），直接返回
+		env.Log.Infof(
+			"查询到之前上传的URL, 直接使用 Log:%s.%s 上传时间:%s 更新时间:%s URL:%s",
+			env.GroupID, env.LogName,
+			time.Unix(uploadTS, 0).Format("2006-01-02 15:04:05"),
+			time.Unix(updateTS, 0).Format("2006-01-02 15:04:05"),
+			url,
+		)
+		return url, env.Notice, nil
+	}
+	if env.Force || env.ForceReupload {
+		env.Log.Infof("强制重新上传 Log:%s.%s", env.GroupID, env.LogName)
+	} else if len(url) == 0 {
 		env.Log.Infof("没有查询到之前上传的URL Log:%s.%s", env.GroupID, env.LogName)
 	} else if uploadTS <= updateTS {
 		env.Log.Infof(
