@@ -6,6 +6,7 @@ on:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+      - '.golangci.toml'
       - '.github/workflows/test-and-lint.yml'
       - '.github/scripts/lint.sh'
   pull_request:
@@ -18,6 +19,7 @@ on:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+      - '.golangci.toml'
       - '.github/workflows/test-and-lint.yml'
       - '.github/scripts/lint.sh'
 

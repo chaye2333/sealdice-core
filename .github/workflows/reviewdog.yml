@@ -6,6 +6,7 @@ on:
       - '**.go'
       - 'go.mod'
       - 'go.sum'
+      - '.golangci.toml'
       - '.github/workflows/reviewdog.yml'
       - '.github/scripts/lint.sh'
 

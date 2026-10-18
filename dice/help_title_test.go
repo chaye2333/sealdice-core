@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	wr "github.com/mroth/weightedrand/v3"
+	"sealdice-core/utils/weighted"
 )
 
 // TestHelpFirstLineIsHardcodedAndIndependentFromDiceName 锁定 .help 第一行的语义。
@@ -18,7 +18,7 @@ func TestHelpFirstLineIsHardcodedAndIndependentFromDiceName(t *testing.T) {
 	defer env.cleanup()
 
 	const customDiceName = "罗兰"
-	chooser, err := wr.NewChooser(wr.NewChoice(customDiceName, uint(1)))
+	chooser, err := weighted.NewChooser(weighted.Choice[string]{Item: customDiceName, Weight: 1})
 	if err != nil {
 		t.Fatalf("build chooser: %v", err)
 	}
