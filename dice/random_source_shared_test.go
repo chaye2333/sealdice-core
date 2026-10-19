@@ -205,23 +205,35 @@ func TestGlobalRandSourceReportGetText(t *testing.T) {
 		errorOverride{mode: DiceRandomModeGM, err: errors.New("gm init failed")},
 	))
 
-	got := globalRandSource.ReportGetText(20)
-	for mode, raw := range map[DiceRandomMode]uint64{ //nolint:exhaustive // 这里只挑三个代表模式做断言，未列出的模式走的是另一条分支，不需要在此覆盖
-		DiceRandomModePCG:  0,
-		DiceRandomModeNIST: 2,
-		DiceRandomModeCRNG: 3,
-	} {
-		expected := ds.Roll(&countingDiceSource{values: []uint64{raw}}, ds.IntType(20), 0)
-		line := fmt.Sprintf("%s: 出目=%d", mode, expected)
-		if !strings.Contains(got, line) {
-			t.Fatalf("expected %q in get text, got %q", line, got)
+	if _, err := globalRandSource.SetActive(DiceRandomModePCG); err != nil {
+		t.Fatalf("SetActive(pcg): %v", err)
+	}
+
+	got := globalRandSource.ReportGetText("", 20)
+	expected := ds.Roll(&countingDiceSource{values: []uint64{0}}, ds.IntType(20), 0)
+	if !strings.Contains(got, fmt.Sprintf("pcg: 出目=%d", expected)) {
+		t.Fatalf("expected current pcg source in get text, got %q", got)
+	}
+	for _, line := range []string{"nist: 出目=", "crng: 出目=", "hybrid: 出目="} {
+		if strings.Contains(got, line) {
+			t.Fatalf("default get should not test other sources, got %q", got)
 		}
 	}
-	if !strings.Contains(got, "gm: 不可用") || !strings.Contains(got, "gm init failed") {
-		t.Fatalf("expected gm unavailability in get text, got %q", got)
+	if !strings.Contains(got, "gm: 未启用") {
+		t.Fatalf("expected gm disabled hint in get text, got %q", got)
 	}
-	if !strings.Contains(got, "hybrid: 出目=") {
-		t.Fatalf("expected hybrid line in get text, got %q", got)
+
+	got = globalRandSource.ReportGetText(DiceRandomModeNIST, 20)
+	expected = ds.Roll(&countingDiceSource{values: []uint64{2}}, ds.IntType(20), 0)
+	if !strings.Contains(got, fmt.Sprintf("nist: 出目=%d", expected)) {
+		t.Fatalf("expected explicit nist source in get text, got %q", got)
+	}
+
+	got = globalRandSource.ReportAllGetText(20)
+	for _, line := range []string{"pcg: 出目=", "nist: 出目=", "crng: 出目=", "hybrid: 出目=", "gm: 未启用"} {
+		if !strings.Contains(got, line) {
+			t.Fatalf("expected %q in all get text, got %q", line, got)
+		}
 	}
 }
 

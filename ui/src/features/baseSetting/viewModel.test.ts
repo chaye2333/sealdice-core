@@ -267,6 +267,7 @@ it('基础设置只提交实际变更的字段', () => {
     logSizeNoticeCount: 500,
     playerNameWrapEnable: true,
     diceRandomMode: 'pcg',
+    diceRandomGMEnabled: false,
     onlyLogCommandInGroup: false,
     onlyLogCommandInPrivate: false,
     rateLimitEnabled: false,
@@ -295,9 +296,11 @@ it('基础设置只提交实际变更的字段', () => {
   current.masterUnlockCode = 'refreshed-readonly-code';
   current.QQEnablePoke = true;
   current.commandPrefix = ['.', '!'];
+  current.diceRandomGMEnabled = true;
 
   expect(buildBaseSettingPatch(current, initial)).toEqual({
     QQEnablePoke: true,
     commandPrefix: ['.', '!'],
+    diceRandomGMEnabled: true,
   });
 });
