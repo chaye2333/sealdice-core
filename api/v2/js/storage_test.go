@@ -42,7 +42,7 @@ func TestDataListResolvesExtensionByScriptName(t *testing.T) {
 func TestDataListPagination(t *testing.T) {
 	dm := &dice.DiceManager{}
 	d := &dice.Dice{Parent: dm, JsExtRegistry: new(dice.SyncMap[string, *dice.ExtInfo])}
-	dm.Dice = []*dice.Dice{d}
+	dm.Dice = d
 	d.BaseConfig.DataDir = t.TempDir()
 	ext := &dice.ExtInfo{Name: "plugin"}
 	d.RegisterExtension(ext)
