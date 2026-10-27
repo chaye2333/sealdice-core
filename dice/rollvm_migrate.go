@@ -345,7 +345,12 @@ var officialQQFinalReplyTmplKeys = map[string]bool{
 	"核心:骰点_多轮":  true,
 	"COC:检定":    true,
 	"COC:检定_多轮": true,
-	"COC:理智检定":  true,
+	// 注意：不要加 "COC:理智检定"。
+	// .sc 的回复不挂状态栏（骰主明确要求），原因有两点：
+	//   1. .sc 是"扣理智"的结果播报，玩家关心的是损失，顶部再来一行角色属性反而碍事；
+	//   2. .sc 走的是代理上下文（GetCtxProxyFirst），属性行求值容易拿不到值，
+	//      只显示半截名字看起来像 bug。
+	// 见 ext_coc7.go 的 sc 指令：发送前还会显式清掉标记，双保险。
 }
 
 func DiceFormatTmpl(ctx *MsgContext, s string) string {

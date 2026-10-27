@@ -1311,6 +1311,9 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 				}
 			}
 
+			// .sc 的回复不挂 QQ 官方状态栏：这里显式清掉标记，
+			// 即使以后有人在 .sc 里渲染了会打标记的模板也不会漏出去。
+			mctx.OfficialQQStatusBarPending = false
 			ReplyToSender(mctx, msg, text)
 			if mctx.Player.AutoSetNameTemplate != "" {
 				_, _ = SetPlayerGroupCardByTemplate(mctx, mctx.Player.AutoSetNameTemplate)

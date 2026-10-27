@@ -493,6 +493,48 @@ func TestOfficialQQRollReplyHasNoStatusBarOnOneBot(t *testing.T) {
 	}
 }
 
+// TestOfficialQQStatusBarSkippedForScCommand .sc 的回复不挂状态栏。
+//
+// 覆盖的是之前漏掉的形态：`.sc0/1d6`（命令名与参数之间没有空格）。
+// 旧实现按消息首词判断"是不是 sc"，无空格写法首词是 "sc0/1d6"，判断失效。
+func TestOfficialQQStatusBarSkippedForScCommand(t *testing.T) {
+	d, ep, cleanup := newOfficialQQRollEnv(t, "OpenQQ-Group:400-group", "OpenQQ:400-member",
+		"{$t玩家_RAW} HP{血条}",
+		map[string]*ds.VMValue{"血条": intVal(12), "理智": intVal(60)},
+	)
+	defer cleanup()
+
+	adapter, ok := ep.Adapter.(*mockPlatformAdapter)
+	if !ok {
+		t.Fatalf("unexpected adapter type %T", ep.Adapter)
+	}
+
+	// 先设一个理智值，.sc 才有东西可扣
+	d.ImSession.ExecuteNew(ep, newGroupMsg("OpenQQ-Group:400-group", "OpenQQ:400-member", ".st 理智60"))
+	if _, got := adapter.waitForMsg(3 * time.Second); !got {
+		t.Fatal("timeout: expected a reply to '.st 理智60'")
+	}
+
+	d.ImSession.ExecuteNew(ep, newGroupMsg("OpenQQ-Group:400-group", "OpenQQ:400-member", ".sc0/1d6"))
+	reply, got := adapter.waitForMsg(3 * time.Second)
+	if !got {
+		t.Fatal("timeout: expected a reply to '.sc0/1d6'")
+	}
+	if strings.Contains(reply, `\scriptsize`) || strings.Contains(reply, `\textcolor`) {
+		t.Fatalf(".sc 回复不应带状态栏，got %q", reply)
+	}
+}
+
+// TestOfficialQQFinalReplyTmplKeysExcludeSc .sc 用的模板不能出现在"最终回复"标记表里，
+// 否则渲染时又会把状态栏标记打开。
+func TestOfficialQQFinalReplyTmplKeysExcludeSc(t *testing.T) {
+	for _, key := range []string{"COC:理智检定", "COC:理智检定_单项结果文本"} {
+		if officialQQFinalReplyTmplKeys[key] {
+			t.Fatalf("%q 不应触发状态栏", key)
+		}
+	}
+}
+
 func TestOfficialQQRollReplyWithoutSnTemplate(t *testing.T) {
 	d, ep, cleanup := newOfficialQQRollEnv(t, "OpenQQ-Group:300-group", "OpenQQ:300-member",
 		"",
