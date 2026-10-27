@@ -508,7 +508,9 @@ func replyGroupRawNoCheck(ctx *MsgContext, msg *Message, text string, flag strin
 	}
 	// QQ 官方机器人无法改群名片，掷骰 / 鉴定的最终回复在顶部补上虚拟角色状态栏。
 	// 放在这里统一处理，任何规则系统（含未来新增的扩展）都自动生效。
-	text = withOfficialQQCharacterStatusBar(ctx, text)
+	if !officialQQStatusBarSkipForMessage(msg) {
+		text = withOfficialQQCharacterStatusBar(ctx, text)
+	}
 	if lenWithoutBase64(text) > 15000 {
 		text = "要发送的文本过长"
 	}
@@ -593,7 +595,9 @@ func replyPersonRawNoCheck(ctx *MsgContext, msg *Message, text string, flag stri
 		ctx.DelegateText = ""
 	}
 	// 暗骰（.rh 等）的结果是私聊发送的，同样需要状态栏
-	text = withOfficialQQCharacterStatusBar(ctx, text)
+	if !officialQQStatusBarSkipForMessage(msg) {
+		text = withOfficialQQCharacterStatusBar(ctx, text)
+	}
 	if lenWithoutBase64(text) > 15000 {
 		text = "要发送的文本过长"
 	}

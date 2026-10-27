@@ -249,3 +249,21 @@ func withOfficialQQCharacterStatusBar(ctx *MsgContext, text string) string {
 	}
 	return bar + "\n" + text
 }
+
+// officialQQStatusBarSkipForMessage 指定指令的回复不挂状态栏。
+//
+// 目前只有 .sc（理智检定）。原因：.sc 带掷骰损失（.sc0/1d3）时会先做一次子掷骰，
+// 最终那条回复的上下文里拿不到角色卡，属性行会整段消失、只剩名字 ——
+// 看起来像"状态栏坏了"。与其在某些分支显示半截，不如统一不在 .sc 回复上显示；
+// .r / .ra 等掷骰回复不受影响。
+func officialQQStatusBarSkipForMessage(msg *Message) bool {
+	if msg == nil {
+		return false
+	}
+	word := strings.TrimSpace(msg.Message)
+	word = strings.TrimLeft(word, ".。!！/／~～")
+	if i := strings.IndexAny(word, " \t\r\n"); i >= 0 {
+		word = word[:i]
+	}
+	return strings.EqualFold(word, "sc")
+}
