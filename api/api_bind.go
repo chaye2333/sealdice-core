@@ -774,6 +774,8 @@ func Bind(e *echo.Echo, _myDice *dice.DiceManager) {
 	e.GET(prefix+"/chat-console/storage", chatConsoleStorage)
 	e.POST(prefix+"/chat-console/settings", chatConsoleSettingsSave)
 	e.POST(prefix+"/chat-console/purge", chatConsolePurge)
+	e.POST(prefix+"/chat-console/pin", chatConsolePin)
+	e.GET(prefix+"/chat-console/media", chatConsoleMedia)
 	e.GET(prefix+"/chat-console/events", chatConsoleEvents)
 
 	e.GET(prefix+"/store/backend/list", storeBackendList)

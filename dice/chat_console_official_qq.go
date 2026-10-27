@@ -74,6 +74,7 @@ func (pa *PlatformAdapterOfficialQQ) recordChatConsoleInbound(msg *Message, kind
 		TargetID:     targetID,
 		UIN:          pa.UIN,
 		EndpointID:   pa.EndPoint.ID,
+		AppID:        pa.AppID,
 		SenderID:     msg.Sender.UserID,
 		SenderName:   msg.Sender.Nickname,
 		SenderOpenID: senderOpenID,
@@ -113,6 +114,7 @@ func (pa *PlatformAdapterOfficialQQ) recordChatConsoleOutbound(kind, targetID st
 		TargetID:   targetID,
 		UIN:        pa.UIN,
 		EndpointID: pa.EndPoint.ID,
+		AppID:      pa.AppID,
 		SenderID:   pa.EndPoint.UserID,
 		SenderName: pa.EndPoint.Nickname,
 		Dir:        chatConsoleDirOut,
@@ -168,6 +170,11 @@ func (pa *PlatformAdapterOfficialQQ) refreshChatConsoleGroupInfo(groupOpenID str
 			return
 		}
 		store.SetGroupInfo(key, name, count)
+		// 顺手把 dice 层的群名也补上，群组管理页就不会显示「未获取到」
+		if pa.EndPoint != nil && pa.EndPoint.Session != nil {
+			setOfficialQQGroupName(pa.EndPoint.Session.Parent,
+				formatDiceIDOfficialQQGroupOpenID(pa.UIN, groupOpenID), name)
+		}
 	}()
 }
 
@@ -387,6 +394,7 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleAppendOutgoing(kind, targetID, t
 		TargetID:   targetID,
 		UIN:        pa.UIN,
 		EndpointID: pa.EndPoint.ID,
+		AppID:      pa.AppID,
 		SenderID:   pa.EndPoint.UserID,
 		SenderName: pa.EndPoint.Nickname,
 		Dir:        chatConsoleDirOut,

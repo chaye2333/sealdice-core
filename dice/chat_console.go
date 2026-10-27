@@ -87,11 +87,13 @@ type ChatConsoleMessage struct {
 	SenderID   string `json:"senderId"`
 	SenderName string `json:"senderName"`
 	// SenderOpenID 是官方侧的 member_openid / user_openid，禁言等功能需要它。
-	SenderOpenID string             `json:"senderOpenId,omitempty"`
-	Text         string             `json:"text"`
-	Media        []ChatConsoleMedia `json:"media,omitempty"`
-	MsgID        string             `json:"msgId,omitempty"`
-	Quote        *ChatConsoleQuote  `json:"quote,omitempty"`
+	SenderOpenID string `json:"senderOpenId,omitempty"`
+	// AvatarURL 由 AppID + openid 拼出来的头像地址（读的时候计算，不落库）。
+	AvatarURL string             `json:"avatarUrl,omitempty"`
+	Text      string             `json:"text"`
+	Media     []ChatConsoleMedia `json:"media,omitempty"`
+	MsgID     string             `json:"msgId,omitempty"`
+	Quote     *ChatConsoleQuote  `json:"quote,omitempty"`
 	// Recalled 表示骰主已经在控制台里撤回了这条消息。
 	Recalled   bool  `json:"recalled,omitempty"`
 	RecalledAt int64 `json:"recalledAt,omitempty"`
@@ -100,21 +102,26 @@ type ChatConsoleMessage struct {
 // ChatConsoleConversation 会话元信息。Name 可能是官方返回的群名，也可能是
 // UI 上自动生成的占位名（NameManual 标记是否为骰主手动改名）。
 type ChatConsoleConversation struct {
-	Key         string `json:"key"`
-	Kind        string `json:"kind"` // group / c2c
-	TargetID    string `json:"targetId"`
-	UIN         string `json:"uin,omitempty"`
-	EndpointID  string `json:"endpointId,omitempty"`
+	Key        string `json:"key"`
+	Kind       string `json:"kind"` // group / c2c
+	TargetID   string `json:"targetId"`
+	UIN        string `json:"uin,omitempty"`
+	EndpointID string `json:"endpointId,omitempty"`
+	// AppID 用来拼头像地址（https://thirdqq.qlogo.cn/qqapp/{appID}/{openid}/0）。
+	AppID       string `json:"-"`
+	AvatarURL   string `json:"avatarUrl,omitempty"`
 	Name        string `json:"name"`
 	NameManual  bool   `json:"nameManual"`
 	MemberCount int    `json:"memberCount,omitempty"`
 	// FullMessage 表示该群已在官方群设置里授权"获取全部群消息"。
 	// 目前只能靠"是否收到过非 @ 群消息"推断，未授权时 UI 需提示。
-	FullMessage bool   `json:"fullMessage"`
-	LastTS      int64  `json:"lastTs"`
-	LastText    string `json:"lastText"`
-	Unread      int    `json:"unread"`
-	UpdatedAt   int64  `json:"updatedAt"`
+	FullMessage bool `json:"fullMessage"`
+	// Pinned 表示骰主把该会话置顶了（置顶排前面，不受新消息影响）。
+	Pinned    bool   `json:"pinned"`
+	LastTS    int64  `json:"lastTs"`
+	LastText  string `json:"lastText"`
+	Unread    int    `json:"unread"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 // ChatConsoleEvent 是推给 WebUI 的实时事件（SSE）。
@@ -130,6 +137,7 @@ type ChatConsoleRecord struct {
 	TargetID     string // group_openid / user_openid
 	UIN          string
 	EndpointID   string
+	AppID        string
 	SenderID     string
 	SenderName   string
 	SenderOpenID string
@@ -167,10 +175,12 @@ type chatConsoleConversationRow struct {
 	TargetID    string `gorm:"column:target_id;not null"`
 	UIN         string `gorm:"column:uin"`
 	EndpointID  string `gorm:"column:endpoint_id"`
+	AppID       string `gorm:"column:app_id"`
 	Name        string `gorm:"column:name"`
 	NameManual  bool   `gorm:"column:name_manual;not null;default:false"`
 	MemberCount int    `gorm:"column:member_count;not null;default:0"`
 	FullMessage bool   `gorm:"column:full_message;not null;default:false"`
+	Pinned      bool   `gorm:"column:pinned;not null;default:false"`
 	LastTS      int64  `gorm:"column:last_ts;not null;default:0"`
 	LastText    string `gorm:"column:last_text"`
 	Unread      int    `gorm:"column:unread;not null;default:0"`
@@ -412,10 +422,12 @@ func chatConsoleConvToRow(conv *ChatConsoleConversation) chatConsoleConversation
 		TargetID:    conv.TargetID,
 		UIN:         conv.UIN,
 		EndpointID:  conv.EndpointID,
+		AppID:       conv.AppID,
 		Name:        conv.Name,
 		NameManual:  conv.NameManual,
 		MemberCount: conv.MemberCount,
 		FullMessage: conv.FullMessage,
+		Pinned:      conv.Pinned,
 		LastTS:      conv.LastTS,
 		LastText:    conv.LastText,
 		Unread:      conv.Unread,
@@ -424,21 +436,37 @@ func chatConsoleConvToRow(conv *ChatConsoleConversation) chatConsoleConversation
 }
 
 func chatConsoleRowToConv(row chatConsoleConversationRow) *ChatConsoleConversation {
-	return &ChatConsoleConversation{
+	conv := &ChatConsoleConversation{
 		Key:         row.Key,
 		Kind:        row.Kind,
 		TargetID:    row.TargetID,
 		UIN:         row.UIN,
 		EndpointID:  row.EndpointID,
+		AppID:       row.AppID,
 		Name:        row.Name,
 		NameManual:  row.NameManual,
 		MemberCount: row.MemberCount,
 		FullMessage: row.FullMessage,
+		Pinned:      row.Pinned,
 		LastTS:      row.LastTS,
 		LastText:    row.LastText,
 		Unread:      row.Unread,
 		UpdatedAt:   row.UpdatedAt,
 	}
+	// 群头像需要群号（官方只给 group_openid），拼不出来；私聊可以直接用 openid
+	if conv.Kind == chatConsoleKindC2C {
+		conv.AvatarURL = chatConsoleAvatarURL(row.AppID, row.TargetID)
+	}
+	return conv
+}
+
+// chatConsoleAvatarURL 官方 bot 的用户头像：
+// https://thirdqq.qlogo.cn/qqapp/{appID}/{openid}/0
+func chatConsoleAvatarURL(appID, openID string) string {
+	if appID == "" || openID == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://thirdqq.qlogo.cn/qqapp/%s/%s/0", appID, openID)
 }
 
 // ---------------- 内部：文本小工具 ----------------
@@ -603,6 +631,7 @@ func (s *ChatConsoleStore) upsertConversation(rec ChatConsoleRecord, key string,
 			TargetID:   rec.TargetID,
 			UIN:        rec.UIN,
 			EndpointID: rec.EndpointID,
+			AppID:      rec.AppID,
 			Name:       chatConsoleDefaultName(rec.Kind, rec.TargetID),
 			LastTS:     msg.TS,
 			LastText:   chatConsolePreview(msg.Text),
@@ -631,6 +660,10 @@ func (s *ChatConsoleStore) upsertConversation(rec ChatConsoleRecord, key string,
 	if rec.EndpointID != "" {
 		conv.EndpointID = rec.EndpointID
 	}
+	if rec.AppID != "" && conv.AppID != rec.AppID {
+		conv.AppID = rec.AppID
+		conv.AvatarURL = chatConsoleAvatarURL(conv.AppID, conv.TargetID)
+	}
 	if rec.FullMessage {
 		conv.FullMessage = true
 	}
@@ -647,6 +680,7 @@ func (s *ChatConsoleStore) upsertConversation(rec ChatConsoleRecord, key string,
 	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Updates(map[string]interface{}{
 		"uin":          conv.UIN,
 		"endpoint_id":  conv.EndpointID,
+		"app_id":       conv.AppID,
 		"name":         conv.Name,
 		"full_message": conv.FullMessage,
 		"last_ts":      conv.LastTS,
@@ -684,7 +718,7 @@ func (s *ChatConsoleStore) pruneLocked() {
 
 // ---------------- 公共 API：读取 ----------------
 
-// Conversations 返回按最后消息时间倒序排列的会话副本。
+// Conversations 返回会话副本：置顶在最前，其余按最后消息时间倒序。
 func (s *ChatConsoleStore) Conversations() []*ChatConsoleConversation {
 	s.mu.Lock()
 	if err := s.openLocked(); err != nil {
@@ -694,7 +728,7 @@ func (s *ChatConsoleStore) Conversations() []*ChatConsoleConversation {
 	s.mu.Unlock()
 
 	var rows []chatConsoleConversationRow
-	if err := s.db.Where("last_ts > 0").Order("last_ts DESC").Find(&rows).Error; err != nil {
+	if err := s.db.Where("last_ts > 0").Order("pinned DESC, last_ts DESC").Find(&rows).Error; err != nil {
 		return []*ChatConsoleConversation{}
 	}
 	out := make([]*ChatConsoleConversation, 0, len(rows))
@@ -748,9 +782,17 @@ func (s *ChatConsoleStore) Messages(key string, before int64, limit int) ([]Chat
 	if hasMore {
 		rows = rows[:limit]
 	}
+	// 头像需要 AppID，会话只查一次
+	appID := ""
+	var convRow chatConsoleConversationRow
+	if err := s.db.Select("app_id").Where("key = ?", key).Take(&convRow).Error; err == nil {
+		appID = convRow.AppID
+	}
 	out := make([]ChatConsoleMessage, 0, len(rows))
 	for i := len(rows) - 1; i >= 0; i-- {
-		out = append(out, chatConsoleRowToMessage(rows[i]))
+		msg := chatConsoleRowToMessage(rows[i])
+		msg.AvatarURL = chatConsoleAvatarURL(appID, msg.SenderOpenID)
+		out = append(out, msg)
 	}
 	return out, hasMore, nil
 }
@@ -804,6 +846,24 @@ func (s *ChatConsoleStore) Rename(key, name string) (*ChatConsoleConversation, e
 	conv.Name = name
 	conv.NameManual = true
 	conv.UpdatedAt = now
+	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
+	return conv, nil
+}
+
+// SetPinned 置顶 / 取消置顶会话。置顶的会话在列表里始终排在前面。
+func (s *ChatConsoleStore) SetPinned(key string, pinned bool) (*ChatConsoleConversation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
+		return nil, err
+	}
+	var row chatConsoleConversationRow
+	if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
+		return nil, errors.New("会话不存在")
+	}
+	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Update("pinned", pinned)
+	conv := chatConsoleRowToConv(row)
+	conv.Pinned = pinned
 	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
 	return conv, nil
 }

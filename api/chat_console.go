@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +66,11 @@ type chatConsoleSettingsReq struct {
 type chatConsolePurgeReq struct {
 	Key string `json:"key"`
 	All bool   `json:"all"`
+}
+
+type chatConsolePinReq struct {
+	Key    string `json:"key"`
+	Pinned bool   `json:"pinned"`
 }
 
 func chatConsoleStoreOf() *dice.ChatConsoleStore {
@@ -453,6 +459,93 @@ func chatConsolePurge(c echo.Context) error {
 		return Error(&c, "清空失败: "+err.Error(), Response{})
 	}
 	return Success(&c, Response{})
+}
+
+// chatConsolePin 置顶 / 取消置顶会话。
+func chatConsolePin(c echo.Context) error {
+	if !doAuth(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
+	if dm != nil && dm.JustForTest {
+		return Error(&c, "展示模式不支持该操作", Response{"testMode": true})
+	}
+	var req chatConsolePinReq
+	if err := c.Bind(&req); err != nil {
+		return Error(&c, "请求格式错误", Response{})
+	}
+	store := chatConsoleStoreOf()
+	if store == nil {
+		return Error(&c, "聊天控制台尚未初始化", Response{})
+	}
+	conv, err := store.SetPinned(req.Key, req.Pinned)
+	if err != nil {
+		return Error(&c, err.Error(), Response{})
+	}
+	return Success(&c, Response{"conversation": conv})
+}
+
+// chatConsoleAllowedMediaHost 控制台媒体代理的域名白名单。
+// 只放行腾讯的媒体 / 头像域名，避免把 /media 变成任意 URL 代理（SSRF）。
+func chatConsoleAllowedMediaHost(host string) bool {
+	host = strings.ToLower(host)
+	for _, suffix := range []string{".qq.com", ".qq.com.cn", ".qpic.cn", ".qlogo.cn", ".myqcloud.com"} {
+		if host == strings.TrimPrefix(suffix, ".") || strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// chatConsoleMedia 代理拉取官方媒体（图片 / 表情包 / 头像）。
+// 浏览器直连 thirdqq.qlogo.cn、multimedia.nt.qq.com.cn 时常被防盗链或跨域挡掉，
+// 由后端带 Referer 取回来再转发，界面上就能正常显示。
+func chatConsoleMedia(c echo.Context) error {
+	if !doAuth(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
+	raw := c.QueryParam("url")
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	if !chatConsoleAllowedMediaHost(u.Hostname()) {
+		return c.NoContent(http.StatusForbidden)
+	}
+
+	const maxBytes = 20 << 20 // 20MB
+	ctx := c.Request().Context()
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		// 不跟随跳转：避免绕过域名白名单
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (SealDice chat console)")
+	req.Header.Set("Referer", "https://q.qq.com/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return c.NoContent(http.StatusBadGateway)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return c.NoContent(http.StatusBadGateway)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	respHeader := c.Response().Header()
+	respHeader.Set("Content-Type", contentType)
+	respHeader.Set("Cache-Control", "private, max-age=300")
+	respHeader.Set("X-Content-Type-Options", "nosniff")
+	c.Response().WriteHeader(http.StatusOK)
+	_, _ = io.Copy(c.Response(), io.LimitReader(resp.Body, maxBytes))
+	return nil
 }
 
 // chatConsoleEvents 用 SSE 把新消息 / 会话变更推给 WebUI。

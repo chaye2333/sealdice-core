@@ -38,6 +38,22 @@ func groupList(c echo.Context) error {
 		return true
 	})
 
+	// 官方 QQ 群的群名官方只在 /v2/groups/{id}/info 里给，dice 层的 GroupName 通常是空的。
+	// 这里先用聊天控制台已经拿到的名字回填；还没有的，登录状态下顺手在后台拉一次。
+	authed := doAuth(c)
+	for _, item := range items {
+		if item.GroupName != "" || !strings.HasPrefix(item.GroupID, "OpenQQ-Group:") {
+			continue
+		}
+		if name := dice.OfficialQQGroupDisplayName(myDice, item.GroupID); name != "" {
+			item.GroupName = name
+			continue
+		}
+		if authed {
+			dice.RefreshOfficialQQGroupName(myDice, item.GroupID)
+		}
+	}
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"items": items,
 	})

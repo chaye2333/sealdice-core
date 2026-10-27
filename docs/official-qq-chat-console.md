@@ -19,6 +19,9 @@
 | @ 群成员 | 群聊输入框旁「@成员」，从最近收到过消息的成员里选；发送时转成官方 `<qqbot-at-user>` 标签 |
 | 撤回 | 只能撤回**机器人自己发的**消息，官方限制时间；撤回后历史里显示"该消息已被撤回" |
 | 禁言 / 解禁 | 群成员消息右键「禁言」，支持 1 分钟 / 10 分钟 / 1 小时 / 1 天 / 解除；需要机器人是群管理员 |
+| 头像 | 私聊会话与每条消息的发送者头像，用 `https://thirdqq.qlogo.cn/qqapp/{AppID}/{openid}/0` 拼（群头像是群号另一套接口，官方只给 openid，所以群会话仍显示图标） |
+| 置顶 | 会话列表悬停可点 📌 置顶，置顶会话始终排在最前，不受新消息时间影响 |
+| 图片代理 | 图片/表情包/头像统一走 `GET /chat-console/media?url=` 由后端带 Referer 拉取（域名白名单），避免浏览器直连腾讯域名被防盗链/跨域挡住；官方没给 URL 的表情包显示「[表情/图片（无法获取内容）]」占位 |
 | 存储管理 | 顶部「存储」按钮：查看总占用 / 每个群占用（字节、条数、天数），调整保留天数（0 = 永久），一键清空单个会话或全部历史 |
 | 实时 | 新消息通过 SSE 自动出现；SSE 断开时前端降级为定时轮询 |
 | 改名 | 群名拉不到或被官方省略号截断时，可以手动给会话起名 |
@@ -80,6 +83,8 @@
 | POST | `/sd-api/chat-console/upload` | multipart：`key` + `file`，发送图片/语音/视频/文件（≤30MB） |
 | POST | `/sd-api/chat-console/recall` | `{key, msgId}` 撤回机器人自己发的消息 |
 | POST | `/sd-api/chat-console/mute` | `{key, memberOpenId, seconds}` 禁言（seconds=0 为解除） |
+| POST | `/sd-api/chat-console/pin` | `{key, pinned}` 置顶 / 取消置顶 |
+| GET | `/sd-api/chat-console/media?url=&token=` | 代理拉取官方媒体（域名白名单：`*.qq.com`、`*.qq.com.cn`、`*.qpic.cn`、`*.qlogo.cn`、`*.myqcloud.com`，不跟随跳转） |
 | GET | `/sd-api/chat-console/storage` | 保留天数 + 总占用 + 每个会话的占用/条数 |
 | POST | `/sd-api/chat-console/settings` | `{retentionDays}` 调整保留天数（0 = 永久） |
 | POST | `/sd-api/chat-console/purge` | `{key}` 清空单个会话；`{all:true}` 清空全部 |

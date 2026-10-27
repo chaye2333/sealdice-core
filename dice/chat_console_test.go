@@ -525,6 +525,100 @@ func TestChatConsoleMigrateLegacyJSONL(t *testing.T) {
 	}
 }
 
+func TestChatConsolePinnedAndAvatar(t *testing.T) {
+	s := newTestChatConsoleStore(t)
+	now := time.Now().Unix()
+	recordTestMsg(t, s, ChatConsoleRecord{
+		Kind: chatConsoleKindGroup, TargetID: "G1", AppID: "10001",
+		SenderOpenID: "MEMBER1", SenderName: "许烁",
+	}, "群消息", now)
+	recordTestMsg(t, s, ChatConsoleRecord{
+		Kind: chatConsoleKindC2C, TargetID: "U1", AppID: "10001",
+		SenderOpenID: "USER1", SenderName: "小明",
+	}, "私聊消息", now+5)
+
+	convs := s.Conversations()
+	if len(convs) != 2 {
+		t.Fatalf("expect 2 conversations, got %d", len(convs))
+	}
+	// 默认按最后消息时间倒序：私聊更新
+	if convs[0].Key != "c2c:U1" {
+		t.Fatalf("unexpected order: %s first", convs[0].Key)
+	}
+	// 私聊会话头像用 openid 拼
+	if convs[0].AvatarURL != "https://thirdqq.qlogo.cn/qqapp/10001/U1/0" {
+		t.Fatalf("unexpected conversation avatar: %q", convs[0].AvatarURL)
+	}
+	// 群会话没有头像（群头像是群号另一套接口）
+	if convs[1].AvatarURL != "" {
+		t.Fatalf("group conversation should not have avatar: %q", convs[1].AvatarURL)
+	}
+
+	// 消息里的发送者头像
+	msgs, _, _ := s.Messages("group:G1", 0, 50)
+	if len(msgs) != 1 || msgs[0].AvatarURL != "https://thirdqq.qlogo.cn/qqapp/10001/MEMBER1/0" {
+		t.Fatalf("unexpected message avatar: %+v", msgs)
+	}
+
+	// 置顶后排到最前面
+	pinned, err := s.SetPinned("group:G1", true)
+	if err != nil || pinned == nil || !pinned.Pinned {
+		t.Fatalf("pin failed: %+v %v", pinned, err)
+	}
+	convs = s.Conversations()
+	if convs[0].Key != "group:G1" || !convs[0].Pinned {
+		t.Fatalf("pinned conversation should be first: %+v", convs[0])
+	}
+
+	// 取消置顶后回到时间顺序
+	if _, err := s.SetPinned("group:G1", false); err != nil {
+		t.Fatalf("unpin failed: %v", err)
+	}
+	convs = s.Conversations()
+	if convs[0].Key != "c2c:U1" {
+		t.Fatalf("unpin should restore time order, got %s", convs[0].Key)
+	}
+
+	// 不存在的会话
+	if _, err := s.SetPinned("group:NOPE", true); err == nil {
+		t.Fatalf("expect error for unknown conversation")
+	}
+}
+
+func TestOfficialQQGroupNameHelpers(t *testing.T) {
+	uin, openID, ok := ParseOfficialQQGroupID("OpenQQ-Group:4019996761-EFD7AC450FE5BFC0DE42513")
+	if !ok || uin != "4019996761" || openID != "EFD7AC450FE5BFC0DE42513" {
+		t.Fatalf("unexpected parse: %q %q %v", uin, openID, ok)
+	}
+	for _, bad := range []string{"QQ-Group:1-2", "OpenQQ-Group:onlyuin", "OpenQQ-Group:-2", "OpenQQ:1-2"} {
+		if _, _, ok := ParseOfficialQQGroupID(bad); ok {
+			t.Fatalf("should not parse: %s", bad)
+		}
+	}
+
+	// 控制台里已经有群名时应当直接回填
+	d := &Dice{BaseConfig: BaseConfig{DataDir: t.TempDir()}}
+	store := d.GetChatConsole()
+	t.Cleanup(store.Close)
+	if _, err := store.Append(ChatConsoleRecord{
+		Kind: chatConsoleKindGroup, TargetID: "G1", UIN: "10001",
+		Text: "hi", TS: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if got := OfficialQQGroupDisplayName(d, "OpenQQ-Group:10001-G1"); got != "" {
+		t.Fatalf("placeholder name should not be used, got %q", got)
+	}
+	store.SetGroupInfo("group:G1", "读书分享会", 256)
+	if got := OfficialQQGroupDisplayName(d, "OpenQQ-Group:10001-G1"); got != "读书分享会" {
+		t.Fatalf("expect console name, got %q", got)
+	}
+	// 非官方群 ID 不处理
+	if got := OfficialQQGroupDisplayName(d, "QQ-Group:10001"); got != "" {
+		t.Fatalf("non official group should return empty, got %q", got)
+	}
+}
+
 // ---------------- 测试小工具 ----------------
 
 type testError string

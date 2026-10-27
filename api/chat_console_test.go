@@ -55,6 +55,8 @@ func chatConsoleTestEnv(t *testing.T) (*echo.Echo, string) {
 	e.GET("/sd-api/chat-console/storage", chatConsoleStorage)
 	e.POST("/sd-api/chat-console/settings", chatConsoleSettingsSave)
 	e.POST("/sd-api/chat-console/purge", chatConsolePurge)
+	e.POST("/sd-api/chat-console/pin", chatConsolePin)
+	e.GET("/sd-api/chat-console/media", chatConsoleMedia)
 	return e, token
 }
 
@@ -297,5 +299,59 @@ func TestChatConsoleAPISettingsAndPurge(t *testing.T) {
 	res = chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/conversations", token, "")
 	if convs, _ := res["conversations"].([]interface{}); len(convs) != 0 {
 		t.Fatalf("expect no conversations after purge all, got %d", len(convs))
+	}
+}
+
+func TestChatConsoleAPIPin(t *testing.T) {
+	e, token := chatConsoleTestEnv(t)
+
+	res := chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/pin", token, `{"key":"group:G1","pinned":true}`)
+	if res["result"] != true {
+		t.Fatalf("pin failed: %+v", res)
+	}
+	conv, _ := res["conversation"].(map[string]interface{})
+	if conv["pinned"] != true {
+		t.Fatalf("conversation should be pinned: %+v", conv)
+	}
+
+	res = chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/conversations", token, "")
+	convs, _ := res["conversations"].([]interface{})
+	if len(convs) == 0 {
+		t.Fatalf("expect conversation list")
+	}
+	first, _ := convs[0].(map[string]interface{})
+	if first["key"] != "group:G1" || first["pinned"] != true {
+		t.Fatalf("pinned conversation should be first: %+v", first)
+	}
+
+	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/pin", token, `{"key":"group:NOPE","pinned":true}`)
+	if res["result"] != false {
+		t.Fatalf("expect failure for unknown conversation: %+v", res)
+	}
+}
+
+func TestChatConsoleMediaWhitelist(t *testing.T) {
+	allowed := []string{
+		"thirdqq.qlogo.cn",
+		"multimedia.nt.qq.com.cn",
+		"gchat.qpic.cn",
+		"q1.qlogo.cn",
+	}
+	for _, host := range allowed {
+		if !chatConsoleAllowedMediaHost(host) {
+			t.Fatalf("host should be allowed: %s", host)
+		}
+	}
+	denied := []string{
+		"evil.com",
+		"qq.com.evil.com",
+		"127.0.0.1",
+		"localhost",
+		"",
+	}
+	for _, host := range denied {
+		if chatConsoleAllowedMediaHost(host) {
+			t.Fatalf("host should be denied: %s", host)
+		}
 	}
 }
