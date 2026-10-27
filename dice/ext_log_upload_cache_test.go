@@ -75,6 +75,71 @@ func TestLogSendToBackendReuploadsMissingCachedURL(t *testing.T) {
 	}
 }
 
+func TestLogSendToBackendForceReuploadsEvenIfCachedURLAlive(t *testing.T) {
+	mockDB := newLogAliasTestDB(t)
+	groupID := "QQ-Group:1006"
+	logName := "force-upload"
+	appendTestLog(t, mockDB, groupID, logName)
+
+	// 旧链接仍然有效（后端 load_data 返回 200 JSON），普通上传会直接复用它；
+	// 强制重传必须无视这一点，重新上传拿到新域名的新链接。
+	oldURL := "https://old-painter.example/?key=Old3#123456"
+	db := mockDB.GetLogDB(constant.WRITE)
+	if err := db.Model(&model.LogInfo{}).
+		Where("group_id = ? AND name = ?", groupID, logName).
+		UpdateColumns(map[string]interface{}{
+			"upload_url":  oldURL,
+			"upload_time": time.Now().Add(time.Minute).Unix(),
+		}).Error; err != nil {
+		t.Fatalf("seed cached upload: %v", err)
+	}
+
+	var probeCount atomic.Int32
+	var uploadCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/dice/api/load_data":
+			probeCount.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"name":"force-upload"}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/dice/api/log":
+			uploadCount.Add(1)
+			_, _ = w.Write([]byte(`{"url":"https://new-painter.example/?key=New3#654321"}`))
+		default:
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	oldBackends := BackendUrls
+	BackendUrls = []string{server.URL}
+	t.Cleanup(func() { BackendUrls = oldBackends })
+
+	ctx := &MsgContext{
+		Dice: &Dice{
+			BaseConfig: BaseConfig{DataDir: t.TempDir()},
+			DBOperator: mockDB,
+			Logger:     sealdiceLogger.M(),
+		},
+		EndPoint: &EndPointInfo{EndPointInfoBase: EndPointInfoBase{UserID: "UI:1000"}},
+	}
+
+	_, gotURL, _, err := LogSendToBackendForce(ctx, groupID, logName)
+	if err != nil {
+		t.Fatalf("LogSendToBackendForce: %v", err)
+	}
+	if gotURL != "https://new-painter.example/?key=New3#654321" {
+		t.Fatalf("url = %q, want newly uploaded URL", gotURL)
+	}
+	if got := probeCount.Load(); got != 0 {
+		t.Fatalf("probe requests = %d, want 0 (force skips probing)", got)
+	}
+	if got := uploadCount.Load(); got != 1 {
+		t.Fatalf("upload requests = %d, want 1", got)
+	}
+}
+
 func TestLogSendToBackendFallsBackToCachedURLWhenProbeAndUploadFail(t *testing.T) {
 	mockDB := newLogAliasTestDB(t)
 	groupID := "QQ-Group:1005"

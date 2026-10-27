@@ -139,19 +139,24 @@ func uploadV105(env UploadEnv) (string, string, error) {
 	url, uploadTS, updateTS, _ := service.LogGetUploadInfo(env.Db, env.GroupID, env.LogName)
 	cachedURL := url
 	probeResult := cachedLogProbeMissing
-	if len(url) > 0 && uploadTS > updateTS {
-		probeResult = checkCachedLogURL(env, url)
-	}
-	if probeResult == cachedLogProbeAlive {
-		// 已有URL且上传时间晚于Log更新时间（最后录入时间），直接返回
-		env.Log.Infof(
-			"查询到之前上传的URL, 直接使用 Log:%s.%s 上传时间:%s 更新时间:%s URL:%s",
-			env.GroupID, env.LogName,
-			time.Unix(uploadTS, 0).Format("2006-01-02 15:04:05"),
-			time.Unix(updateTS, 0).Format("2006-01-02 15:04:05"),
-			url,
-		)
-		return url, env.Notice, nil
+	if env.ForceReupload {
+		// 骰主明确要求重传（例如换了染色器前端域名）
+		env.Log.Infof("强制重新上传日志 Log:%s.%s URL:%s", env.GroupID, env.LogName, url)
+	} else {
+		if len(url) > 0 && uploadTS > updateTS {
+			probeResult = checkCachedLogURL(env, url)
+		}
+		if probeResult == cachedLogProbeAlive {
+			// 已有URL且上传时间晚于Log更新时间（最后录入时间），直接返回
+			env.Log.Infof(
+				"查询到之前上传的URL, 直接使用 Log:%s.%s 上传时间:%s 更新时间:%s URL:%s",
+				env.GroupID, env.LogName,
+				time.Unix(uploadTS, 0).Format("2006-01-02 15:04:05"),
+				time.Unix(updateTS, 0).Format("2006-01-02 15:04:05"),
+				url,
+			)
+			return url, env.Notice, nil
+		}
 	}
 	if len(url) == 0 {
 		env.Log.Infof("没有查询到之前上传的URL Log:%s.%s", env.GroupID, env.LogName)

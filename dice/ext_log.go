@@ -1447,7 +1447,17 @@ func LogSendToBackend(ctx *MsgContext, groupID string, logName string) (bool, st
 	return logSendToBackend(ctx, groupID, logName, false)
 }
 
+// LogSendToBackendForce 强制重新上传日志，忽略"缓存链接仍然有效"的判断。
+// 用在骰主换了染色器前端域名、想把旧链接刷成新域名的场景。
+func LogSendToBackendForce(ctx *MsgContext, groupID string, logName string) (bool, string, string, error) {
+	return logSendToBackendForce(ctx, groupID, logName, false, true)
+}
+
 func logSendToBackend(ctx *MsgContext, groupID string, logName string, skipResolve bool) (bool, string, string, error) {
+	return logSendToBackendForce(ctx, groupID, logName, skipResolve, false)
+}
+
+func logSendToBackendForce(ctx *MsgContext, groupID string, logName string, skipResolve, force bool) (bool, string, string, error) {
 	dice := ctx.Dice
 	dirPath := filepath.Join(dice.BaseConfig.DataDir, "log-exports")
 
@@ -1476,6 +1486,8 @@ func logSendToBackend(ctx *MsgContext, groupID string, logName string, skipResol
 		LogName:   logName,
 		UniformID: ctx.EndPoint.UserID,
 		GroupID:   groupID,
+
+		ForceReupload: force,
 	}
 	uploadCtx.Version = storylog.StoryVersionV1
 

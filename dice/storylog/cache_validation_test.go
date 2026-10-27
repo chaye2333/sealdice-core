@@ -72,3 +72,57 @@ func TestProbeCachedLogURLRejectsUnusableCachedURL(t *testing.T) {
 		t.Fatalf("probeCachedLogURL() = %v, want %v", got, cachedLogProbeMissing)
 	}
 }
+
+// TestProbeCachedLogURLTreatsSPAFallbackAsUnknown 染色器前端是 SPA 时，
+// 任意路径（包括错误的 key、不存在的接口）都会返回 200/206 + index.html。
+// 这种响应不能当成"链接仍然有效"，否则永远不会触发重新上传。
+func TestProbeCachedLogURLTreatsSPAFallbackAsUnknown(t *testing.T) {
+	cases := []struct {
+		name        string
+		statusCode  int
+		contentType string
+		body        string
+	}{
+		{name: "206 html", statusCode: http.StatusPartialContent, contentType: "text/html", body: "<!doctype html><html></html>"},
+		{name: "200 html", statusCode: http.StatusOK, contentType: "text/html; charset=utf-8", body: "<!doctype html><html></html>"},
+		{name: "no content type but html body", statusCode: http.StatusOK, body: "<!doctype html>"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if test.contentType != "" {
+					w.Header().Set("Content-Type", test.contentType)
+				}
+				w.WriteHeader(test.statusCode)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			env := UploadEnv{
+				Backends: []string{server.URL + "/dice/api/log"},
+				Log:      zap.NewNop().Sugar(),
+			}
+			if got := probeCachedLogURL(env, "https://logs.example/?key=AbCd#123456"); got != cachedLogProbeUnknown {
+				t.Fatalf("probeCachedLogURL() = %v, want %v", got, cachedLogProbeUnknown)
+			}
+		})
+	}
+}
+
+// TestProbeCachedLogURLKeepsJSONAlive 正常后端返回 JSON 时仍然算"链接有效"。
+func TestProbeCachedLogURLKeepsJSONAlive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte(`{"items":[{"name":"init"}]}`))
+	}))
+	defer server.Close()
+
+	env := UploadEnv{
+		Backends: []string{server.URL + "/dice/api/log"},
+		Log:      zap.NewNop().Sugar(),
+	}
+	if got := probeCachedLogURL(env, "https://logs.example/?key=AbCd#123456"); got != cachedLogProbeAlive {
+		t.Fatalf("probeCachedLogURL() = %v, want %v", got, cachedLogProbeAlive)
+	}
+}

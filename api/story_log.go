@@ -129,9 +129,14 @@ func storyUploadLog(c echo.Context) error {
 	if !doAuth(c) {
 		return c.JSON(http.StatusForbidden, nil)
 	}
-	v := &model.LogInfo{}
-	_ = c.Bind(&v)
-	unofficial, url, notice, err := logSendToBackend(v.GroupID, v.Name)
+	// force=true 时跳过"缓存链接仍有效"的判断，直接重传（换染色器前端域名后想刷新链接用）
+	req := struct {
+		GroupID string `json:"groupId"`
+		Name    string `json:"name"`
+		Force   bool   `json:"force"`
+	}{}
+	_ = c.Bind(&req)
+	unofficial, url, notice, err := logSendToBackend(req.GroupID, req.Name, req.Force)
 	if err != nil {
 		myDice.Logger.Error("storyUploadLog", err)
 		return c.JSON(http.StatusInternalServerError, err.Error())
@@ -190,11 +195,13 @@ func storyBatchDeleteLogBackup(c echo.Context) error {
 	return Success(&c, Response{})
 }
 
-func logSendToBackend(groupID string, logName string) (bool, string, string, error) {
+func logSendToBackend(groupID string, logName string, force bool) (bool, string, string, error) {
 	ctx := &dice.MsgContext{
 		Dice:     myDice,
 		EndPoint: myDice.UIEndpoint,
 	}
-
+	if force {
+		return dice.LogSendToBackendForce(ctx, groupID, logName)
+	}
 	return dice.LogSendToBackend(ctx, groupID, logName)
 }

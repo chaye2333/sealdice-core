@@ -41,6 +41,10 @@ type UploadEnv struct {
 	GroupID   string
 	Token     string
 
+	// ForceReupload 跳过"缓存链接仍然有效"的判断，直接重新上传。
+	// 用于换了染色器前端域名、想刷新链接等场景。
+	ForceReupload bool
+
 	lines  []*model.LogOneItem
 	data   *[]byte
 	Notice string
@@ -137,10 +141,17 @@ func probeCachedLogURL(env UploadEnv, rawURL string) cachedLogProbeResult {
 		if requestErr != nil {
 			continue
 		}
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
 		_ = resp.Body.Close()
 
 		switch {
 		case resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices:
+			if cachedLogProbeIsHTMLErrorPage(resp.Header.Get("Content-Type"), snippet) {
+				// 有些染色器前端是 SPA：任意路径、任意 key 都返回 200/206 + index.html，
+				// 连错误的 key 和不存在的接口都一样。这种 200 说明不了链接有效，
+				// 按「无法确认」处理，让调用方去尝试重新上传（失败还能回退旧链接）。
+				continue
+			}
 			return cachedLogProbeAlive
 		case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
 			missing = true
@@ -150,6 +161,26 @@ func probeCachedLogURL(env UploadEnv, rawURL string) cachedLogProbeResult {
 		return cachedLogProbeMissing
 	}
 	return cachedLogProbeUnknown
+}
+
+// cachedLogProbeIsHTMLErrorPage 判断探测响应是不是"前端兜底页"而不是真正的日志数据。
+// 只看响应体的开头，够用且不会多读流量。
+func cachedLogProbeIsHTMLErrorPage(contentType string, snippet []byte) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml") {
+		return true
+	}
+	for _, b := range snippet {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '<':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func uploadToBackend(env UploadEnv, backend string, data io.Reader) string {
