@@ -762,6 +762,17 @@ func Bind(e *echo.Echo, _myDice *dice.DiceManager) {
 
 	e.GET(prefix+"/verify/generate_code", verifyGenerateCode)
 
+	// 官方 QQ 聊天控制台
+	e.GET(prefix+"/chat-console/conversations", chatConsoleConversations)
+	e.GET(prefix+"/chat-console/messages", chatConsoleMessages)
+	e.POST(prefix+"/chat-console/send", chatConsoleSend)
+	e.POST(prefix+"/chat-console/upload", chatConsoleUpload)
+	e.POST(prefix+"/chat-console/recall", chatConsoleRecall)
+	e.POST(prefix+"/chat-console/mute", chatConsoleMute)
+	e.POST(prefix+"/chat-console/read", chatConsoleRead)
+	e.POST(prefix+"/chat-console/rename", chatConsoleRename)
+	e.GET(prefix+"/chat-console/events", chatConsoleEvents)
+
 	e.GET(prefix+"/store/backend/list", storeBackendList)
 	e.POST(prefix+"/store/backend/add", storeAddBackend)
 	e.POST(prefix+"/store/backend/enable", storeEnableBackend)

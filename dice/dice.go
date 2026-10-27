@@ -286,6 +286,10 @@ type Dice struct {
 
 	/* 身份与日志绑定 */
 	IdentityBindStore *identityBindStore `json:"-" yaml:"-"` // QQ官方机器人身份绑定关系
+
+	/* 官方 QQ 聊天控制台（数据在 dataDir/chat-console/，不进数据库） */
+	chatConsole     *ChatConsoleStore `json:"-" yaml:"-"`
+	chatConsoleOnce sync.Once         `json:"-" yaml:"-"`
 }
 
 var globalRandSource = randcore.NewGlobalOwner(logger.M())

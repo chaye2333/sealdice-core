@@ -143,6 +143,10 @@ type PlatformAdapterOfficialQQ struct {
 	c2cSendQuota   *OfficialQQSendQuota `json:"-" yaml:"-"`
 	groupSendQuota *OfficialQQSendQuota `json:"-" yaml:"-"`
 	sendQuotaOnce  sync.Once            `json:"-" yaml:"-"`
+
+	// 聊天控制台：群信息（群名/成员数）拉取节流，避免触发官方 30 QPM 限制
+	consoleInfoMu sync.Mutex           `json:"-" yaml:"-"`
+	consoleInfoAt map[string]time.Time `json:"-" yaml:"-"`
 }
 
 type officialQQAdapterJSON struct {
@@ -1113,7 +1117,13 @@ func (pa *PlatformAdapterOfficialQQ) GroupAtMessageReceive(event *dto.WSPayload,
 	log := s.Parent.Logger
 	log.Debugf("official qq: 收到群聊消息：%v, %v", event, data)
 
-	s.Execute(pa.EndPoint, pa.groupMsgToStdMsg(event, data), false)
+	msg := pa.groupMsgToStdMsg(event, data)
+	memberOpenID := ""
+	if data.Author != nil {
+		memberOpenID = data.Author.MemberOpenID
+	}
+	pa.recordChatConsoleInbound(msg, chatConsoleKindGroup, data.GroupOpenID, memberOpenID, false)
+	s.Execute(pa.EndPoint, msg, false)
 	return nil
 }
 
@@ -1164,6 +1174,12 @@ func (pa *PlatformAdapterOfficialQQ) GroupMessageReceive(event *dto.WSPayload, d
 	log.Debugf("official qq: 收到群聊普通消息：%v, %v", event, data)
 
 	msg := pa.groupNormalMsgToStdMsg(event, data)
+	// 能收到非 @ 的群消息，说明群主已授权"获取全部群消息"，控制台据此标权限状态。
+	memberOpenID := ""
+	if data.Author != nil {
+		memberOpenID = data.Author.MemberOpenID
+	}
+	pa.recordChatConsoleInbound(msg, chatConsoleKindGroup, data.GroupOpenID, memberOpenID, true)
 	s.Execute(pa.EndPoint, msg, false)
 	return nil
 }
@@ -1216,6 +1232,9 @@ func (pa *PlatformAdapterOfficialQQ) C2CMessageReceiveFromEvent(payload *dto.WSP
 	log.Debugf("official qq: 收到单聊消息: %v", data)
 
 	msg := pa.c2cMsgToStdMsg(data)
+	if data.Author != nil {
+		pa.recordChatConsoleInbound(msg, chatConsoleKindC2C, data.Author.UserOpenID, data.Author.UserOpenID, false)
+	}
 	s.Execute(pa.EndPoint, msg, false)
 	return nil
 }
@@ -2088,6 +2107,7 @@ func (pa *PlatformAdapterOfficialQQ) sendC2CMsgRaw(ctx *MsgContext, rowMsgID, us
 			lastErr = err
 		} else {
 			lastRes = res
+			pa.recordChatConsoleOutbound(chatConsoleKindC2C, userOpenID, toCreate, res)
 		}
 	}
 
@@ -2497,6 +2517,7 @@ func (pa *PlatformAdapterOfficialQQ) sendQQGroupMsgRaw(ctx *MsgContext, rowMsgID
 			lastErr = err
 		} else {
 			lastRes = res
+			pa.recordChatConsoleOutbound(chatConsoleKindGroup, groupID, toCreate, res)
 		}
 	}
 
