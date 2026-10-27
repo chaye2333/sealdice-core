@@ -32,6 +32,7 @@ func chatConsoleTestEnv(t *testing.T) (*echo.Echo, string) {
 	t.Cleanup(func() { myDice, dm = oldDice, oldDM })
 
 	store := testDice.GetChatConsole()
+	t.Cleanup(store.Close)
 	now := time.Now().Unix()
 	for _, rec := range []dice.ChatConsoleRecord{
 		{Kind: "group", TargetID: "G1", UIN: "10001", SenderID: "OpenQQ-Member:1", SenderName: "许烁", Dir: "in", Source: "user", Text: "骰个侦查", MessageID: "m1", TS: now - 10},
@@ -51,6 +52,9 @@ func chatConsoleTestEnv(t *testing.T) (*echo.Echo, string) {
 	e.POST("/sd-api/chat-console/recall", chatConsoleRecall)
 	e.POST("/sd-api/chat-console/mute", chatConsoleMute)
 	e.POST("/sd-api/chat-console/upload", chatConsoleUpload)
+	e.GET("/sd-api/chat-console/storage", chatConsoleStorage)
+	e.POST("/sd-api/chat-console/settings", chatConsoleSettingsSave)
+	e.POST("/sd-api/chat-console/purge", chatConsolePurge)
 	return e, token
 }
 
@@ -224,5 +228,74 @@ func TestChatConsoleAPIUploadWithoutFile(t *testing.T) {
 	}
 	if res["result"] != false {
 		t.Fatalf("expect failure without file: %+v", res)
+	}
+}
+
+func TestChatConsoleAPIStorage(t *testing.T) {
+	e, token := chatConsoleTestEnv(t)
+
+	res := chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/storage", token, "")
+	if res["result"] != true {
+		t.Fatalf("storage failed: %+v", res)
+	}
+	if res["retentionDays"].(float64) != 30 {
+		t.Fatalf("default retention should be 30, got %v", res["retentionDays"])
+	}
+	if res["totalBytes"].(float64) <= 0 {
+		t.Fatalf("total bytes should be > 0: %+v", res["totalBytes"])
+	}
+	items, _ := res["conversations"].([]interface{})
+	found := false
+	for _, it := range items {
+		m := it.(map[string]interface{})
+		if m["key"] == "group:G1" {
+			found = true
+			if m["messages"].(float64) != 2 {
+				t.Fatalf("group messages = %v, want 2", m["messages"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("group:G1 missing in usage: %+v", items)
+	}
+}
+
+func TestChatConsoleAPISettingsAndPurge(t *testing.T) {
+	e, token := chatConsoleTestEnv(t)
+
+	res := chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/settings", token, `{"retentionDays":7}`)
+	if res["result"] != true || res["retentionDays"].(float64) != 7 {
+		t.Fatalf("save settings failed: %+v", res)
+	}
+
+	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/settings", token, `{"retentionDays":-1}`)
+	if res["result"] != false {
+		t.Fatalf("negative retention should be rejected: %+v", res)
+	}
+
+	// 清空单个会话
+	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/purge", token, `{"key":"group:G1"}`)
+	if res["result"] != true {
+		t.Fatalf("purge conversation failed: %+v", res)
+	}
+	res = chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/messages?key=group:G1", token, "")
+	if msgs, _ := res["messages"].([]interface{}); len(msgs) != 0 {
+		t.Fatalf("expect empty history after purge, got %d", len(msgs))
+	}
+
+	// 缺 key 也不带 all 时报错
+	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/purge", token, `{}`)
+	if res["result"] != false {
+		t.Fatalf("expect failure without key or all: %+v", res)
+	}
+
+	// 清空全部
+	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/purge", token, `{"all":true}`)
+	if res["result"] != true {
+		t.Fatalf("purge all failed: %+v", res)
+	}
+	res = chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/conversations", token, "")
+	if convs, _ := res["conversations"].([]interface{}); len(convs) != 0 {
+		t.Fatalf("expect no conversations after purge all, got %d", len(convs))
 	}
 }

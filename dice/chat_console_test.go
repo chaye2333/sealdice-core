@@ -1,6 +1,8 @@
 package dice //nolint:testpackage
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +12,9 @@ import (
 
 func newTestChatConsoleStore(t *testing.T) *ChatConsoleStore {
 	t.Helper()
-	return NewChatConsoleStore(filepath.Join(t.TempDir(), "chat-console"))
+	s := NewChatConsoleStore(filepath.Join(t.TempDir(), "chat-console"))
+	t.Cleanup(s.Close)
+	return s
 }
 
 func recordTestMsg(t *testing.T, s *ChatConsoleStore, conv ChatConsoleRecord, text string, ts int64) *ChatConsoleMessage {
@@ -194,8 +198,10 @@ func TestChatConsolePersistAcrossReload(t *testing.T) {
 	s1 := NewChatConsoleStore(dir)
 	recordTestMsg(t, s1, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1"}, "第一条", now-10)
 	recordTestMsg(t, s1, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1", FullMessage: true}, "第二条", now-5)
+	s1.Close()
 
 	s2 := NewChatConsoleStore(dir)
+	t.Cleanup(s2.Close)
 	convs := s2.Conversations()
 	if len(convs) != 1 {
 		t.Fatalf("expect 1 conversation after reload, got %d", len(convs))
@@ -213,22 +219,20 @@ func TestChatConsolePersistAcrossReload(t *testing.T) {
 }
 
 func TestChatConsolePruneOldDays(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "chat-console")
-	s := NewChatConsoleStore(dir)
-	recordTestMsg(t, s, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1"}, "新消息", time.Now().Unix())
+	s := newTestChatConsoleStore(t)
+	now := time.Now().Unix()
+	recordTestMsg(t, s, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1"}, "旧消息", now-40*24*3600)
+	recordTestMsg(t, s, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1"}, "新消息", now)
 
-	convDir := filepath.Join(dir, "group_G1")
-	// 造一个远超保留期的日文件
-	old := filepath.Join(convDir, "2000-01-01.jsonl")
-	if err := os.WriteFile(old, []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write old file: %v", err)
+	// 手动触发一次清理（默认保留 30 天，40 天前的应被删掉）
+	s.SetRetentionDays(chatConsoleDefaultRetentionDays)
+
+	msgs, _, err := s.Messages("group:G1", 0, 50)
+	if err != nil {
+		t.Fatalf("messages: %v", err)
 	}
-
-	// 重新加载触发清理
-	s2 := NewChatConsoleStore(dir)
-	_ = s2.Conversations()
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Fatalf("old day file should be pruned, err=%v", err)
+	if len(msgs) != 1 || msgs[0].Text != "新消息" {
+		t.Fatalf("old message should be pruned, got %+v", msgs)
 	}
 }
 
@@ -257,6 +261,113 @@ func TestChatConsoleInvalidRecord(t *testing.T) {
 	}
 	if _, err := s.Append(ChatConsoleRecord{Kind: chatConsoleKindGroup}); err == nil {
 		t.Fatalf("expect error for empty target")
+	}
+}
+
+func TestChatConsoleRetentionSettings(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chat-console")
+	s := NewChatConsoleStore(dir)
+	t.Cleanup(s.Close)
+	if got := s.RetentionDays(); got != chatConsoleDefaultRetentionDays {
+		t.Fatalf("default retention = %d, want %d", got, chatConsoleDefaultRetentionDays)
+	}
+	if got := s.SetRetentionDays(7); got != 7 {
+		t.Fatalf("set retention = %d, want 7", got)
+	}
+
+	// 重新加载后仍然是 7 天
+	s2 := NewChatConsoleStore(dir)
+	t.Cleanup(s2.Close)
+	if got := s2.RetentionDays(); got != 7 {
+		t.Fatalf("retention not persisted: %d", got)
+	}
+
+	// 0 = 永久保留：40 天前的消息不应被清理
+	s2.SetRetentionDays(0)
+	old := time.Now().Unix() - 40*24*3600
+	recordTestMsg(t, s2, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1"}, "很旧的消息", old)
+	s2.SetRetentionDays(0)
+	if msgs, _, _ := s2.Messages("group:G1", 0, 50); len(msgs) != 1 {
+		t.Fatalf("retention=0 should keep old messages, got %d", len(msgs))
+	}
+
+	// 调回 7 天后应当立刻清掉
+	s2.SetRetentionDays(7)
+	if msgs, _, _ := s2.Messages("group:G1", 0, 50); len(msgs) != 0 {
+		t.Fatalf("old message should be pruned after shortening retention, got %d", len(msgs))
+	}
+
+	// 负数按 0 处理，超大值被截断
+	if got := s2.SetRetentionDays(-5); got != 0 {
+		t.Fatalf("negative retention should clamp to 0, got %d", got)
+	}
+	if got := s2.SetRetentionDays(99999); got != chatConsoleMaxRetentionDays {
+		t.Fatalf("retention should clamp to max, got %d", got)
+	}
+}
+
+func TestChatConsoleUsage(t *testing.T) {
+	s := newTestChatConsoleStore(t)
+	now := time.Now().Unix()
+	group := ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1"}
+	for i := range 3 {
+		recordTestMsg(t, s, group, "群里第几条消息", now+int64(i))
+	}
+	recordTestMsg(t, s, ChatConsoleRecord{Kind: chatConsoleKindC2C, TargetID: "U1"}, "私聊", now)
+
+	total, items := s.Usage()
+	if total <= 0 {
+		t.Fatalf("total bytes should be > 0")
+	}
+	if len(items) != 2 {
+		t.Fatalf("expect 2 conversations in usage, got %d", len(items))
+	}
+	if items[0].Key != "group:G1" {
+		t.Fatalf("usage should be sorted by bytes desc, first = %q", items[0].Key)
+	}
+	if items[0].Messages != 3 {
+		t.Fatalf("group messages = %d, want 3", items[0].Messages)
+	}
+	if items[0].Bytes <= 0 || items[0].Days != 1 {
+		t.Fatalf("unexpected group usage: %+v", items[0])
+	}
+	var sum int64
+	for _, it := range items {
+		sum += it.Bytes
+	}
+	if sum <= 0 || sum > total {
+		t.Fatalf("per-conversation bytes should not exceed total (sum=%d total=%d)", sum, total)
+	}
+}
+
+func TestChatConsoleClear(t *testing.T) {
+	s := newTestChatConsoleStore(t)
+	now := time.Now().Unix()
+	recordTestMsg(t, s, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G1"}, "保留前", now)
+	recordTestMsg(t, s, ChatConsoleRecord{Kind: chatConsoleKindC2C, TargetID: "U1"}, "私聊消息", now)
+
+	if err := s.ClearConversation("group:G1"); err != nil {
+		t.Fatalf("clear conversation: %v", err)
+	}
+	if msgs, _, _ := s.Messages("group:G1", 0, 50); len(msgs) != 0 {
+		t.Fatalf("group history should be empty, got %d", len(msgs))
+	}
+	if msgs, _, _ := s.Messages("c2c:U1", 0, 50); len(msgs) != 1 {
+		t.Fatalf("other conversation should be kept, got %d", len(msgs))
+	}
+	if conv := s.Conversation("group:G1"); conv == nil || conv.LastText != "（已清空）" {
+		t.Fatalf("conversation meta should be kept: %+v", conv)
+	}
+
+	// 清空全部
+	if err := s.ClearAll(); err != nil {
+		t.Fatalf("clear all: %v", err)
+	}
+	if convs := s.Conversations(); len(convs) != 0 {
+		t.Fatalf("expect no conversations after clear all, got %d", len(convs))
+	}
+	if msgs, _, _ := s.Messages("c2c:U1", 0, 50); len(msgs) != 0 {
+		t.Fatalf("expect no messages after clear all, got %d", len(msgs))
 	}
 }
 
@@ -350,6 +461,67 @@ func TestChatConsoleMarkRecalled(t *testing.T) {
 	// 不存在的消息
 	if _, err := s.MarkRecalled("group:G1", "nope"); err == nil {
 		t.Fatalf("expect error for unknown message")
+	}
+}
+
+func TestChatConsoleMigrateLegacyJSONL(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chat-console")
+	convDir := filepath.Join(dir, "group_G1")
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	base := time.Now().Unix() - 3600
+	indexRaw, _ := json.MarshalIndent(map[string]interface{}{
+		"version": 1,
+		"conversations": map[string]interface{}{
+			"group:G1": map[string]interface{}{
+				"key": "group:G1", "kind": "group", "targetId": "G1",
+				"name": "读书分享会", "fullMessage": true, "unread": 1,
+				"lastTs": base, "lastText": "旧消息",
+			},
+		},
+	}, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "index.json"), indexRaw, 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	lines := []string{
+		fmt.Sprintf(`{"id":"m1","ts":%d,"dir":"in","source":"user","senderId":"OpenQQ:1-x","senderName":"许烁","text":"旧消息[CQ:image,file=https://example.com/a.png]","msgId":"m1"}`, base),
+		fmt.Sprintf(`{"id":"m2","ts":%d,"dir":"out","source":"console","senderId":"OpenQQ:bot","senderName":"骰子","text":"回复","msgId":"m2","recalled":true,"recalledAt":%d}`, base+1, base+99),
+	}
+	if err := os.WriteFile(filepath.Join(convDir, chatConsoleDay(base)+".jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	s := NewChatConsoleStore(dir)
+	t.Cleanup(s.Close)
+	convs := s.Conversations()
+	if len(convs) != 1 || convs[0].Name != "读书分享会" || !convs[0].FullMessage {
+		t.Fatalf("legacy conversation not imported: %+v", convs)
+	}
+	msgs, _, err := s.Messages("group:G1", 0, 50)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("legacy messages not imported: len=%d err=%v", len(msgs), err)
+	}
+	if !msgs[1].Recalled || msgs[1].RecalledAt == 0 {
+		t.Fatalf("recalled flag not migrated: %+v", msgs[1])
+	}
+
+	// 原始文件被挪到 legacy-jsonl/，不再参与读写
+	if _, err := os.Stat(filepath.Join(dir, "legacy-jsonl", "index.json")); err != nil {
+		t.Fatalf("legacy index should be moved: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.json")); !os.IsNotExist(err) {
+		t.Fatalf("legacy index should no longer exist at original path: %v", err)
+	}
+
+	// 再打开一次不应重复导入
+	s.Close()
+	s2 := NewChatConsoleStore(dir)
+	t.Cleanup(s2.Close)
+	if msgs2, _, _ := s2.Messages("group:G1", 0, 50); len(msgs2) != 2 {
+		t.Fatalf("re-open should not duplicate messages, got %d", len(msgs2))
 	}
 }
 

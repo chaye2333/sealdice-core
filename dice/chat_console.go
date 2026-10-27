@@ -2,13 +2,12 @@ package dice
 
 // 官方 QQ 聊天控制台：骰主在 WebUI 里以机器人身份查看 / 发送消息。
 //
-// 设计要点（详见 docs/official-qq-chat-console-design.md）：
-//   - 只覆盖**官方 QQ**（OpenQQ）这一侧，不碰民间 bot（OneBot）；
-//   - 不落数据库：所有数据在 <dataDir>/chat-console/ 下按会话 + 按天存 jsonl，
-//     删掉整个目录 = 清空历史，旧版本程序不认识该目录也不会去动它；
-//   - 平台 ID（OpenQQ-Group:...）与控制台会话键（group:<group_openid>）互相独立，
-//     不参与身份绑定归一，避免把绑定逻辑卷进来；
-//   - 官方平台无法回溯历史，只能从功能启用后开始记录。
+// 存储方案（v1.2 起）：<dataDir>/chat-console/console.db（独立的 SQLite 文件）。
+//   - 只在本功能自己的目录里建库，**不动** data.db，也不改任何既有 schema；
+//   - 删掉 chat-console/ 目录 = 清空控制台，旧版本程序不认识这个目录；
+//   - 分页 / 按 msg_id 查找 / 撤回 / 按天删除都有索引，500 个群也能用；
+//   - 老版本的 index.json + 按天 jsonl 会在首次启动时自动导入，原始文件被挪到
+//     legacy-jsonl/ 保留一份，确认无误后可自行删除。
 
 import (
 	"encoding/json"
@@ -22,20 +21,30 @@ import (
 	"sync"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	glogger "gorm.io/gorm/logger"
 )
 
 const (
-	chatConsoleIndexName = "index.json"
+	chatConsoleDBName       = "console.db"
+	chatConsoleSettingsName = "settings.json"
+	chatConsoleLegacyDir    = "legacy-jsonl"
 
-	// 聊天控制台保留策略：按天滚动，默认保留 30 天；单次历史查询上限 200 条。
-	chatConsoleRetentionDays = 30
-	chatConsoleMaxTextLen    = 8000
-	chatConsolePreviewLen    = 80
-	chatConsoleDedupeWindow  = 2000
-	chatConsolePageLimit     = 50
-	chatConsolePageMax       = 200
-	chatConsolePruneInterval = time.Hour
+	// 聊天控制台保留策略：按天滚动，天数可在 WebUI 里调整（0 = 永久保留）。
+	chatConsoleDefaultRetentionDays = 30
+	chatConsoleMaxRetentionDays     = 3650
+	chatConsoleMaxTextLen           = 8000
+	chatConsolePreviewLen           = 80
+	chatConsolePageLimit            = 50
+	chatConsolePageMax              = 200
+	chatConsolePruneInterval        = time.Hour
+	// 存储占用扫描结果缓存（聚合查询 + 目录扫描都不便宜）。
+	chatConsoleUsageCacheTTL = 15 * time.Second
+	// 单条消息在 SQLite 里的固定开销估算（列头、索引项、行头），只用于占用展示。
+	chatConsoleRowOverheadBytes = 160
 )
 
 // 官方 QQ 会话键。控制台只认这两个前缀，和 dice 内部的 OpenQQ-Group / OpenQQ 不同。
@@ -110,7 +119,7 @@ type ChatConsoleConversation struct {
 
 // ChatConsoleEvent 是推给 WebUI 的实时事件（SSE）。
 type ChatConsoleEvent struct {
-	Type         string                   `json:"type"` // message / conversation
+	Type         string                   `json:"type"` // message / recall / conversation / settings
 	Conversation *ChatConsoleConversation `json:"conversation,omitempty"`
 	Message      *ChatConsoleMessage      `json:"message,omitempty"`
 }
@@ -133,22 +142,74 @@ type ChatConsoleRecord struct {
 	Quote        *ChatConsoleQuote // 控制台引用回复的引用信息
 }
 
-type chatConsoleIndex struct {
-	Version       int                                 `json:"version"`
-	Conversations map[string]*ChatConsoleConversation `json:"conversations"`
+// ChatConsoleUsage 单个会话的磁盘占用（SQLite 里按列长度估算）。
+type ChatConsoleUsage struct {
+	Key      string `json:"key"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Bytes    int64  `json:"bytes"`
+	Messages int    `json:"messages"`
+	Days     int    `json:"days"`
+	OldestTS int64  `json:"oldestTs,omitempty"`
+	NewestTS int64  `json:"newestTs,omitempty"`
 }
 
-// ChatConsoleStore 管理 chat-console 目录下的会话索引与消息文件。
-// 所有方法并发安全；索引在每次写入后立即原子落盘（文件很小）。
+// chatConsoleSettings 是控制台自己的设置文件（不进数据库、不进 serve.yaml）。
+type chatConsoleSettings struct {
+	// RetentionDays 保留天数；0 表示永久保留。
+	RetentionDays int `json:"retentionDays"`
+}
+
+// chatConsoleConversationRow / chatConsoleMessageRow 是 SQLite 表结构。
+type chatConsoleConversationRow struct {
+	Key         string `gorm:"column:key;primaryKey"`
+	Kind        string `gorm:"column:kind;not null"`
+	TargetID    string `gorm:"column:target_id;not null"`
+	UIN         string `gorm:"column:uin"`
+	EndpointID  string `gorm:"column:endpoint_id"`
+	Name        string `gorm:"column:name"`
+	NameManual  bool   `gorm:"column:name_manual;not null;default:false"`
+	MemberCount int    `gorm:"column:member_count;not null;default:0"`
+	FullMessage bool   `gorm:"column:full_message;not null;default:false"`
+	LastTS      int64  `gorm:"column:last_ts;not null;default:0"`
+	LastText    string `gorm:"column:last_text"`
+	Unread      int    `gorm:"column:unread;not null;default:0"`
+	UpdatedAt   int64  `gorm:"column:updated_at;not null;default:0"`
+}
+
+func (chatConsoleConversationRow) TableName() string { return "chat_console_conversations" }
+
+type chatConsoleMessageRow struct {
+	ID           string `gorm:"column:id;primaryKey"`
+	MsgID        string `gorm:"column:msg_id;index:idx_chat_msgs_msgid"`
+	ConvKey      string `gorm:"column:conv_key;not null;index:idx_chat_msgs_conv_ts,priority:1"`
+	TS           int64  `gorm:"column:ts;not null;index:idx_chat_msgs_conv_ts,priority:2"`
+	Dir          string `gorm:"column:dir;not null"`
+	Source       string `gorm:"column:source;not null"`
+	SenderID     string `gorm:"column:sender_id"`
+	SenderName   string `gorm:"column:sender_name"`
+	SenderOpenID string `gorm:"column:sender_open_id"`
+	Text         string `gorm:"column:text"`
+	Media        string `gorm:"column:media"`
+	Quote        string `gorm:"column:quote"`
+	Recalled     bool   `gorm:"column:recalled;not null;default:false"`
+	RecalledAt   int64  `gorm:"column:recalled_at;not null;default:0"`
+}
+
+func (chatConsoleMessageRow) TableName() string { return "chat_console_messages" }
+
+// ChatConsoleStore 管理 chat-console 目录下的 SQLite 库与设置。
+// 所有方法并发安全。
 type ChatConsoleStore struct {
 	dir string
 
-	mu        sync.Mutex
-	loaded    bool
-	convs     map[string]*ChatConsoleConversation
-	seen      map[string]map[string]struct{} // 会话 -> 最近的官方 msg_id
-	seenSeq   map[string][]string            // 与 seen 配套的写入顺序，用于滑动窗口
-	lastPrune time.Time
+	mu             sync.Mutex
+	opened         bool
+	db             *gorm.DB
+	retentionDays  int
+	settingsLoaded bool
+	lastPrune      time.Time
+	usageCache     *chatConsoleUsageCache
 
 	subMu  sync.Mutex
 	subs   map[int]func(ChatConsoleEvent)
@@ -156,18 +217,30 @@ type ChatConsoleStore struct {
 }
 
 // NewChatConsoleStore 创建一个存储实例。dir 通常是 <dataDir>/chat-console。
+// 真正的建库发生在第一次使用时（懒加载）。
 func NewChatConsoleStore(dir string) *ChatConsoleStore {
 	return &ChatConsoleStore{
-		dir:     dir,
-		convs:   map[string]*ChatConsoleConversation{},
-		seen:    map[string]map[string]struct{}{},
-		seenSeq: map[string][]string{},
-		subs:    map[int]func(ChatConsoleEvent){},
+		dir:  dir,
+		subs: map[int]func(ChatConsoleEvent){},
 	}
 }
 
 // Dir 返回数据目录（测试与文档用）。
 func (s *ChatConsoleStore) Dir() string { return s.dir }
+
+// Close 关闭数据库连接（测试与优雅关停时用）。关闭后再次使用会重新打开。
+func (s *ChatConsoleStore) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return
+	}
+	if sqlDB, err := s.db.DB(); err == nil {
+		_ = sqlDB.Close()
+	}
+	s.db = nil
+	s.opened = false
+}
 
 // GetChatConsole 懒加载聊天控制台存储；未配置 DataDir 时退化到 data/chat-console。
 func (d *Dice) GetChatConsole() *ChatConsoleStore {
@@ -184,69 +257,96 @@ func (d *Dice) GetChatConsole() *ChatConsoleStore {
 	return d.chatConsole
 }
 
-// ---------------- 内部：路径与序列化 ----------------
+// ---------------- 内部：建库与路径 ----------------
 
-func chatConsoleSafeName(key string) string {
-	var b strings.Builder
-	for _, r := range key {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
+func (s *ChatConsoleStore) dbFile() string {
+	return filepath.Join(s.dir, chatConsoleDBName)
+}
+
+func (s *ChatConsoleStore) legacyDir() string {
+	return filepath.Join(s.dir, chatConsoleLegacyDir)
+}
+
+// openLocked 打开数据库、建表、迁移老数据并清理过期记录。调用方需持有 s.mu。
+func (s *ChatConsoleStore) openLocked() error {
+	if s.opened {
+		return nil
 	}
-	name := b.String()
-	if name == "" {
-		name = "unknown"
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return err
 	}
-	return name
-}
 
-func chatConsoleDay(ts int64) string {
-	if ts <= 0 {
-		ts = time.Now().Unix()
+	dsn := fmt.Sprintf("file:%v?_txlock=immediate&_busy_timeout=15000", s.dbFile())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+		// 控制台自己的查询不写进海豹主日志，免得"会话不存在"这类正常分支刷屏
+		Logger: glogger.Default.LogMode(glogger.Silent),
+	})
+	if err != nil {
+		return err
 	}
-	return time.Unix(ts, 0).In(officialQQTimeZone).Format("2006-01-02")
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	// 单连接：写入串行，彻底避开 database is locked；本功能并发压力很小。
+	sqlDB.SetMaxOpenConns(1)
+	_ = db.Exec("PRAGMA journal_mode=WAL").Error
+	_ = db.Exec("PRAGMA synchronous=NORMAL").Error
+	_ = db.Exec("PRAGMA busy_timeout=15000").Error
+
+	if err := db.AutoMigrate(&chatConsoleConversationRow{}, &chatConsoleMessageRow{}); err != nil {
+		return err
+	}
+	// 官方 msg_id 去重：只对非空 msg_id 建唯一索引（本地生成的 uuid 不参与）。
+	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msgs_msgid_uniq
+		ON chat_console_messages(msg_id) WHERE msg_id <> ''`).Error; err != nil {
+		return err
+	}
+
+	s.db = db
+	s.opened = true
+	s.loadSettingsLocked()
+	s.migrateLegacyJSONLLocked()
+	s.pruneLocked()
+	return nil
 }
 
-func (s *ChatConsoleStore) conversationDir(key string) string {
-	return filepath.Join(s.dir, chatConsoleSafeName(key))
-}
-
-func (s *ChatConsoleStore) dayFile(key string, ts int64) string {
-	return filepath.Join(s.conversationDir(key), chatConsoleDay(ts)+".jsonl")
-}
-
-func (s *ChatConsoleStore) indexFile() string {
-	return filepath.Join(s.dir, chatConsoleIndexName)
-}
-
-// ensureLoaded 首次访问时读入索引并顺带清理过期日文件。调用方需持有 s.mu。
-func (s *ChatConsoleStore) ensureLoaded() {
-	if s.loaded {
+func (s *ChatConsoleStore) loadSettingsLocked() {
+	if s.settingsLoaded {
 		return
 	}
-	s.loaded = true
-
-	raw, err := os.ReadFile(s.indexFile())
+	s.settingsLoaded = true
+	raw, err := os.ReadFile(filepath.Join(s.dir, chatConsoleSettingsName)) //nolint:gosec // 内部路径
 	if err == nil {
-		var idx chatConsoleIndex
-		if err := json.Unmarshal(raw, &idx); err == nil && idx.Conversations != nil {
-			for k, v := range idx.Conversations {
-				if v == nil {
-					continue
-				}
-				v.Key = k
-				s.convs[k] = v
-			}
+		var cfg chatConsoleSettings
+		if err := json.Unmarshal(raw, &cfg); err == nil {
+			s.retentionDays = clampChatConsoleRetention(cfg.RetentionDays)
+			return
 		}
 	}
-	s.pruneLocked()
+	s.retentionDays = chatConsoleDefaultRetentionDays
 }
 
-// writeFileAtomic 先写临时文件再 rename，避免读到写了一半的日文件。
-// path 由 conversationDir（已做字符白名单过滤）+ 日期文件名拼成，不来自外部输入。
+func clampChatConsoleRetention(days int) int {
+	if days < 0 {
+		return 0
+	}
+	if days > chatConsoleMaxRetentionDays {
+		return chatConsoleMaxRetentionDays
+	}
+	return days
+}
+
+func (s *ChatConsoleStore) saveSettingsLocked() {
+	raw, err := json.MarshalIndent(chatConsoleSettings{RetentionDays: s.retentionDays}, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(s.dir, 0o755)
+	_ = writeFileAtomic(filepath.Join(s.dir, chatConsoleSettingsName), raw)
+}
+
+// writeFileAtomic 先写临时文件再 rename，避免读到写了一半的文件。
 func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil { //nolint:gosec // 路径来自内部拼接
@@ -255,68 +355,93 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-func (s *ChatConsoleStore) saveIndexLocked() {
-	idx := chatConsoleIndex{
-		Version:       1,
-		Conversations: s.convs,
+// ---------------- 内部：行与结构体互转 ----------------
+
+func chatConsoleMediaJSON(media []ChatConsoleMedia) string {
+	if len(media) == 0 {
+		return ""
 	}
-	raw, err := json.MarshalIndent(idx, "", "  ")
+	raw, err := json.Marshal(media)
 	if err != nil {
-		return
+		return ""
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return
-	}
-	tmp := s.indexFile() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, s.indexFile())
+	return string(raw)
 }
 
-// pruneLocked 删除超过保留期的日文件。会话本身保留（历史被删，但会话仍可继续
-// 使用），这样骰主不会因为清理丢掉群名、权限状态等元信息。
-func (s *ChatConsoleStore) pruneLocked() {
-	now := time.Now()
-	if !s.lastPrune.IsZero() && now.Sub(s.lastPrune) < chatConsolePruneInterval {
-		return
+func chatConsoleQuoteJSON(quote *ChatConsoleQuote) string {
+	if quote == nil {
+		return ""
 	}
-	s.lastPrune = now
-
-	entries, err := os.ReadDir(s.dir)
+	raw, err := json.Marshal(quote)
 	if err != nil {
-		return
+		return ""
 	}
-	cutoff := now.In(officialQQTimeZone).AddDate(0, 0, -chatConsoleRetentionDays).Format("2006-01-02")
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	return string(raw)
+}
+
+func chatConsoleRowToMessage(row chatConsoleMessageRow) ChatConsoleMessage {
+	msg := ChatConsoleMessage{
+		ID:           row.ID,
+		MsgID:        row.MsgID,
+		TS:           row.TS,
+		Dir:          row.Dir,
+		Source:       row.Source,
+		SenderID:     row.SenderID,
+		SenderName:   row.SenderName,
+		SenderOpenID: row.SenderOpenID,
+		Text:         row.Text,
+		Recalled:     row.Recalled,
+		RecalledAt:   row.RecalledAt,
+	}
+	if row.Media != "" {
+		_ = json.Unmarshal([]byte(row.Media), &msg.Media)
+	}
+	if row.Quote != "" {
+		var quote ChatConsoleQuote
+		if err := json.Unmarshal([]byte(row.Quote), &quote); err == nil {
+			msg.Quote = &quote
 		}
-		convDir := filepath.Join(s.dir, entry.Name())
-		files, err := os.ReadDir(convDir)
-		if err != nil {
-			continue
-		}
-		remaining := 0
-		for _, f := range files {
-			name := f.Name()
-			if !strings.HasSuffix(name, ".jsonl") {
-				continue
-			}
-			day := strings.TrimSuffix(name, ".jsonl")
-			if day < cutoff {
-				_ = os.Remove(filepath.Join(convDir, name))
-				continue
-			}
-			remaining++
-		}
-		if remaining == 0 {
-			_ = os.Remove(convDir)
-		}
+	}
+	return msg
+}
+
+func chatConsoleConvToRow(conv *ChatConsoleConversation) chatConsoleConversationRow {
+	return chatConsoleConversationRow{
+		Key:         conv.Key,
+		Kind:        conv.Kind,
+		TargetID:    conv.TargetID,
+		UIN:         conv.UIN,
+		EndpointID:  conv.EndpointID,
+		Name:        conv.Name,
+		NameManual:  conv.NameManual,
+		MemberCount: conv.MemberCount,
+		FullMessage: conv.FullMessage,
+		LastTS:      conv.LastTS,
+		LastText:    conv.LastText,
+		Unread:      conv.Unread,
+		UpdatedAt:   conv.UpdatedAt,
 	}
 }
 
-// ---------------- 内部：媒体解析与预览 ----------------
+func chatConsoleRowToConv(row chatConsoleConversationRow) *ChatConsoleConversation {
+	return &ChatConsoleConversation{
+		Key:         row.Key,
+		Kind:        row.Kind,
+		TargetID:    row.TargetID,
+		UIN:         row.UIN,
+		EndpointID:  row.EndpointID,
+		Name:        row.Name,
+		NameManual:  row.NameManual,
+		MemberCount: row.MemberCount,
+		FullMessage: row.FullMessage,
+		LastTS:      row.LastTS,
+		LastText:    row.LastText,
+		Unread:      row.Unread,
+		UpdatedAt:   row.UpdatedAt,
+	}
+}
+
+// ---------------- 内部：文本小工具 ----------------
 
 func parseChatConsoleMedia(text string) []ChatConsoleMedia {
 	if !strings.Contains(text, "[CQ:") {
@@ -349,6 +474,14 @@ func chatConsolePreview(text string) string {
 		return string(runes[:chatConsolePreviewLen]) + "…"
 	}
 	return plain
+}
+
+// chatConsoleDay 把时间戳格式化成 UTC+8 的日期（迁移老 jsonl 时按天找文件名）。
+func chatConsoleDay(ts int64) string {
+	if ts <= 0 {
+		ts = time.Now().Unix()
+	}
+	return time.Unix(ts, 0).In(officialQQTimeZone).Format("2006-01-02")
 }
 
 func chatConsoleShortID(id string) string {
@@ -395,23 +528,18 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 	if runes := []rune(text); len(runes) > chatConsoleMaxTextLen {
 		text = string(runes[:chatConsoleMaxTextLen]) + "…"
 	}
-
 	key := s.conversationKey(rec.Kind, rec.TargetID)
 
 	s.mu.Lock()
-	s.ensureLoaded()
-
-	if rec.MessageID != "" {
-		if set, ok := s.seen[key]; ok {
-			if _, dup := set[rec.MessageID]; dup {
-				s.mu.Unlock()
-				return nil, nil //nolint:nilnil // 重复消息不是错误：返回 nil 表示已被去重丢弃
-			}
-		}
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, err
 	}
+	s.mu.Unlock()
 
-	msg := &ChatConsoleMessage{
+	msg := ChatConsoleMessage{
 		ID:           rec.MessageID,
+		MsgID:        rec.MessageID,
 		TS:           rec.TS,
 		Dir:          rec.Dir,
 		Source:       rec.Source,
@@ -420,31 +548,83 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 		SenderOpenID: rec.SenderOpenID,
 		Text:         text,
 		Media:        parseChatConsoleMedia(text),
-		MsgID:        rec.MessageID,
 		Quote:        rec.Quote,
 	}
 	if msg.ID == "" {
 		msg.ID = uuid.NewString()
 	}
 
-	if err := s.appendLineLocked(key, msg); err != nil {
-		s.mu.Unlock()
-		return nil, err
+	row := chatConsoleMessageRow{
+		ID:           msg.ID,
+		MsgID:        msg.MsgID,
+		ConvKey:      key,
+		TS:           msg.TS,
+		Dir:          msg.Dir,
+		Source:       msg.Source,
+		SenderID:     msg.SenderID,
+		SenderName:   msg.SenderName,
+		SenderOpenID: msg.SenderOpenID,
+		Text:         msg.Text,
+		Media:        chatConsoleMediaJSON(msg.Media),
+		Quote:        chatConsoleQuoteJSON(msg.Quote),
 	}
-	s.rememberLocked(key, rec.MessageID)
 
-	conv, ok := s.convs[key]
-	if !ok {
-		conv = &ChatConsoleConversation{
+	res := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		// 重复投递：官方 msg_id 撞唯一索引
+		return nil, nil //nolint:nilnil // 重复消息不是错误：返回 nil 表示已被去重丢弃
+	}
+
+	conv := s.upsertConversation(rec, key, msg)
+	s.pruneIfNeeded()
+	s.invalidateUsageLocked()
+
+	convCopy := *conv
+	msgCopy := msg
+	s.publish(ChatConsoleEvent{Type: "message", Conversation: &convCopy, Message: &msgCopy})
+	return &msgCopy, nil
+}
+
+// upsertConversation 更新会话元信息并返回最新副本。
+func (s *ChatConsoleStore) upsertConversation(rec ChatConsoleRecord, key string, msg ChatConsoleMessage) *ChatConsoleConversation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var row chatConsoleConversationRow
+	err := s.db.Where("key = ?", key).Take(&row).Error
+	now := time.Now().Unix()
+	if err != nil {
+		row = chatConsoleConversationRow{
 			Key:        key,
 			Kind:       rec.Kind,
 			TargetID:   rec.TargetID,
 			UIN:        rec.UIN,
 			EndpointID: rec.EndpointID,
 			Name:       chatConsoleDefaultName(rec.Kind, rec.TargetID),
+			LastTS:     msg.TS,
+			LastText:   chatConsolePreview(msg.Text),
+			UpdatedAt:  now,
 		}
-		s.convs[key] = conv
+		if msg.Dir == chatConsoleDirIn {
+			row.Unread = 1
+		}
+		conv := chatConsoleRowToConv(row)
+		if rec.SenderName != "" && rec.Kind == chatConsoleKindC2C && conv.Name == chatConsoleDefaultName(conv.Kind, conv.TargetID) {
+			conv.Name = rec.SenderName
+			conv.NameManual = false
+		}
+		if rec.FullMessage {
+			conv.FullMessage = true
+		}
+		convRow := chatConsoleConvToRow(conv)
+		s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&convRow)
+		return conv
 	}
+
+	conv := chatConsoleRowToConv(row)
 	if rec.UIN != "" {
 		conv.UIN = rec.UIN
 	}
@@ -454,65 +634,52 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 	if rec.FullMessage {
 		conv.FullMessage = true
 	}
-	if rec.SenderName != "" && rec.Kind == chatConsoleKindC2C && conv.Name == chatConsoleDefaultName(conv.Kind, conv.TargetID) {
+	if rec.SenderName != "" && rec.Kind == chatConsoleKindC2C && !conv.NameManual &&
+		conv.Name == chatConsoleDefaultName(conv.Kind, conv.TargetID) {
 		conv.Name = rec.SenderName
 	}
 	conv.LastTS = msg.TS
 	conv.LastText = chatConsolePreview(msg.Text)
-	conv.UpdatedAt = time.Now().Unix()
+	conv.UpdatedAt = now
 	if msg.Dir == chatConsoleDirIn {
 		conv.Unread++
 	}
+	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Updates(map[string]interface{}{
+		"uin":          conv.UIN,
+		"endpoint_id":  conv.EndpointID,
+		"name":         conv.Name,
+		"full_message": conv.FullMessage,
+		"last_ts":      conv.LastTS,
+		"last_text":    conv.LastText,
+		"unread":       conv.Unread,
+		"updated_at":   conv.UpdatedAt,
+	})
+	return conv
+}
 
+// pruneIfNeeded 按小时节流地清理过期消息。
+func (s *ChatConsoleStore) pruneIfNeeded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.pruneLocked()
-	s.saveIndexLocked()
-
-	convCopy := *conv
-	msgCopy := *msg
-	s.mu.Unlock()
-
-	s.publish(ChatConsoleEvent{Type: "message", Conversation: &convCopy, Message: &msgCopy})
-	return &msgCopy, nil
 }
 
-func (s *ChatConsoleStore) appendLineLocked(key string, msg *ChatConsoleMessage) error {
-	file := s.dayFile(key, msg.TS)
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	_, err = f.Write(append(raw, '\n'))
-	return err
-}
-
-func (s *ChatConsoleStore) rememberLocked(key, msgID string) {
-	if msgID == "" {
+func (s *ChatConsoleStore) pruneLocked() {
+	if s.db == nil || s.retentionDays <= 0 {
 		return
 	}
-	set, ok := s.seen[key]
-	if !ok {
-		set = map[string]struct{}{}
-		s.seen[key] = set
+	now := time.Now()
+	if !s.lastPrune.IsZero() && now.Sub(s.lastPrune) < chatConsolePruneInterval {
+		return
 	}
-	set[msgID] = struct{}{}
-	seq := s.seenSeq[key]
-	seq = append(seq, msgID)
-	if len(seq) > chatConsoleDedupeWindow {
-		drop := seq[:len(seq)-chatConsoleDedupeWindow]
-		for _, id := range drop {
-			delete(set, id)
-		}
-		seq = seq[len(seq)-chatConsoleDedupeWindow:]
+	s.lastPrune = now
+
+	cutoff := now.AddDate(0, 0, -s.retentionDays).Unix()
+	res := s.db.Where("ts < ?", cutoff).Delete(&chatConsoleMessageRow{})
+	if res.Error == nil && res.RowsAffected > 0 {
+		_ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error
 	}
-	s.seenSeq[key] = seq
+	s.invalidateUsageLocked()
 }
 
 // ---------------- 公共 API：读取 ----------------
@@ -520,37 +687,37 @@ func (s *ChatConsoleStore) rememberLocked(key, msgID string) {
 // Conversations 返回按最后消息时间倒序排列的会话副本。
 func (s *ChatConsoleStore) Conversations() []*ChatConsoleConversation {
 	s.mu.Lock()
-	s.ensureLoaded()
-	out := make([]*ChatConsoleConversation, 0, len(s.convs))
-	for _, conv := range s.convs {
-		if conv.LastTS == 0 {
-			continue
-		}
-		c := *conv
-		out = append(out, &c)
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
+		return []*ChatConsoleConversation{}
 	}
 	s.mu.Unlock()
 
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].LastTS == out[j].LastTS {
-			return out[i].Key < out[j].Key
-		}
-		return out[i].LastTS > out[j].LastTS
-	})
+	var rows []chatConsoleConversationRow
+	if err := s.db.Where("last_ts > 0").Order("last_ts DESC").Find(&rows).Error; err != nil {
+		return []*ChatConsoleConversation{}
+	}
+	out := make([]*ChatConsoleConversation, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, chatConsoleRowToConv(row))
+	}
 	return out
 }
 
 // Conversation 返回单个会话副本，不存在时返回 nil。
 func (s *ChatConsoleStore) Conversation(key string) *ChatConsoleConversation {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ensureLoaded()
-	conv, ok := s.convs[key]
-	if !ok {
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
 		return nil
 	}
-	c := *conv
-	return &c
+	s.mu.Unlock()
+
+	var row chatConsoleConversationRow
+	if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
+		return nil
+	}
+	return chatConsoleRowToConv(row)
 }
 
 // Messages 向前分页读取历史：before 为 0 表示从最新开始，返回按时间升序的切片。
@@ -562,78 +729,50 @@ func (s *ChatConsoleStore) Messages(key string, before int64, limit int) ([]Chat
 	if limit > chatConsolePageMax {
 		limit = chatConsolePageMax
 	}
-	dir := s.conversationDir(key)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []ChatConsoleMessage{}, false, nil
-		}
+	s.mu.Lock()
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
 		return nil, false, err
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	s.mu.Unlock()
 
-	var collected []ChatConsoleMessage
-	hasMore := false
-	for _, name := range names {
-		raw, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		lines := strings.Split(string(raw), "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := strings.TrimSpace(lines[i])
-			if line == "" {
-				continue
-			}
-			var msg ChatConsoleMessage
-			if err := json.Unmarshal([]byte(line), &msg); err != nil {
-				continue
-			}
-			if before > 0 && msg.TS >= before {
-				continue
-			}
-			if len(collected) >= limit {
-				hasMore = true
-				break
-			}
-			collected = append(collected, msg)
-		}
-		if hasMore {
-			break
-		}
+	q := s.db.Where("conv_key = ?", key)
+	if before > 0 {
+		q = q.Where("ts < ?", before)
 	}
-	for i, j := 0, len(collected)-1; i < j; i, j = i+1, j-1 {
-		collected[i], collected[j] = collected[j], collected[i]
+	var rows []chatConsoleMessageRow
+	if err := q.Order("ts DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
+		return nil, false, err
 	}
-	if collected == nil {
-		collected = []ChatConsoleMessage{}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
 	}
-	return collected, hasMore, nil
+	out := make([]ChatConsoleMessage, 0, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		out = append(out, chatConsoleRowToMessage(rows[i]))
+	}
+	return out, hasMore, nil
 }
 
 // MarkRead 清空未读数。
 func (s *ChatConsoleStore) MarkRead(key string) *ChatConsoleConversation {
 	s.mu.Lock()
-	s.ensureLoaded()
-	conv, ok := s.convs[key]
-	if !ok {
-		s.mu.Unlock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
 		return nil
 	}
-	conv.Unread = 0
-	c := *conv
-	s.saveIndexLocked()
-	s.mu.Unlock()
-
-	s.publish(ChatConsoleEvent{Type: "conversation", Conversation: &c})
-	return &c
+	var row chatConsoleConversationRow
+	if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
+		return nil
+	}
+	if row.Unread != 0 {
+		s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Update("unread", 0)
+		row.Unread = 0
+	}
+	conv := chatConsoleRowToConv(row)
+	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
+	return conv
 }
 
 // Rename 手动设置会话显示名。
@@ -647,139 +786,40 @@ func (s *ChatConsoleStore) Rename(key, name string) (*ChatConsoleConversation, e
 	}
 
 	s.mu.Lock()
-	s.ensureLoaded()
-	conv, ok := s.convs[key]
-	if !ok {
-		s.mu.Unlock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
+		return nil, err
+	}
+	var row chatConsoleConversationRow
+	if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
 		return nil, errors.New("会话不存在")
 	}
+	now := time.Now().Unix()
+	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Updates(map[string]interface{}{
+		"name":        name,
+		"name_manual": true,
+		"updated_at":  now,
+	})
+	conv := chatConsoleRowToConv(row)
 	conv.Name = name
 	conv.NameManual = true
-	conv.UpdatedAt = time.Now().Unix()
-	c := *conv
-	s.saveIndexLocked()
-	s.mu.Unlock()
-
-	s.publish(ChatConsoleEvent{Type: "conversation", Conversation: &c})
-	return &c, nil
-}
-
-// findMessageLocked 在会话的日文件里按 ID 倒序查找一条消息，返回所在文件、行号与副本。
-func (s *ChatConsoleStore) findMessageLocked(key, msgID string) (string, int, *ChatConsoleMessage) {
-	if msgID == "" {
-		return "", -1, nil
-	}
-	dir := s.conversationDir(key)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", -1, nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
-
-	for _, name := range names {
-		file := filepath.Join(dir, name)
-		raw, err := os.ReadFile(file)
-		if err != nil {
-			continue
-		}
-		lines := strings.Split(string(raw), "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := strings.TrimSpace(lines[i])
-			if line == "" {
-				continue
-			}
-			var msg ChatConsoleMessage
-			if err := json.Unmarshal([]byte(line), &msg); err != nil {
-				continue
-			}
-			if msg.ID != msgID && msg.MsgID != msgID {
-				continue
-			}
-			msgCopy := msg
-			return file, i, &msgCopy
-		}
-	}
-	return "", -1, nil
-}
-
-// Find 按 ID 查询一条消息（不存在时返回 nil）。
-func (s *ChatConsoleStore) Find(key, msgID string) *ChatConsoleMessage {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ensureLoaded()
-	_, _, msg := s.findMessageLocked(key, msgID)
-	return msg
-}
-
-// MarkRecalled 把一条已发送的消息标记为"已撤回"：改写所在日文件并推送事件。
-// msgID 可以传官方 msg_id，也可以传控制台内部 ID。
-func (s *ChatConsoleStore) MarkRecalled(key, msgID string) (*ChatConsoleMessage, error) {
-	if msgID == "" {
-		return nil, errors.New("消息 ID 为空")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ensureLoaded()
-
-	file, lineIdx, hit := s.findMessageLocked(key, msgID)
-	if hit == nil {
-		return nil, errors.New("没有找到这条消息（可能已被清理）")
-	}
-
-	raw, err := os.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(string(raw), "\n")
-	if lineIdx < 0 || lineIdx >= len(lines) {
-		return nil, errors.New("消息文件已变化，请刷新后重试")
-	}
-	now := time.Now().Unix()
-	hit.Recalled = true
-	hit.RecalledAt = now
-	recalled, err := json.Marshal(hit)
-	if err != nil {
-		return nil, err
-	}
-	lines[lineIdx] = string(recalled)
-	if err := writeFileAtomic(file, []byte(strings.Join(lines, "\n"))); err != nil {
-		return nil, err
-	}
-
-	conv, ok := s.convs[key]
-	if ok && conv.LastTS == hit.TS {
-		// 最后一条被撤回时，列表预览也跟着变成"已撤回"
-		conv.LastText = "（消息已撤回）"
-	}
-	s.saveIndexLocked()
-
-	var convCopy *ChatConsoleConversation
-	if ok {
-		c := *conv
-		convCopy = &c
-	}
-	hitCopy := *hit
-	s.publish(ChatConsoleEvent{Type: "recall", Conversation: convCopy, Message: &hitCopy})
-	return &hitCopy, nil
+	conv.UpdatedAt = now
+	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
+	return conv, nil
 }
 
 // SetGroupInfo 写入官方返回的群名 / 成员数。手动改过名的会话不会被覆盖。
 func (s *ChatConsoleStore) SetGroupInfo(key, name string, memberCount int) *ChatConsoleConversation {
 	s.mu.Lock()
-	s.ensureLoaded()
-	conv, ok := s.convs[key]
-	if !ok {
-		s.mu.Unlock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
 		return nil
 	}
+	var row chatConsoleConversationRow
+	if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
+		return nil
+	}
+	conv := chatConsoleRowToConv(row)
 	changed := false
 	if name != "" && !conv.NameManual {
 		conv.Name = name
@@ -790,15 +830,444 @@ func (s *ChatConsoleStore) SetGroupInfo(key, name string, memberCount int) *Chat
 		changed = true
 	}
 	if !changed {
+		return nil
+	}
+	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Updates(map[string]interface{}{
+		"name":         conv.Name,
+		"member_count": conv.MemberCount,
+	})
+	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
+	return conv
+}
+
+// Find 按 ID 查询一条消息（不存在时返回 nil）。
+func (s *ChatConsoleStore) Find(key, msgID string) *ChatConsoleMessage {
+	if msgID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	if err := s.openLocked(); err != nil {
 		s.mu.Unlock()
 		return nil
 	}
-	c := *conv
-	s.saveIndexLocked()
 	s.mu.Unlock()
 
-	s.publish(ChatConsoleEvent{Type: "conversation", Conversation: &c})
-	return &c
+	var row chatConsoleMessageRow
+	err := s.db.Where("conv_key = ? AND (id = ? OR msg_id = ?)", key, msgID, msgID).
+		Order("ts DESC").Take(&row).Error
+	if err != nil {
+		return nil
+	}
+	msg := chatConsoleRowToMessage(row)
+	return &msg
+}
+
+// MarkRecalled 把一条已发送的消息标记为"已撤回"并推送事件。
+func (s *ChatConsoleStore) MarkRecalled(key, msgID string) (*ChatConsoleMessage, error) {
+	if msgID == "" {
+		return nil, errors.New("消息 ID 为空")
+	}
+	s.mu.Lock()
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	var row chatConsoleMessageRow
+	err := s.db.Where("conv_key = ? AND (id = ? OR msg_id = ?)", key, msgID, msgID).
+		Order("ts DESC").Take(&row).Error
+	if err != nil {
+		s.mu.Unlock()
+		return nil, errors.New("没有找到这条消息（可能已被清理）")
+	}
+	now := time.Now().Unix()
+	s.db.Model(&chatConsoleMessageRow{}).Where("id = ?", row.ID).Updates(map[string]interface{}{
+		"recalled":    true,
+		"recalled_at": now,
+	})
+	row.Recalled = true
+	row.RecalledAt = now
+
+	var convRow chatConsoleConversationRow
+	var convCopy *ChatConsoleConversation
+	if err := s.db.Where("key = ?", key).Take(&convRow).Error; err == nil && convRow.LastTS == row.TS {
+		s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Update("last_text", "（消息已撤回）")
+		convRow.LastText = "（消息已撤回）"
+		c := chatConsoleRowToConv(convRow)
+		convCopy = c
+	}
+	s.invalidateUsageLocked()
+	s.mu.Unlock()
+
+	msg := chatConsoleRowToMessage(row)
+	s.publish(ChatConsoleEvent{Type: "recall", Conversation: convCopy, Message: &msg})
+	return &msg, nil
+}
+
+// ---------------- 公共 API：保留设置 / 占用统计 / 清空 ----------------
+
+// RetentionDays 返回当前保留天数（0 = 永久保留）。
+func (s *ChatConsoleStore) RetentionDays() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
+		return chatConsoleDefaultRetentionDays
+	}
+	return s.retentionDays
+}
+
+// SetRetentionDays 调整保留天数并立刻按新规则清理一次。
+// 0 表示永久保留；上限 chatConsoleMaxRetentionDays。
+func (s *ChatConsoleStore) SetRetentionDays(days int) int {
+	s.mu.Lock()
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
+		return 0
+	}
+	s.retentionDays = clampChatConsoleRetention(days)
+	s.saveSettingsLocked()
+	s.lastPrune = time.Time{} // 绕过 1 小时节流，立刻清一次
+	s.pruneLocked()
+	retention := s.retentionDays
+	s.mu.Unlock()
+
+	s.publish(ChatConsoleEvent{Type: "settings"})
+	return retention
+}
+
+type chatConsoleUsageCache struct {
+	at    time.Time
+	total int64
+	items []ChatConsoleUsage
+}
+
+func (s *ChatConsoleStore) invalidateUsageLocked() {
+	s.usageCache = nil
+}
+
+// Usage 统计整个目录（数据库 + 设置 + 旧版遗留）的占用，以及每个会话的估算占用。
+// 结果缓存 15 秒。
+func (s *ChatConsoleStore) Usage() (int64, []ChatConsoleUsage) {
+	s.mu.Lock()
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
+		return 0, nil
+	}
+	if c := s.usageCache; c != nil && time.Since(c.at) < chatConsoleUsageCacheTTL {
+		total, items := c.total, c.items
+		s.mu.Unlock()
+		return total, items
+	}
+	convs := make([]*ChatConsoleConversation, 0)
+	var rows []chatConsoleConversationRow
+	if err := s.db.Find(&rows).Error; err == nil {
+		for _, row := range rows {
+			convs = append(convs, chatConsoleRowToConv(row))
+		}
+	}
+	dir := s.dir
+	s.mu.Unlock()
+
+	total, items := s.scanUsage(dir, convs)
+
+	s.mu.Lock()
+	s.usageCache = &chatConsoleUsageCache{at: time.Now(), total: total, items: items}
+	s.mu.Unlock()
+	return total, items
+}
+
+// scanUsage 聚合每个会话的条数 / 时间范围 / 估算字节数，并统计目录里的实际文件。
+func (s *ChatConsoleStore) scanUsage(dir string, convs []*ChatConsoleConversation) (int64, []ChatConsoleUsage) {
+	items := make([]ChatConsoleUsage, 0, len(convs))
+	byKey := make(map[string]*ChatConsoleUsage, len(convs))
+	for _, conv := range convs {
+		item := ChatConsoleUsage{Key: conv.Key, Name: conv.Name, Kind: conv.Kind}
+		items = append(items, item)
+		byKey[conv.Key] = &items[len(items)-1]
+	}
+
+	type aggRow struct {
+		ConvKey  string
+		Count    int
+		Bytes    int64
+		OldestTS int64
+		NewestTS int64
+	}
+	var aggs []aggRow
+	query := `SELECT conv_key,
+		COUNT(*) AS count,
+		SUM(LENGTH(COALESCE(text,'')) + LENGTH(COALESCE(media,'')) + LENGTH(COALESCE(quote,''))
+		    + LENGTH(COALESCE(sender_id,'')) + LENGTH(COALESCE(sender_name,'')) + ?) AS bytes,
+		MIN(ts) AS oldest_ts, MAX(ts) AS newest_ts
+		FROM chat_console_messages GROUP BY conv_key`
+	_ = s.db.Raw(query, chatConsoleRowOverheadBytes).Scan(&aggs).Error
+	for _, agg := range aggs {
+		item, ok := byKey[agg.ConvKey]
+		if !ok {
+			items = append(items, ChatConsoleUsage{Key: agg.ConvKey})
+			item = &items[len(items)-1]
+			byKey[agg.ConvKey] = item
+		}
+		item.Messages = agg.Count
+		item.Bytes = agg.Bytes
+		item.OldestTS = agg.OldestTS
+		item.NewestTS = agg.NewestTS
+		item.Days = chatConsoleDayCount(agg.OldestTS, agg.NewestTS)
+	}
+
+	var total int64
+	for _, name := range []string{chatConsoleDBName, chatConsoleDBName + "-wal", chatConsoleDBName + "-shm", chatConsoleSettingsName} {
+		if info, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			total += info.Size()
+		}
+	}
+	// 旧版遗留目录（导入后保留的一份备份）也算进总占用，方便骰主决定删不删
+	if legacySize := chatConsoleDirSize(s.legacyDir()); legacySize > 0 {
+		total += legacySize
+		items = append(items, ChatConsoleUsage{
+			Key:   chatConsoleLegacyDir,
+			Name:  "旧版 jsonl 备份（可删除）",
+			Bytes: legacySize,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Bytes > items[j].Bytes })
+	return total, items
+}
+
+func chatConsoleDayCount(oldest, newest int64) int {
+	if oldest <= 0 || newest <= 0 {
+		return 0
+	}
+	days := int((newest-oldest)/(24*3600)) + 1
+	if days < 1 {
+		days = 1
+	}
+	return days
+}
+
+func chatConsoleDirSize(dir string) int64 {
+	var total int64
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			total += chatConsoleDirSize(filepath.Join(dir, e.Name()))
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
+// ClearConversation 清空单个会话的历史（保留会话元信息，群名/权限不丢）。
+func (s *ChatConsoleStore) ClearConversation(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
+		return err
+	}
+	if err := s.db.Where("conv_key = ?", key).Delete(&chatConsoleMessageRow{}).Error; err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Updates(map[string]interface{}{
+		"last_text":  "（已清空）",
+		"unread":     0,
+		"updated_at": now,
+	})
+	s.invalidateUsageLocked()
+	_ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error
+
+	var row chatConsoleConversationRow
+	var convCopy *ChatConsoleConversation
+	if err := s.db.Where("key = ?", key).Take(&row).Error; err == nil {
+		c := chatConsoleRowToConv(row)
+		convCopy = c
+	}
+	defer func() {
+		if convCopy != nil {
+			s.publish(ChatConsoleEvent{Type: "conversation", Conversation: convCopy})
+		}
+	}()
+	return nil
+}
+
+// ClearAll 清空全部历史（保留 settings.json 里的保留天数），并尝试把数据库文件缩小。
+func (s *ChatConsoleStore) ClearAll() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
+		return err
+	}
+	if err := s.db.Where("1 = 1").Delete(&chatConsoleMessageRow{}).Error; err != nil {
+		return err
+	}
+	if err := s.db.Where("1 = 1").Delete(&chatConsoleConversationRow{}).Error; err != nil {
+		return err
+	}
+	// 旧版遗留备份也一起清掉，否则"清空全部"之后占用还是降不下来
+	_ = os.RemoveAll(s.legacyDir())
+	_ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error
+	_ = s.db.Exec("VACUUM").Error
+	s.invalidateUsageLocked()
+	return nil
+}
+
+// Flush 把 WAL 落盘（测试与关停时用）。SQLite 模式下写入本身就是持久的，
+// 这里只是把 WAL 合并回主库文件。
+func (s *ChatConsoleStore) Flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return
+	}
+	_ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error
+}
+
+// ---------------- 内部：老版本 jsonl 迁移 ----------------
+
+// migrateLegacyJSONLLocked 把 v1.1 及以前的 index.json + 按天 jsonl 导入 SQLite，
+// 然后把原始文件整体挪到 legacy-jsonl/ 保留一份（不直接删，出问题还能查）。
+func (s *ChatConsoleStore) migrateLegacyJSONLLocked() {
+	indexPath := filepath.Join(s.dir, "index.json")
+	rawIndex, indexErr := os.ReadFile(indexPath) //nolint:gosec // 内部路径
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return
+	}
+
+	legacyConvs := map[string]*ChatConsoleConversation{}
+	if indexErr == nil {
+		var idx struct {
+			Conversations map[string]*ChatConsoleConversation `json:"conversations"`
+		}
+		if err := json.Unmarshal(rawIndex, &idx); err == nil {
+			for k, v := range idx.Conversations {
+				if v == nil {
+					continue
+				}
+				v.Key = k
+				legacyConvs[chatConsoleSafeName(k)] = v
+			}
+		}
+	}
+
+	var convDirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, chatConsoleKindGroup+"_") || strings.HasPrefix(name, chatConsoleKindC2C+"_") ||
+			strings.HasPrefix(name, "group-") || strings.HasPrefix(name, "c2c-") {
+			convDirs = append(convDirs, name)
+		}
+	}
+	if len(convDirs) == 0 && indexErr != nil {
+		return
+	}
+
+	// 先导入会话元信息
+	for _, conv := range legacyConvs {
+		convRow := chatConsoleConvToRow(conv)
+		if err := s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&convRow).Error; err != nil {
+			return
+		}
+	}
+
+	// 再导入消息
+	for _, dirName := range convDirs {
+		var key string
+		if conv := legacyConvs[dirName]; conv != nil {
+			key = conv.Key
+		} else {
+			// 没有 index.json 时按目录名反推（group_xxx -> group:xxx）
+			key = strings.Replace(dirName, "_", ":", 1)
+		}
+		convDir := filepath.Join(s.dir, dirName)
+		files, err := os.ReadDir(convDir)
+		if err != nil {
+			continue
+		}
+		var batch []chatConsoleMessageRow
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(convDir, f.Name())) //nolint:gosec // 内部路径
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				var msg ChatConsoleMessage
+				if err := json.Unmarshal([]byte(line), &msg); err != nil {
+					continue
+				}
+				if msg.ID == "" {
+					continue
+				}
+				batch = append(batch, chatConsoleMessageRow{
+					ID:           msg.ID,
+					MsgID:        msg.MsgID,
+					ConvKey:      key,
+					TS:           msg.TS,
+					Dir:          msg.Dir,
+					Source:       msg.Source,
+					SenderID:     msg.SenderID,
+					SenderName:   msg.SenderName,
+					SenderOpenID: msg.SenderOpenID,
+					Text:         msg.Text,
+					Media:        chatConsoleMediaJSON(msg.Media),
+					Quote:        chatConsoleQuoteJSON(msg.Quote),
+					Recalled:     msg.Recalled,
+					RecalledAt:   msg.RecalledAt,
+				})
+				if len(batch) >= 500 {
+					s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(batch, 500)
+					batch = batch[:0]
+				}
+			}
+		}
+		if len(batch) > 0 {
+			s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(batch, 500)
+		}
+	}
+
+	// 迁移完成：把老文件挪进 legacy-jsonl/
+	legacy := s.legacyDir()
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		return
+	}
+	if indexErr == nil {
+		_ = os.Rename(indexPath, filepath.Join(legacy, "index.json"))
+	}
+	for _, dirName := range convDirs {
+		_ = os.Rename(filepath.Join(s.dir, dirName), filepath.Join(legacy, dirName))
+	}
+}
+
+// chatConsoleSafeName 把会话 key 映射成可用的目录 / 文件名（迁移时用）。
+func chatConsoleSafeName(key string) string {
+	var b strings.Builder
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 // ---------------- 公共 API：实时订阅 ----------------

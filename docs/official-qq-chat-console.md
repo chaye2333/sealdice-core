@@ -19,6 +19,7 @@
 | @ 群成员 | 群聊输入框旁「@成员」，从最近收到过消息的成员里选；发送时转成官方 `<qqbot-at-user>` 标签 |
 | 撤回 | 只能撤回**机器人自己发的**消息，官方限制时间；撤回后历史里显示"该消息已被撤回" |
 | 禁言 / 解禁 | 群成员消息右键「禁言」，支持 1 分钟 / 10 分钟 / 1 小时 / 1 天 / 解除；需要机器人是群管理员 |
+| 存储管理 | 顶部「存储」按钮：查看总占用 / 每个群占用（字节、条数、天数），调整保留天数（0 = 永久），一键清空单个会话或全部历史 |
 | 实时 | 新消息通过 SSE 自动出现；SSE 断开时前端降级为定时轮询 |
 | 改名 | 群名拉不到或被官方省略号截断时，可以手动给会话起名 |
 
@@ -41,19 +42,31 @@
 
 ```
 <dataDir>/chat-console/
-├── index.json                     # 会话元信息：名字、成员数、权限、未读数、最后消息
-├── group_<group_openid>/
-│   └── 2026-11-05.jsonl           # 按天分文件，一行一条消息
-└── c2c_<user_openid>/
-    └── 2026-11-05.jsonl
+├── console.db        # 独立的 SQLite 库：会话元信息 + 消息（不动 data.db）
+├── console.db-wal    # SQLite 的 WAL，正常现象
+├── console.db-shm
+├── settings.json     # 保留天数（可调，0 = 永久保留）
+└── legacy-jsonl/     # v1.1 及以前的 index.json + 按天 jsonl，自动导入后挪到这里，可删
 ```
 
-- 默认保留 **30 天**，每小时最多清理一次过期日文件；
-- 媒体只存 URL 等元信息，**不下载原件**（官方链接过期后失效）；
-- 不写数据库、不参与身份绑定归一、不影响跑团日志。
+- **为什么用 SQLite**：500 个群的公开机器人，jsonl 每次翻页都要扫整个日文件、撤回要顺着文件倒着找，
+  长期用会越来越慢；SQLite 用 `(conv_key, ts)` 和 `msg_id` 索引，翻页 / 撤回 / 按天删除都是走索引。
+- 库文件**独立于** `data.db`：不改任何既有 schema，删掉 `chat-console/` 目录等于清空控制台，回退安全。
+- 表：`chat_console_conversations`（会话）、`chat_console_messages`（消息），`PRAGMA journal_mode=WAL`。
+- 保留天数**默认 30 天**，可在「存储」里改成任意天数（上限 3650），**0 = 永久保留**；
+  清理每小时最多执行一次，改小保留天数时会立刻清理一次。
+- 「清空全部历史」会 `DELETE` 后执行 `VACUUM` 把库文件真正缩回去；单个会话清空只删数据，空间由 SQLite 复用。
+- 占用面板里的「合计占用」是**实际磁盘大小**（console.db + wal/shm + settings + legacy），
+  每个会话的字节数按列长度 + 固定开销**估算**，两者不会完全对得上。
+- 媒体只存 URL 等元信息，**不下载原件**（官方链接过期后失效）。
+- 不写数据库（主库）、不参与身份绑定归一、不影响跑团日志；
+- 内置备份（`data.db` / 牌堆 / 日志等）**不包含** `chat-console/`，不会撑大备份。
 
-**回退**：旧版本程序不认识 `chat-console/` 目录，也不会读写；
-想清空历史直接删掉整个 `chat-console/` 目录即可。
+**从旧版升级**：v1.1 及以前用的是 `index.json` + 按天 jsonl，首次启动会**自动导入**到 `console.db`，
+原始文件整体挪进 `legacy-jsonl/` 留一份（不直接删）；确认数据没问题后可以直接删掉这个目录，
+它的占用也会出现在「存储」面板里。
+
+**回退**：删掉整个 `chat-console/` 目录即可；旧版本程序不认识该目录，也不会读写。
 
 ## 四、接口
 
@@ -67,6 +80,9 @@
 | POST | `/sd-api/chat-console/upload` | multipart：`key` + `file`，发送图片/语音/视频/文件（≤30MB） |
 | POST | `/sd-api/chat-console/recall` | `{key, msgId}` 撤回机器人自己发的消息 |
 | POST | `/sd-api/chat-console/mute` | `{key, memberOpenId, seconds}` 禁言（seconds=0 为解除） |
+| GET | `/sd-api/chat-console/storage` | 保留天数 + 总占用 + 每个会话的占用/条数 |
+| POST | `/sd-api/chat-console/settings` | `{retentionDays}` 调整保留天数（0 = 永久） |
+| POST | `/sd-api/chat-console/purge` | `{key}` 清空单个会话；`{all:true}` 清空全部 |
 | POST | `/sd-api/chat-console/read` | `{key}` 清未读 |
 | POST | `/sd-api/chat-console/rename` | `{key, name}` 手动改名 |
 | GET | `/sd-api/chat-console/events?token=` | SSE 实时推送（`message` / `recall` / `conversation` 事件） |

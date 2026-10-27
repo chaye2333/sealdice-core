@@ -57,6 +57,16 @@ type chatConsoleKeyReq struct {
 	Name string `json:"name"`
 }
 
+type chatConsoleSettingsReq struct {
+	// RetentionDays 保留天数；0 表示永久保留。
+	RetentionDays int `json:"retentionDays"`
+}
+
+type chatConsolePurgeReq struct {
+	Key string `json:"key"`
+	All bool   `json:"all"`
+}
+
 func chatConsoleStoreOf() *dice.ChatConsoleStore {
 	if myDice == nil {
 		return nil
@@ -369,6 +379,80 @@ func chatConsoleRename(c echo.Context) error {
 		return Error(&c, err.Error(), Response{})
 	}
 	return Success(&c, Response{"conversation": conv})
+}
+
+// chatConsoleStorage 返回保留天数、总占用与每个会话的占用。
+func chatConsoleStorage(c echo.Context) error {
+	if !doAuth(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
+	store := chatConsoleStoreOf()
+	if store == nil {
+		return Error(&c, "聊天控制台尚未初始化", Response{})
+	}
+	total, items := store.Usage()
+	return Success(&c, Response{
+		"totalBytes":    total,
+		"retentionDays": store.RetentionDays(),
+		"conversations": items,
+	})
+}
+
+// chatConsoleSettingsSave 调整保留天数（0 = 永久保留）。
+func chatConsoleSettingsSave(c echo.Context) error {
+	if !doAuth(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
+	if dm != nil && dm.JustForTest {
+		return Error(&c, "展示模式不支持该操作", Response{"testMode": true})
+	}
+	var req chatConsoleSettingsReq
+	if err := c.Bind(&req); err != nil {
+		return Error(&c, "请求格式错误", Response{})
+	}
+	if req.RetentionDays < 0 {
+		return Error(&c, "保留天数不能为负数（0 表示永久保留）", Response{})
+	}
+	store := chatConsoleStoreOf()
+	if store == nil {
+		return Error(&c, "聊天控制台尚未初始化", Response{})
+	}
+	days := store.SetRetentionDays(req.RetentionDays)
+	return Success(&c, Response{"retentionDays": days})
+}
+
+// chatConsolePurge 清空单个会话历史，或（all=true）清空全部。
+func chatConsolePurge(c echo.Context) error {
+	if !doAuth(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
+	if dm != nil && dm.JustForTest {
+		return Error(&c, "展示模式不支持该操作", Response{"testMode": true})
+	}
+	var req chatConsolePurgeReq
+	if err := c.Bind(&req); err != nil {
+		return Error(&c, "请求格式错误", Response{})
+	}
+	store := chatConsoleStoreOf()
+	if store == nil {
+		return Error(&c, "聊天控制台尚未初始化", Response{})
+	}
+	if req.All {
+		if err := store.ClearAll(); err != nil {
+			return Error(&c, "清空失败: "+err.Error(), Response{})
+		}
+		return Success(&c, Response{})
+	}
+	if req.Key == "" {
+		return Error(&c, "缺少会话 key（或传 all=true 清空全部）", Response{})
+	}
+	if _, _, ok := chatConsoleSplitKey(req.Key); !ok {
+		return Error(&c, "会话 key 不合法", Response{})
+	}
+	if err := store.ClearConversation(req.Key); err != nil {
+		return Error(&c, "清空失败: "+err.Error(), Response{})
+	}
+	return Success(&c, Response{})
 }
 
 // chatConsoleEvents 用 SSE 把新消息 / 会话变更推给 WebUI。

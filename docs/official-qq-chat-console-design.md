@@ -201,4 +201,18 @@ data/chat-console/
 | 撤回 | `RetractGroupMessage` / `RetractC2CMessage`（SDK 已有）；本地把日文件里的那条标记 `recalled` 并原子改写 | 只能撤回机器人自己的消息 |
 | 禁言 / 解禁 | `Transport` 透传 `POST /v2/groups/{id}/restrict_chat_setting`（op=add/del） | 需机器人是群管理员，单次≤30 天，60 QPM |
 | 发图片/文件 | 浏览器上传 → 临时文件 → 复用适配器 `uploadGroupMedia`/`uploadC2CMedia`（含分片上传保留文件名） | 单文件≤30MB |
+| 存储管理 | `settings.json` 存保留天数（0=永久）；`Usage()` 统计总占用与每会话条数/字节（15 秒缓存）；清空单个或全部 | 索引写盘改为 2 秒合并（新会话立即落盘）；去重窗口从 2000 降到 256，避免 500 群时白吃内存 |
+
+### v1.2：存储从 jsonl 改为 SQLite
+
+500 个群的公开机器人暴露了 jsonl 的长期问题：每次翻页都要读整个日文件、撤回要线性扫、按天删除只能删文件。
+改为 `<dataDir>/chat-console/console.db`（独立 SQLite，不动 `data.db`）：
+
+| 项 | 说明 |
+|---|---|
+| 表 | `chat_console_conversations`、`chat_console_messages` |
+| 索引 | `(conv_key, ts)` 复合索引用于翻页；`msg_id` 唯一索引（非空）用于去重与撤回 |
+| 保留 | `DELETE ... WHERE ts < cutoff`，每小时一次；改小立即清一次；清空全部后 `VACUUM` 收缩 |
+| 迁移 | 首次启动自动导入 `index.json` + 按天 jsonl，原文件挪进 `legacy-jsonl/`（不删，占用面板可见） |
+| 开销 | 单连接 + WAL + `synchronous=NORMAL`，避开 `database is locked`；gorm 日志静默，不刷主日志 |
 
