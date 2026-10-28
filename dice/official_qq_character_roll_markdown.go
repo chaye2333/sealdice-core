@@ -221,6 +221,45 @@ func officialQQCharacterStatusBar(ctx *MsgContext) string {
 	)
 }
 
+// officialQQStatusBarLogf 打状态栏相关的诊断日志（前缀固定，方便在日志里搜）。
+func officialQQStatusBarLogf(ctx *MsgContext, format string, args ...interface{}) {
+	if ctx == nil || ctx.Dice == nil || ctx.Dice.Logger == nil {
+		return
+	}
+	ctx.Dice.Logger.Infof("[官方QQ状态栏] "+format, args...)
+}
+
+// officialQQStatusBarUnavailableReason 说明状态栏为什么生成不出来，用于诊断日志。
+func officialQQStatusBarUnavailableReason(ctx *MsgContext) string {
+	switch {
+	case ctx == nil || ctx.Dice == nil:
+		return "上下文为空"
+	case ctx.Player == nil:
+		return "当前没有玩家上下文（ctx.Player 为空）"
+	case !isOfficialQQEndpoint(ctx.EndPoint):
+		return "当前端点不是 QQ 官方机器人"
+	case !ctx.Dice.Config.OfficialQQUseMarkdown:
+		return "未开启「使用 Markdown」（状态栏是 markdown 数学片段，关闭时无法显示）"
+	case officialQQStatusBarPlayerName(ctx) == "":
+		return "取不到角色名（角色卡/玩家名都为空）"
+	case identityBindPlayerNameTemplate(ctx) == "":
+		return "当前玩家没有 .sn 名片模板（未设置或已 .sn off）"
+	default:
+		return "未知原因（属性行求值失败时可忽略，仍应显示角色名）"
+	}
+}
+
+// officialQQStatusBarLooksLikeCheckReply 粗略判断一段回复是不是"检定/掷骰结果"，
+// 只用于诊断日志：命中但没打标记，说明模板键没被识别（多半是扩展自己拼字符串）。
+func officialQQStatusBarLooksLikeCheckReply(text string) bool {
+	for _, needle := range []string{"检定结果为", "判定结果为", "掷骰结果为", "检定结果："} {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // withOfficialQQCharacterStatusBar 在掷骰 / 鉴定回复顶部加上虚拟角色状态栏。
 //
 // 由发送层（ReplyToSender / ReplyGroup / ReplyPerson）统一调用，因此对所有规则系统
@@ -233,13 +272,25 @@ func withOfficialQQCharacterStatusBar(ctx *MsgContext, text string) string {
 	if ctx == nil {
 		return text
 	}
+	suppressed := ctx.OfficialQQStatusBarSuppressed
+	ctx.OfficialQQStatusBarSuppressed = false
 	pending := takeOfficialQQStatusBarPending(ctx)
-	if !pending || text == "" {
+	if text == "" {
 		return text
+	}
+	if !pending {
+		// 兜底：扩展规则（JS 规则系统，例如 seal-fu）常常自己拼回复文本，
+		// 不走 DiceFormatTmpl，于是打不上标记。这里按回复文本再判一次，
+		// 只在"明显是检定结果 + 该玩家确实设了 .sn 名片"时才挂，避免误挂。
+		if suppressed || !officialQQStatusBarLooksLikeCheckReply(text) {
+			return text
+		}
+		officialQQStatusBarLogf(ctx, "未打标记但回复像检定结果，按文本兜底挂状态栏")
 	}
 
 	bar := officialQQCharacterStatusBar(ctx)
 	if bar == "" {
+		officialQQStatusBarLogf(ctx, "已判定需要状态栏但生成失败：%s", officialQQStatusBarUnavailableReason(ctx))
 		return text
 	}
 	// 状态栏已在顶部时不重复添加
@@ -303,6 +354,8 @@ func clearOfficialQQStatusBarPending(ctx *MsgContext) {
 		return
 	}
 	ctx.OfficialQQStatusBarPending = false
+	// 同时置"本条指令不要状态栏"，挡住发送层按回复文本兜底的判断（.sc 就是靠这个）。
+	ctx.OfficialQQStatusBarSuppressed = true
 	d := ctx.Dice
 	if d == nil || ctx.CommandID == 0 {
 		return

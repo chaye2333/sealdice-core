@@ -881,6 +881,9 @@ type MsgContext struct {
 	// 需要在发送前于顶部补上 QQ 官方机器人的虚拟角色状态栏。
 	// 由 DiceFormatTmpl 在渲染最终模板时置位，发送层消费一次。
 	OfficialQQStatusBarPending bool `json:"-" yaml:"-"`
+	// OfficialQQStatusBarSuppressed 表示本条指令明确不要状态栏（例如 .sc）。
+	// 用它挡住"按回复文本兜底"的逻辑，避免 .sc 又被挂上。
+	OfficialQQStatusBarSuppressed bool `json:"-" yaml:"-"`
 
 	// DataUserID / DataGroupID 是「数据层」身份：如果当前身份参与过身份绑定，
 	// 这里就是归一后的 ID（官方身份↔旧QQ号、官方群↔旧群），否则与真实 ID 相同。

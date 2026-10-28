@@ -83,6 +83,48 @@ func newOfficialQQBarTestCtx(t *testing.T, sheetType string, values map[string]*
 
 func intVal(v int64) *ds.VMValue { return ds.NewIntVal(ds.IntType(v)) }
 
+// TestOfficialQQStatusBarFallbackByReplyText 扩展规则自己拼的回复（不走 DiceFormatTmpl）
+// 拿不到标记，此时按回复文本兜底挂状态栏 —— seal-fu 的 .rc 就是这种。
+func TestOfficialQQStatusBarFallbackByReplyText(t *testing.T) {
+	ctx, cleanup := newOfficialQQBarTestCtx(t, "coc7", map[string]*ds.VMValue{
+		"血条":  intVal(12),
+		"血上限": intVal(12),
+	})
+	defer cleanup()
+	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{血条}/{血上限}"
+	ctx.OfficialQQStatusBarPending = false
+
+	text := `<用户F03A>的力量+力量检定结果为：d10+d10=[10+2]=12\nHR：10`
+	got := withOfficialQQCharacterStatusBar(ctx, text)
+	if !strings.HasPrefix(got, "$\\scriptsize") {
+		t.Fatalf("expected fallback status bar on top of extension reply, got %q", got)
+	}
+	if !strings.Contains(got, "调查员甲") {
+		t.Fatalf("expected character name in fallback bar, got %q", got)
+	}
+
+	// 普通回复不受影响
+	if got := withOfficialQQCharacterStatusBar(ctx, "普通的一句话"); got != "普通的一句话" {
+		t.Fatalf("plain reply must be untouched, got %q", got)
+	}
+}
+
+// TestOfficialQQStatusBarSuppressedForSc 明确不要状态栏的指令（.sc）不能被文本兜底挂上。
+func TestOfficialQQStatusBarSuppressedForSc(t *testing.T) {
+	ctx, cleanup := newOfficialQQBarTestCtx(t, "coc7", map[string]*ds.VMValue{
+		"血条":  intVal(12),
+		"血上限": intVal(12),
+	})
+	defer cleanup()
+	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{血条}/{血上限}"
+
+	clearOfficialQQStatusBarPending(ctx)
+	text := "调查员的理智检定结果为：D100=21/20 失败！"
+	if got := withOfficialQQCharacterStatusBar(ctx, text); got != text {
+		t.Fatalf(".sc 不应挂状态栏，got %q", got)
+	}
+}
+
 // ---------- 状态栏基础行为 ----------
 
 func TestOfficialQQCharacterStatusBarRendersAttributes(t *testing.T) {
