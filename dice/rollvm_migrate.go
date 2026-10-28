@@ -341,16 +341,55 @@ func DiceFormat(ctx *MsgContext, s string) string {
 // 之所以放在这里而不是逐个规则挂载：规则系统是扩展，可以自由增删，
 // 逐个挂载一定会漏（FU 等规则就漏过）。标记法对新规则系统自动生效。
 var officialQQFinalReplyTmplKeys = map[string]bool{
-	"核心:骰点":     true,
-	"核心:骰点_多轮":  true,
-	"COC:检定":    true,
-	"COC:检定_多轮": true,
-	// 注意：不要加 "COC:理智检定"。
-	// .sc 的回复不挂状态栏（骰主明确要求），原因有两点：
-	//   1. .sc 是"扣理智"的结果播报，玩家关心的是损失，顶部再来一行角色属性反而碍事；
-	//   2. .sc 走的是代理上下文（GetCtxProxyFirst），属性行求值容易拿不到值，
-	//      只显示半截名字看起来像 bug。
-	// 见 ext_coc7.go 的 sc 指令：发送前还会显式清掉标记，双保险。
+	"核心:骰点":       true,
+	"核心:骰点_多轮":    true,
+	"COC:检定":      true,
+	"COC:检定_多轮":   true,
+	"COC:对抗检定":    true,
+	"COC:理智检定":    true,
+	"COC:理智检定_多轮": true,
+}
+
+// officialQQIsFinalReplyTmplKey 判断某个模板键是不是"掷骰 / 检定结果的最终回复"。
+//
+// 除了上面写死的核心模板，这里还按**命名约定**兜住第三方扩展规则：
+// 扩展常把最终回复命名成 "<规则>:检定" / "<规则>:判定" / "<规则>:骰点" /
+// "<规则>:最终回复"（例如 FU、SH、DND 以及各种自制规则）。
+// 以前只认写死的几个 COC 键，扩展规则的 .sn 名片就会静默失效。
+//
+// 注意这里是"包含"而不是"后缀"匹配：不少扩展写成 "<规则>:检定结果" / "<规则>:判定_成功"。
+// 同时排除子模板（单项结果文本、附加语、格式错误、提示……），否则中途渲染的子片段
+// 也会打标记，最后给一条不相关的提示也挂上状态栏。
+// 单条指令若明确不要状态栏（例如 .sc），由该指令在发送前清掉标记。
+var officialQQStatusBarExcludedTmplMarkers = []string{
+	"单项", "附加语", "格式错误", "轮数", "前缀", "后缀", "分隔符",
+	"提示", "帮助", "错误", "制卡", "暗中",
+}
+
+var officialQQStatusBarFinalTmplMarkers = []string{
+	"检定", "判定", "骰点", "掷骰", "对抗", "最终回复", "掷骰结果",
+}
+
+func officialQQIsFinalReplyTmplKey(key string) bool {
+	if officialQQFinalReplyTmplKeys[key] {
+		return true
+	}
+	idx := strings.Index(key, ":")
+	if idx < 0 || idx == len(key)-1 {
+		return false
+	}
+	name := key[idx+1:]
+	for _, bad := range officialQQStatusBarExcludedTmplMarkers {
+		if strings.Contains(name, bad) {
+			return false
+		}
+	}
+	for _, good := range officialQQStatusBarFinalTmplMarkers {
+		if strings.Contains(name, good) {
+			return true
+		}
+	}
+	return false
 }
 
 func DiceFormatTmpl(ctx *MsgContext, s string) string {
@@ -372,10 +411,10 @@ func DiceFormatTmpl(ctx *MsgContext, s string) string {
 		}
 
 		// 渲染到「最终回复」模板时标记本次回复需要顶部状态栏。
-		// 这里直接赋值而不是「先清后设」：调用方常会嵌用地渲染中间文本
-		// （例如先渲染 $t结果文本 再渲染最终模板），最后落地的才是真正的最终回复。
-		if officialQQFinalReplyTmplKeys[s] {
-			ctx.OfficialQQStatusBarPending = true
+		// 标记同时按 CommandID 记在 Dice 上：求值可能在代理上下文里进行
+		// （代骰 / @某人），只写在 ctx 上发送层会看不到。
+		if officialQQIsFinalReplyTmplKey(s) {
+			markOfficialQQStatusBarPending(ctx)
 		}
 
 		if engineVersion == "v2" {

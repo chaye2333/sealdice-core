@@ -226,15 +226,14 @@ func officialQQCharacterStatusBar(ctx *MsgContext) string {
 // 由发送层（ReplyToSender / ReplyGroup / ReplyPerson）统一调用，因此对所有规则系统
 // 生效，包括 FU、SH 以及第三方扩展。
 //
-// 是否需要加状态栏由 ctx.OfficialQQStatusBarPending 决定——它由 DiceFormatTmpl
-// 在渲染「最终回复」模板时置位，这样帮助文本、错误提示等不会被误加。
-// 无论是否真的加了，这里都会消费掉标记，避免同一条回复被处理两次。
+// 是否需要加状态栏由 DiceFormatTmpl 在渲染「最终回复」模板时打的标记决定，
+// 这样帮助文本、错误提示等不会被误加。无论是否真的加了，这里都会消费掉标记，
+// 避免同一条回复被处理两次。
 func withOfficialQQCharacterStatusBar(ctx *MsgContext, text string) string {
 	if ctx == nil {
 		return text
 	}
-	pending := ctx.OfficialQQStatusBarPending
-	ctx.OfficialQQStatusBarPending = false
+	pending := takeOfficialQQStatusBarPending(ctx)
 	if !pending || text == "" {
 		return text
 	}
@@ -248,4 +247,67 @@ func withOfficialQQCharacterStatusBar(ctx *MsgContext, text string) string {
 		return text
 	}
 	return bar + "\n" + text
+}
+
+// ---------------- 标记的存取（跨代理上下文） ----------------
+//
+// 标记不能只放在 MsgContext 上：骰点 / 检定常用 GetCtxProxyFirst 生成一个代理上下文
+// 来求值（代骰、@某人），模板渲染发生在代理上，而回复是从原上下文发出去的。
+// 代理是结构体浅拷贝，标记写在代理身上原上下文看不到 —— 这就是"扩展规则的 .sn 名片
+// 时灵时不灵"的根因。这里额外按 CommandID 在 Dice 上记一份，发送层两个来源取并集。
+
+func markOfficialQQStatusBarPending(ctx *MsgContext) {
+	if ctx == nil {
+		return
+	}
+	ctx.OfficialQQStatusBarPending = true
+	d := ctx.Dice
+	if d == nil || ctx.CommandID == 0 {
+		return
+	}
+	d.officialQQStatusBarMu.Lock()
+	if d.officialQQStatusBarPending == nil {
+		d.officialQQStatusBarPending = map[int64]bool{}
+	}
+	// 防御：指令异常中断时标记没被消费，别让它无限增长
+	if len(d.officialQQStatusBarPending) > 512 {
+		d.officialQQStatusBarPending = map[int64]bool{}
+	}
+	d.officialQQStatusBarPending[ctx.CommandID] = true
+	d.officialQQStatusBarMu.Unlock()
+}
+
+func takeOfficialQQStatusBarPending(ctx *MsgContext) bool {
+	if ctx == nil {
+		return false
+	}
+	pending := ctx.OfficialQQStatusBarPending
+	ctx.OfficialQQStatusBarPending = false
+
+	d := ctx.Dice
+	if d == nil || ctx.CommandID == 0 {
+		return pending
+	}
+	d.officialQQStatusBarMu.Lock()
+	if d.officialQQStatusBarPending[ctx.CommandID] {
+		pending = true
+	}
+	delete(d.officialQQStatusBarPending, ctx.CommandID)
+	d.officialQQStatusBarMu.Unlock()
+	return pending
+}
+
+// clearOfficialQQStatusBarPending 明确不要状态栏的指令（例如 .sc）在发送前调用。
+func clearOfficialQQStatusBarPending(ctx *MsgContext) {
+	if ctx == nil {
+		return
+	}
+	ctx.OfficialQQStatusBarPending = false
+	d := ctx.Dice
+	if d == nil || ctx.CommandID == 0 {
+		return
+	}
+	d.officialQQStatusBarMu.Lock()
+	delete(d.officialQQStatusBarPending, ctx.CommandID)
+	d.officialQQStatusBarMu.Unlock()
 }

@@ -290,6 +290,10 @@ type Dice struct {
 	/* 官方 QQ 聊天控制台（数据在 dataDir/chat-console/，不进数据库） */
 	chatConsole     *ChatConsoleStore `json:"-" yaml:"-"`
 	chatConsoleOnce sync.Once         `json:"-" yaml:"-"`
+
+	/* 官方 QQ 状态栏标记：按 CommandID 记录，跨代理上下文（代骰 / @某人）传递 */
+	officialQQStatusBarMu      sync.Mutex     `json:"-" yaml:"-"`
+	officialQQStatusBarPending map[int64]bool `json:"-" yaml:"-"`
 }
 
 var globalRandSource = randcore.NewGlobalOwner(logger.M())

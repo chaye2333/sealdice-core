@@ -310,6 +310,51 @@ func TestWithOfficialQQCharacterStatusBarPrependsOnce(t *testing.T) {
 	}
 }
 
+// TestOfficialQQFinalReplyTmplKeyCoversExtensionRules 扩展规则自定义的最终回复模板也要认。
+func TestOfficialQQFinalReplyTmplKeyCoversExtensionRules(t *testing.T) {
+	yes := []string{
+		"核心:骰点", "核心:骰点_多轮", "COC:检定", "COC:检定_多轮", "COC:对抗检定",
+		"DND:检定", "FU:判定", "SH:判定结果", "自制规则:检定结果", "某扩展:最终回复",
+	}
+	for _, key := range yes {
+		if !officialQQIsFinalReplyTmplKey(key) {
+			t.Fatalf("%q 应当触发状态栏", key)
+		}
+	}
+	no := []string{
+		"COC:理智检定_单项结果文本", "COC:检定_单项结果文本", "COC:提示_临时疯狂",
+		"COC:检定_格式错误", "COC:检定_轮数过多警告", "核心:帮助", "核心:错误",
+		"无名模板", ":空规则名",
+	}
+	for _, key := range no {
+		if officialQQIsFinalReplyTmplKey(key) {
+			t.Fatalf("%q 不应触发状态栏", key)
+		}
+	}
+}
+
+// TestOfficialQQStatusBarPendingCrossesProxyContext 标记必须能从代理上下文传到发送层。
+//
+// 真实场景：.ra / 扩展检定常用 GetCtxProxyFirst 生成代理来求值和渲染，
+// 回复却是用原上下文发的；标记只写在代理上就会丢。
+func TestOfficialQQStatusBarPendingCrossesProxyContext(t *testing.T) {
+	ctx, cleanup := newOfficialQQBarTestCtx(t, "coc7", map[string]*ds.VMValue{"血条": intVal(12)})
+	defer cleanup()
+	ctx.Player.AutoSetNameTemplate = "{$t玩家_RAW} HP{血条}"
+	ctx.CommandID = 987654
+
+	proxy := ctx.ShallowCopy()
+	proxy.OfficialQQStatusBarPending = false
+	markOfficialQQStatusBarPending(proxy)
+
+	if !takeOfficialQQStatusBarPending(ctx) {
+		t.Fatalf("标记应当能跨代理上下文传到发送层")
+	}
+	if takeOfficialQQStatusBarPending(ctx) {
+		t.Fatalf("标记只能被消费一次")
+	}
+}
+
 func TestWithOfficialQQCharacterStatusBarEmptyTextUntouched(t *testing.T) {
 	ctx, cleanup := newOfficialQQBarTestCtx(t, "coc7", map[string]*ds.VMValue{"血条": intVal(12)})
 	defer cleanup()
@@ -525,11 +570,38 @@ func TestOfficialQQStatusBarSkippedForScCommand(t *testing.T) {
 	}
 }
 
-// TestOfficialQQFinalReplyTmplKeysExcludeSc .sc 用的模板不能出现在"最终回复"标记表里，
-// 否则渲染时又会把状态栏标记打开。
-func TestOfficialQQFinalReplyTmplKeysExcludeSc(t *testing.T) {
-	for _, key := range []string{"COC:理智检定", "COC:理智检定_单项结果文本"} {
-		if officialQQFinalReplyTmplKeys[key] {
+// TestOfficialQQIsFinalReplyTmplKey 模板键判定：
+// 核心模板写死认；第三方扩展规则按命名约定兜（<规则>:检定 / <规则>:骰点 / <规则>:最终回复）。
+// 注意 .sc 的模板现在也认，靠 sc 指令发送前清标记来保证 .sc 回复不带状态栏。
+func TestOfficialQQIsFinalReplyTmplKey(t *testing.T) {
+	yes := []string{
+		"核心:骰点",
+		"核心:骰点_多轮",
+		"COC:检定",
+		"COC:检定_多轮",
+		"COC:对抗检定",
+		"COC:理智检定",
+		"FU:检定", // 第三方规则：常见命名
+		"SH:检定",
+		"无名队:骰点",
+		"某规则:最终回复",
+		"某规则:掷骰结果",
+	}
+	for _, key := range yes {
+		if !officialQQIsFinalReplyTmplKey(key) {
+			t.Fatalf("%q 应触发状态栏", key)
+		}
+	}
+	no := []string{
+		"COC:技能成长",
+		"COC:技能成长_结果_成功",
+		"COC:检定_格式错误",     // 不是最终回复
+		"COC:理智检定_附加语_成功", // 只是拼装用的子模板
+		"核心:提示_手动退群前缀",
+		"没有冒号的键",
+	}
+	for _, key := range no {
+		if officialQQIsFinalReplyTmplKey(key) {
 			t.Fatalf("%q 不应触发状态栏", key)
 		}
 	}
