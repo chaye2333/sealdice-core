@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -752,6 +753,165 @@ func (s *ChatConsoleStore) Conversation(key string) *ChatConsoleConversation {
 		return nil
 	}
 	return chatConsoleRowToConv(row)
+}
+
+// ChatConsoleSearchMessage 搜索命中的一条消息（带所属会话信息，便于前端直接跳转）。
+type ChatConsoleSearchMessage struct {
+	ChatConsoleMessage
+	ConversationKey  string `json:"conversationKey"`
+	ConversationName string `json:"conversationName"`
+}
+
+// chatConsoleSearchNormalize 把搜索词拆成「原文」与「可能是 openid 的部分」。
+//
+// 骰主手里经常只有日志里的 dice 平台 ID：
+//
+//	OpenQQ-Group:4019996761-74EF9046C98F864D1743E7A762736819
+//	OpenQQ:4019996761-423C89672A253A4362ACBD00793062B8
+//
+// 控制台里存的是 group_openid / user_openid（没有 uin 前缀），所以这里把前缀和
+// "<uin>-" 前缀剥掉，单独拿 openid 去匹配 target_id。
+func chatConsoleSearchNormalize(q string) (raw string, openID string) {
+	raw = strings.TrimSpace(q)
+	if raw == "" {
+		return "", ""
+	}
+	s := raw
+	for _, prefix := range []string{"OpenQQ-Group:", "OpenQQ-Member:", "OpenQQ:", "QQ-Group:", "QQ:"} {
+		if strings.HasPrefix(s, prefix) {
+			s = strings.TrimPrefix(s, prefix)
+			break
+		}
+	}
+	// 去掉 "<uin>-" 前缀（uin 全是数字）
+	if idx := strings.Index(s, "-"); idx > 0 {
+		if _, err := strconv.ParseUint(s[:idx], 10, 64); err == nil {
+			s = s[idx+1:]
+		}
+	}
+	if s != raw {
+		openID = s
+	}
+	return raw, openID
+}
+
+// escapeChatConsoleLike 转义 LIKE 的通配符，避免用户搜 "%" 时全表命中。
+func escapeChatConsoleLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
+}
+
+// Search 在会话名 / 会话 openid / 消息正文 / 发送者昵称里做模糊搜索。
+// 返回命中的会话与消息（消息带上所属会话，方便前端点击跳转）。
+func (s *ChatConsoleStore) Search(query string, limit int) ([]*ChatConsoleConversation, []ChatConsoleSearchMessage, error) {
+	raw, openID := chatConsoleSearchNormalize(query)
+	if raw == "" {
+		return nil, nil, nil
+	}
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	like := "%" + escapeChatConsoleLike(raw) + "%"
+	openLike := ""
+	if openID != "" {
+		openLike = "%" + escapeChatConsoleLike(openID) + "%"
+	}
+
+	s.mu.Lock()
+	if err := s.openLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, nil, err
+	}
+	s.mu.Unlock()
+
+	// 1) 会话命中：群名/昵称、openid，以及 dice 平台 ID 剥出来的 openid
+	var convRows []chatConsoleConversationRow
+	q := s.db.Where("name LIKE ? ESCAPE '\\'", like)
+	if openLike != "" {
+		q = s.db.Where("(name LIKE ? ESCAPE '\\' OR target_id LIKE ? ESCAPE '\\')", like, openLike)
+	}
+	if err := q.Order("pinned DESC, last_ts DESC").Limit(limit).Find(&convRows).Error; err != nil {
+		return nil, nil, err
+	}
+	convs := make([]*ChatConsoleConversation, 0, len(convRows))
+	convByKey := make(map[string]*ChatConsoleConversation, len(convRows))
+	for _, row := range convRows {
+		conv := chatConsoleRowToConv(row)
+		convs = append(convs, conv)
+		convByKey[conv.Key] = conv
+	}
+
+	// 2) 消息命中：正文关键词、发送者昵称、发送者平台 ID / openid
+	msgLikeArgs := []any{like, like, like}
+	msgWhere := "text LIKE ? ESCAPE '\\' OR sender_name LIKE ? ESCAPE '\\' OR sender_id LIKE ? ESCAPE '\\'"
+	if openLike != "" {
+		msgWhere += " OR sender_open_id LIKE ? ESCAPE '\\'"
+		msgLikeArgs = append(msgLikeArgs, openLike)
+	}
+	var msgRows []chatConsoleMessageRow
+	if err := s.db.
+		Where(msgWhere, msgLikeArgs...).
+		Order("ts DESC").Limit(limit).Find(&msgRows).Error; err != nil {
+		return nil, nil, err
+	}
+
+	// 消息所属会话可能没在 1) 里命中，补查一次；命中的会话也一并返回，
+	// 这样"搜某个人的昵称"能直接看到他在哪些群说过话。
+	missing := make([]string, 0, len(msgRows))
+	seenKey := map[string]bool{}
+	for _, row := range msgRows {
+		if _, ok := convByKey[row.ConvKey]; ok || seenKey[row.ConvKey] {
+			continue
+		}
+		seenKey[row.ConvKey] = true
+		missing = append(missing, row.ConvKey)
+	}
+	if len(missing) > 0 {
+		var extra []chatConsoleConversationRow
+		if err := s.db.Where("key IN ?", missing).Order("pinned DESC, last_ts DESC").Find(&extra).Error; err == nil {
+			for _, row := range extra {
+				conv := chatConsoleRowToConv(row)
+				convByKey[row.Key] = conv
+				convs = append(convs, conv)
+			}
+		}
+	}
+
+	// 消息所属会话的头像/名称要跟会话列表一致
+	appIDs := map[string]string{}
+	var appRows []chatConsoleConversationRow
+	if len(convByKey) > 0 {
+		keys := make([]string, 0, len(convByKey))
+		for k := range convByKey {
+			keys = append(keys, k)
+		}
+		if err := s.db.Select("key", "app_id").Where("key IN ?", keys).Find(&appRows).Error; err == nil {
+			for _, row := range appRows {
+				appIDs[row.Key] = row.AppID
+			}
+		}
+	}
+
+	msgs := make([]ChatConsoleSearchMessage, 0, len(msgRows))
+	for _, row := range msgRows {
+		msg := chatConsoleRowToMessage(row)
+		msg.AvatarURL = chatConsoleAvatarURL(appIDs[row.ConvKey], msg.SenderOpenID)
+		item := ChatConsoleSearchMessage{
+			ChatConsoleMessage: msg,
+			ConversationKey:    row.ConvKey,
+			ConversationName:   row.ConvKey,
+		}
+		if conv, ok := convByKey[row.ConvKey]; ok && conv != nil {
+			item.ConversationName = conv.Name
+		}
+		msgs = append(msgs, item)
+	}
+	return convs, msgs, nil
 }
 
 // Messages 向前分页读取历史：before 为 0 表示从最新开始，返回按时间升序的切片。

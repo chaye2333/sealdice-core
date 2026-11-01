@@ -190,6 +190,24 @@ func censorHitContext(content string, words []string) string {
 	return context
 }
 
+// censorNoticeGroupLabel 通知骰主时用的群标识：有群名就「群名(群号)」。
+//
+// 官方 QQ 群的 GroupName 常常是空的（官方只在 /v2/groups/{id}/info 里给），
+// 这里顺带回退到聊天控制台里已经拿到的名字，否则骰主只看到一个 openid，没法判断是哪个群。
+func censorNoticeGroupLabel(d *Dice, groupInfo *GroupInfo) string {
+	if groupInfo == nil {
+		return "未知群"
+	}
+	name := strings.TrimSpace(groupInfo.GroupName)
+	if name == "" && d != nil {
+		name = OfficialQQGroupDisplayName(d, groupInfo.GroupID)
+	}
+	if name == "" {
+		return groupInfo.GroupID
+	}
+	return fmt.Sprintf("%s(%s)", name, groupInfo.GroupID)
+}
+
 func formatCensorHitDetails(levelText string, words []string, content string) string {
 	encodedWords := make([]string, 0, len(words))
 	for _, word := range words {
@@ -270,7 +288,7 @@ func (d *Dice) CensorMsg(mctx *MsgContext, msg *Message, checkContent string, se
 				case "group":
 					text = fmt.Sprintf(
 						"群(%s)内<%s>(%s)触发<%s>敏感词拦截",
-						groupInfo.GroupID,
+						censorNoticeGroupLabel(d, groupInfo),
 						msg.Sender.Nickname,
 						msg.Sender.UserID,
 						levelText,

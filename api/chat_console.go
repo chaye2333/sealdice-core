@@ -484,6 +484,27 @@ func chatConsolePin(c echo.Context) error {
 	return Success(&c, Response{"conversation": conv})
 }
 
+// chatConsoleSearch 搜索会话（群名 / openid / dice 平台 ID）与消息（正文 / 发送者昵称）。
+func chatConsoleSearch(c echo.Context) error {
+	if !doAuth(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
+	store := chatConsoleStoreOf()
+	if store == nil {
+		return Error(&c, "聊天控制台尚未初始化", Response{})
+	}
+	q := c.QueryParam("q")
+	limit, _ := strconv.Atoi(c.QueryParam("limit"))
+	convs, msgs, err := store.Search(q, limit)
+	if err != nil {
+		return Error(&c, "搜索失败: "+err.Error(), Response{})
+	}
+	return Success(&c, Response{
+		"conversations": convs,
+		"messages":      msgs,
+	})
+}
+
 // chatConsoleAllowedMediaHost 控制台媒体代理的域名白名单。
 // 只放行腾讯的媒体 / 头像域名，避免把 /media 变成任意 URL 代理（SSRF）。
 func chatConsoleAllowedMediaHost(host string) bool {

@@ -57,6 +57,7 @@ func chatConsoleTestEnv(t *testing.T) (*echo.Echo, string) {
 	e.POST("/sd-api/chat-console/purge", chatConsolePurge)
 	e.POST("/sd-api/chat-console/pin", chatConsolePin)
 	e.GET("/sd-api/chat-console/media", chatConsoleMedia)
+	e.GET("/sd-api/chat-console/search", chatConsoleSearch)
 	return e, token
 }
 
@@ -299,6 +300,38 @@ func TestChatConsoleAPISettingsAndPurge(t *testing.T) {
 	res = chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/conversations", token, "")
 	if convs, _ := res["conversations"].([]interface{}); len(convs) != 0 {
 		t.Fatalf("expect no conversations after purge all, got %d", len(convs))
+	}
+}
+
+func TestChatConsoleAPISearch(t *testing.T) {
+	e, token := chatConsoleTestEnv(t)
+
+	// 关键词搜消息
+	res := chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/search?q=%E4%BE%A6%E6%9F%A5", token, "")
+	if res["result"] != true {
+		t.Fatalf("search failed: %+v", res)
+	}
+	msgs, _ := res["messages"].([]interface{})
+	if len(msgs) == 0 {
+		t.Fatalf("expect message hits for 侦查: %+v", res)
+	}
+	first, _ := msgs[0].(map[string]interface{})
+	if first["conversationKey"] != "group:G1" || first["conversationName"] == "" {
+		t.Fatalf("search hit should carry conversation info: %+v", first)
+	}
+
+	// dice 平台群 ID 搜会话
+	res = chatConsoleDo(t, e, http.MethodGet, "/sd-api/chat-console/search?q=OpenQQ-Group:10001-G1", token, "")
+	if res["result"] != true {
+		t.Fatalf("search by dice group id failed: %+v", res)
+	}
+	convs, _ := res["conversations"].([]interface{})
+	if len(convs) != 1 {
+		t.Fatalf("expect 1 conversation for dice group id, got %d", len(convs))
+	}
+	conv, _ := convs[0].(map[string]interface{})
+	if conv["key"] != "group:G1" {
+		t.Fatalf("unexpected conversation: %+v", conv)
 	}
 }
 

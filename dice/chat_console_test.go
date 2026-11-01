@@ -621,6 +621,67 @@ func TestOfficialQQGroupNameHelpers(t *testing.T) {
 
 // ---------------- 测试小工具 ----------------
 
+func TestChatConsoleSearch(t *testing.T) {
+	s := newTestChatConsoleStore(t)
+	now := time.Now().Unix()
+	groupOpenID := "74EF9046C98F864D1743E7A762736819"
+	memberOpenID := "423C89672A253A4362ACBD00793062B8"
+
+	rec := ChatConsoleRecord{
+		Kind: chatConsoleKindGroup, TargetID: groupOpenID, UIN: "4019996761", AppID: "4019996761",
+		SenderName: "鼠人自有大骨汤", SenderOpenID: memberOpenID,
+		SenderID: "OpenQQ:4019996761-423C89672A253A4362ACBD00793062B8",
+	}
+	recordTestMsg(t, s, rec, "注意 这里有敏感词", now)
+	recordTestMsg(t, s, rec, "普通的一句话", now+1)
+
+	// 1) 直接搜 dice 平台群 ID（OpenQQ-Group:<uin>-<openid>）
+	convs, _, err := s.Search("OpenQQ-Group:4019996761-74EF9046C98F864D1743E7A762736819", 10)
+	if err != nil {
+		t.Fatalf("search group id: %v", err)
+	}
+	if len(convs) != 1 || convs[0].TargetID != groupOpenID {
+		t.Fatalf("dice group id should match conversation, got %+v", convs)
+	}
+
+	// 2) 搜 dice 平台用户 ID（OpenQQ:<uin>-<member openid>）
+	_, msgs, err := s.Search("OpenQQ:4019996761-423C89672A253A4362ACBD00793062B8", 10)
+	if err != nil {
+		t.Fatalf("search user id: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("user id should match both of his messages, got %d", len(msgs))
+	}
+
+	// 3) 搜用户昵称
+	convs, msgs, _ = s.Search("鼠人自有大骨汤", 10)
+	if len(msgs) != 2 {
+		t.Fatalf("nickname should match the messages, got %d", len(msgs))
+	}
+	if len(convs) == 0 {
+		t.Fatalf("nickname should also resolve the conversation")
+	}
+
+	// 4) 搜聊天记录关键词
+	_, msgs, _ = s.Search("敏感词", 10)
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "敏感词") {
+		t.Fatalf("keyword should match one message, got %+v", msgs)
+	}
+	if msgs[0].ConversationName == "" || msgs[0].ConversationKey == "" {
+		t.Fatalf("search message should carry its conversation: %+v", msgs[0])
+	}
+
+	// 5) LIKE 通配符要被转义，不能全表命中
+	if _, msgs, _ := s.Search("%", 10); len(msgs) != 0 {
+		t.Fatalf("wildcard should be escaped, got %d messages", len(msgs))
+	}
+
+	// 6) 空搜索
+	if convs, msgs, _ := s.Search("   ", 10); len(convs) != 0 || len(msgs) != 0 {
+		t.Fatalf("empty query should return nothing")
+	}
+}
+
 type testError string
 
 func (e testError) Error() string { return string(e) }
