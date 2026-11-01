@@ -135,6 +135,10 @@ type GroupInfo struct {
 	// 仅用于http接口
 	TmpPlayerNum int64    `json:"tmpPlayerNum" yaml:"-"`
 	TmpExtList   []string `json:"tmpExtList"   yaml:"-"`
+	// 以下字段只有官方 QQ 群能从 /v2/groups/{id}/info 拿到，由聊天控制台缓存回填。
+	TmpFingerMemo string   `json:"tmpFingerMemo,omitempty" yaml:"-"` // 群简介
+	TmpClassText  string   `json:"tmpClassText,omitempty"  yaml:"-"` // 群分类
+	TmpGroupTags  []string `json:"tmpGroupTags,omitempty"  yaml:"-"` // 群标签
 
 	UpdatedAtTime int64 `json:"-" yaml:"-"`
 

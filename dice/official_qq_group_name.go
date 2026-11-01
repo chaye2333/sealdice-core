@@ -68,6 +68,23 @@ func OfficialQQGroupDisplayName(d *Dice, groupID string) string {
 	return conv.Name
 }
 
+// OfficialQQGroupConsoleInfo 返回聊天控制台里缓存的官方群资料（群名、人数、简介、分类、标签）。
+// 拿不到或还没有缓存时返回 nil。
+func OfficialQQGroupConsoleInfo(d *Dice, groupID string) *ChatConsoleConversation {
+	if d == nil {
+		return nil
+	}
+	_, groupOpenID, ok := ParseOfficialQQGroupID(groupID)
+	if !ok {
+		return nil
+	}
+	store := d.GetChatConsole()
+	if store == nil {
+		return nil
+	}
+	return store.Conversation(chatConsoleGroupKey(groupOpenID))
+}
+
 // RefreshOfficialQQGroupName 给一个官方群补群名。
 // 控制台里有名字就同步回填；否则起一个后台任务（限流）去官方接口查一次。
 // 这个函数可以随便调，重复调用会被 chatConsoleInfoThrottle 挡住。
@@ -99,13 +116,15 @@ func RefreshOfficialQQGroupName(d *Dice, groupID string) {
 			// 排队太久就算了，下次刷新再来
 			return
 		}
-		name, memberCount, err := pa.fetchChatConsoleGroupInfo(groupOpenID)
-		if err != nil || name == "" {
+		info, err := pa.fetchChatConsoleGroupInfo(groupOpenID)
+		if err != nil || info == nil {
 			return
 		}
-		setOfficialQQGroupName(d, groupID, name)
+		if info.Name != "" {
+			setOfficialQQGroupName(d, groupID, info.Name)
+		}
 		if store := d.GetChatConsole(); store != nil {
-			store.SetGroupInfo(chatConsoleGroupKey(groupOpenID), name, memberCount)
+			store.SetGroupInfo(chatConsoleGroupKey(groupOpenID), *info)
 		}
 	}()
 }

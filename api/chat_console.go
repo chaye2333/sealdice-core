@@ -73,6 +73,25 @@ type chatConsolePinReq struct {
 	Pinned bool   `json:"pinned"`
 }
 
+// chatConsoleGroupInfo 立刻查一次官方群资料（简介 / 分类 / 标签 / 人数）。
+func chatConsoleGroupInfo(c echo.Context) error {
+	if !doAuth(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
+	if dm != nil && dm.JustForTest {
+		return Error(&c, "展示模式不支持该操作", Response{"testMode": true})
+	}
+	var req chatConsoleKeyReq
+	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Key) == "" {
+		return Error(&c, "请求格式错误", Response{})
+	}
+	conv, err := dice.RefreshChatConsoleGroupInfo(myDice, req.Key)
+	if err != nil {
+		return Error(&c, err.Error(), Response{})
+	}
+	return Success(&c, Response{"conversation": conv})
+}
+
 func chatConsoleStoreOf() *dice.ChatConsoleStore {
 	if myDice == nil {
 		return nil

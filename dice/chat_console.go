@@ -100,6 +100,16 @@ type ChatConsoleMessage struct {
 	RecalledAt int64 `json:"recalledAt,omitempty"`
 }
 
+// ChatConsoleGroupInfo 官方 /v2/groups/{group_openid}/info 返回的群资料。
+// 注意：该接口是白名单机器人才能调用的（错误码 11253），拿不到时只是没有这些字段。
+type ChatConsoleGroupInfo struct {
+	Name        string
+	MemberCount int
+	FingerMemo  string
+	ClassText   string
+	Tags        []string
+}
+
 // ChatConsoleConversation 会话元信息。Name 可能是官方返回的群名，也可能是
 // UI 上自动生成的占位名（NameManual 标记是否为骰主手动改名）。
 type ChatConsoleConversation struct {
@@ -114,6 +124,10 @@ type ChatConsoleConversation struct {
 	Name        string `json:"name"`
 	NameManual  bool   `json:"nameManual"`
 	MemberCount int    `json:"memberCount,omitempty"`
+	// 官方 /v2/groups/{id}/info 里附带、但只有白名单机器人能拿到的群资料。
+	FingerMemo string   `json:"fingerMemo,omitempty"` // 群简介
+	ClassText  string   `json:"classText,omitempty"`  // 群分类
+	Tags       []string `json:"tags,omitempty"`       // 群标签
 	// FullMessage 表示该群已在官方群设置里授权"获取全部群消息"。
 	// 目前只能靠"是否收到过非 @ 群消息"推断，未授权时 UI 需提示。
 	FullMessage bool `json:"fullMessage"`
@@ -180,6 +194,9 @@ type chatConsoleConversationRow struct {
 	Name        string `gorm:"column:name"`
 	NameManual  bool   `gorm:"column:name_manual;not null;default:false"`
 	MemberCount int    `gorm:"column:member_count;not null;default:0"`
+	FingerMemo  string `gorm:"column:finger_memo"`
+	ClassText   string `gorm:"column:class_text"`
+	Tags        string `gorm:"column:tags"` // JSON 数组
 	FullMessage bool   `gorm:"column:full_message;not null;default:false"`
 	Pinned      bool   `gorm:"column:pinned;not null;default:false"`
 	LastTS      int64  `gorm:"column:last_ts;not null;default:0"`
@@ -417,6 +434,12 @@ func chatConsoleRowToMessage(row chatConsoleMessageRow) ChatConsoleMessage {
 }
 
 func chatConsoleConvToRow(conv *ChatConsoleConversation) chatConsoleConversationRow {
+	tags := ""
+	if len(conv.Tags) > 0 {
+		if raw, err := json.Marshal(conv.Tags); err == nil {
+			tags = string(raw)
+		}
+	}
 	return chatConsoleConversationRow{
 		Key:         conv.Key,
 		Kind:        conv.Kind,
@@ -427,6 +450,9 @@ func chatConsoleConvToRow(conv *ChatConsoleConversation) chatConsoleConversation
 		Name:        conv.Name,
 		NameManual:  conv.NameManual,
 		MemberCount: conv.MemberCount,
+		FingerMemo:  conv.FingerMemo,
+		ClassText:   conv.ClassText,
+		Tags:        tags,
 		FullMessage: conv.FullMessage,
 		Pinned:      conv.Pinned,
 		LastTS:      conv.LastTS,
@@ -447,12 +473,17 @@ func chatConsoleRowToConv(row chatConsoleConversationRow) *ChatConsoleConversati
 		Name:        row.Name,
 		NameManual:  row.NameManual,
 		MemberCount: row.MemberCount,
+		FingerMemo:  row.FingerMemo,
+		ClassText:   row.ClassText,
 		FullMessage: row.FullMessage,
 		Pinned:      row.Pinned,
 		LastTS:      row.LastTS,
 		LastText:    row.LastText,
 		Unread:      row.Unread,
 		UpdatedAt:   row.UpdatedAt,
+	}
+	if row.Tags != "" {
+		_ = json.Unmarshal([]byte(row.Tags), &conv.Tags)
 	}
 	// 群头像需要群号（官方只给 group_openid），拼不出来；私聊可以直接用 openid
 	if conv.Kind == chatConsoleKindC2C {
@@ -1028,8 +1059,9 @@ func (s *ChatConsoleStore) SetPinned(key string, pinned bool) (*ChatConsoleConve
 	return conv, nil
 }
 
-// SetGroupInfo 写入官方返回的群名 / 成员数。手动改过名的会话不会被覆盖。
-func (s *ChatConsoleStore) SetGroupInfo(key, name string, memberCount int) *ChatConsoleConversation {
+// SetGroupInfo 写入官方返回的群资料（群名 / 成员数 / 简介 / 分类 / 标签）。
+// 手动改过名的会话不会被群名覆盖。
+func (s *ChatConsoleStore) SetGroupInfo(key string, info ChatConsoleGroupInfo) *ChatConsoleConversation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.openLocked(); err != nil {
@@ -1041,20 +1073,41 @@ func (s *ChatConsoleStore) SetGroupInfo(key, name string, memberCount int) *Chat
 	}
 	conv := chatConsoleRowToConv(row)
 	changed := false
-	if name != "" && !conv.NameManual {
-		conv.Name = name
+	if info.Name != "" && !conv.NameManual && conv.Name != info.Name {
+		conv.Name = info.Name
 		changed = true
 	}
-	if memberCount > 0 && conv.MemberCount != memberCount {
-		conv.MemberCount = memberCount
+	if info.MemberCount > 0 && conv.MemberCount != info.MemberCount {
+		conv.MemberCount = info.MemberCount
+		changed = true
+	}
+	if info.FingerMemo != "" && conv.FingerMemo != info.FingerMemo {
+		conv.FingerMemo = info.FingerMemo
+		changed = true
+	}
+	if info.ClassText != "" && conv.ClassText != info.ClassText {
+		conv.ClassText = info.ClassText
+		changed = true
+	}
+	if len(info.Tags) > 0 && strings.Join(conv.Tags, "\x00") != strings.Join(info.Tags, "\x00") {
+		conv.Tags = info.Tags
 		changed = true
 	}
 	if !changed {
 		return nil
 	}
+	tags := ""
+	if len(conv.Tags) > 0 {
+		if raw, err := json.Marshal(conv.Tags); err == nil {
+			tags = string(raw)
+		}
+	}
 	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Updates(map[string]interface{}{
 		"name":         conv.Name,
 		"member_count": conv.MemberCount,
+		"finger_memo":  conv.FingerMemo,
+		"class_text":   conv.ClassText,
+		"tags":         tags,
 	})
 	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
 	return conv

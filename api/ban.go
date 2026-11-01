@@ -101,16 +101,38 @@ func banMapAddOne(c echo.Context) error {
 			reason = v.Reasons[0]
 		}
 
+		// 从 ID 前缀推断平台：QQ-Group:123 -> QQ；OpenQQ-Group:... -> QQ（官方 bot 端点 Platform 就是 QQ）
 		prefix := strings.Split(v.ID, ":")[0]
 		platform := strings.Replace(prefix, "-Group", "", 1)
+		if platform == "OpenQQ" {
+			platform = "QQ"
+		}
+
+		// 只用一个端点做上下文：AddScoreBase 会累加怒气值，多个端点各来一次会重复计数。
+		var chosen *dice.EndPointInfo
 		for _, i := range myDice.ImSession.EndPoints {
 			if i.Platform == platform && i.Enable {
-				v2 := (&myDice.Config).BanList.AddScoreBase(v.ID, score, "海豹后台", reason, &dice.MsgContext{Dice: myDice, EndPoint: i})
-				if v2 != nil {
-					if v.Name != "" {
-						v2.Name = v.Name
-					}
+				chosen = i
+				break
+			}
+		}
+		// 官方群的平台名与端点 Platform 可能对不上（或该平台端点暂时禁用）：
+		// 退化为任意一个启用端点，否则退化为 UI 端点，避免"点了没反应"。
+		if chosen == nil {
+			for _, i := range myDice.ImSession.EndPoints {
+				if i.Enable {
+					chosen = i
+					break
 				}
+			}
+		}
+		if chosen == nil {
+			chosen = myDice.UIEndpoint
+		}
+		if chosen != nil {
+			v2 := (&myDice.Config).BanList.AddScoreBase(v.ID, score, "海豹后台", reason, &dice.MsgContext{Dice: myDice, EndPoint: chosen})
+			if v2 != nil && v.Name != "" {
+				v2.Name = v.Name
 			}
 		}
 	}

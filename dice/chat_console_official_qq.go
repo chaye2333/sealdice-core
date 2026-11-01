@@ -164,16 +164,16 @@ func (pa *PlatformAdapterOfficialQQ) refreshChatConsoleGroupInfo(groupOpenID str
 		return
 	}
 	go func() {
-		name, count, err := pa.fetchChatConsoleGroupInfo(groupOpenID)
+		info, err := pa.fetchChatConsoleGroupInfo(groupOpenID)
 		if err != nil {
 			pa.chatConsoleLogf("official qq 获取群信息失败(%s): %v", groupOpenID, err)
 			return
 		}
-		store.SetGroupInfo(key, name, count)
+		store.SetGroupInfo(key, *info)
 		// 顺手把 dice 层的群名也补上，群组管理页就不会显示「未获取到」
-		if pa.EndPoint != nil && pa.EndPoint.Session != nil {
+		if info.Name != "" && pa.EndPoint != nil && pa.EndPoint.Session != nil {
 			setOfficialQQGroupName(pa.EndPoint.Session.Parent,
-				formatDiceIDOfficialQQGroupOpenID(pa.UIN, groupOpenID), name)
+				formatDiceIDOfficialQQGroupOpenID(pa.UIN, groupOpenID), info.Name)
 		}
 	}()
 }
@@ -193,9 +193,10 @@ func (pa *PlatformAdapterOfficialQQ) allowChatConsoleInfoFetch(groupOpenID strin
 }
 
 // fetchChatConsoleGroupInfo 通过 OpenAPI 透传接口查询群信息（SDK 没封装 /v2/groups/{id}/info）。
-func (pa *PlatformAdapterOfficialQQ) fetchChatConsoleGroupInfo(groupOpenID string) (string, int, error) {
+// 该接口是白名单机器人才能用的（错误码 11253），拿不到时不报错、只是没有简介/标签这些字段。
+func (pa *PlatformAdapterOfficialQQ) fetchChatConsoleGroupInfo(groupOpenID string) (*ChatConsoleGroupInfo, error) {
 	if pa.Api == nil {
-		return "", 0, errors.New("官方 QQ 机器人尚未连接")
+		return nil, errors.New("官方 QQ 机器人尚未连接")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -203,19 +204,88 @@ func (pa *PlatformAdapterOfficialQQ) fetchChatConsoleGroupInfo(groupOpenID strin
 	body, err := pa.Api.Transport(ctx, http.MethodGet,
 		qqconstant.APIDomain+"/v2/groups/"+url.PathEscape(groupOpenID)+"/info", nil)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", 0, err
+		return nil, err
 	}
-	name := chatConsoleFirstString(payload, "group_name", "name")
-	count := chatConsoleFirstInt(payload, "group_member_num", "member_count", "group_member_count")
-	if name == "" && count == 0 {
-		return "", 0, errors.New("群信息接口没有返回群名或成员数")
+	info := &ChatConsoleGroupInfo{
+		Name:        chatConsoleFirstString(payload, "group_name", "name"),
+		MemberCount: chatConsoleFirstInt(payload, "group_member_num", "member_count", "group_member_count"),
+		FingerMemo:  chatConsoleFirstString(payload, "group_finger_memo", "finger_memo"),
+		ClassText:   chatConsoleFirstString(payload, "group_class_text", "class_text"),
 	}
-	return name, count, nil
+	if rawTags, ok := payload["group_tags"].([]interface{}); ok {
+		for _, item := range rawTags {
+			if tag, ok := item.(string); ok && strings.TrimSpace(tag) != "" {
+				info.Tags = append(info.Tags, strings.TrimSpace(tag))
+			}
+		}
+	}
+	if info.Name == "" && info.MemberCount == 0 && info.FingerMemo == "" && info.ClassText == "" && len(info.Tags) == 0 {
+		return nil, errors.New("群信息接口没有返回可用字段")
+	}
+	return info, nil
+}
+
+// RefreshChatConsoleGroupInfo 立刻向官方接口拉一次群资料（骰主在控制台点「刷新」时用）。
+// 和后台的节流版本不同：这是用户显式触发，不吃 chatConsoleInfoThrottle 的限制，
+// 但成功后仍然记录时间，避免前端连点把官方配额打满。
+func RefreshChatConsoleGroupInfo(d *Dice, key string) (*ChatConsoleConversation, error) {
+	if d == nil {
+		return nil, errors.New("骰子还没初始化")
+	}
+	store := d.GetChatConsole()
+	if store == nil {
+		return nil, errors.New("聊天控制台未启用")
+	}
+	conv := store.Conversation(key)
+	if conv == nil {
+		return nil, errors.New("会话不存在")
+	}
+	if conv.Kind != chatConsoleKindGroup {
+		return nil, errors.New("只有群聊才能查群资料")
+	}
+	var pa *PlatformAdapterOfficialQQ
+	if d.ImSession != nil {
+		for _, ep := range d.ImSession.EndPoints {
+			p, ok := ep.Adapter.(*PlatformAdapterOfficialQQ)
+			if !ok || p == nil {
+				continue
+			}
+			if conv.EndpointID != "" && ep.ID == conv.EndpointID {
+				pa = p
+				break
+			}
+			if conv.UIN != "" && p.UIN == conv.UIN {
+				pa = p
+			}
+		}
+	}
+	if pa == nil {
+		return nil, errors.New("找不到对应的官方 QQ 机器人，只有官方 QQ 群能查群资料")
+	}
+	info, err := pa.fetchChatConsoleGroupInfo(conv.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	pa.consoleInfoMu.Lock()
+	if pa.consoleInfoAt == nil {
+		pa.consoleInfoAt = map[string]time.Time{}
+	}
+	pa.consoleInfoAt[conv.TargetID] = time.Now()
+	pa.consoleInfoMu.Unlock()
+
+	store.SetGroupInfo(key, *info)
+	if info.Name != "" {
+		setOfficialQQGroupName(d, formatDiceIDOfficialQQGroupOpenID(pa.UIN, conv.TargetID), info.Name)
+	}
+	if updated := store.Conversation(key); updated != nil {
+		return updated, nil
+	}
+	return conv, nil
 }
 
 func chatConsoleFirstString(m map[string]interface{}, keys ...string) string {

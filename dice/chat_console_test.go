@@ -152,7 +152,7 @@ func TestChatConsoleRenameAndGroupInfo(t *testing.T) {
 	}
 
 	// 官方返回的群信息可以覆盖占位名
-	if c := s.SetGroupInfo("group:G1", "读书分享会", 256); c == nil || c.Name != "读书分享会" || c.MemberCount != 256 {
+	if c := s.SetGroupInfo("group:G1", ChatConsoleGroupInfo{Name: "读书分享会", MemberCount: 256}); c == nil || c.Name != "读书分享会" || c.MemberCount != 256 {
 		t.Fatalf("set group info failed: %+v", c)
 	}
 
@@ -160,7 +160,7 @@ func TestChatConsoleRenameAndGroupInfo(t *testing.T) {
 	if c, err := s.Rename("group:G1", "我的群"); err != nil || c.Name != "我的群" || !c.NameManual {
 		t.Fatalf("rename failed: %+v %v", c, err)
 	}
-	if c := s.SetGroupInfo("group:G1", "官方群名", 300); c == nil || c.Name != "我的群" || c.MemberCount != 300 {
+	if c := s.SetGroupInfo("group:G1", ChatConsoleGroupInfo{Name: "官方群名", MemberCount: 300}); c == nil || c.Name != "我的群" || c.MemberCount != 300 {
 		t.Fatalf("manual name should not be overwritten: %+v", c)
 	}
 	if c := s.Conversation("group:G1"); c.Name != "我的群" {
@@ -609,7 +609,7 @@ func TestOfficialQQGroupNameHelpers(t *testing.T) {
 	if got := OfficialQQGroupDisplayName(d, "OpenQQ-Group:10001-G1"); got != "" {
 		t.Fatalf("placeholder name should not be used, got %q", got)
 	}
-	store.SetGroupInfo("group:G1", "读书分享会", 256)
+	store.SetGroupInfo("group:G1", ChatConsoleGroupInfo{Name: "读书分享会", MemberCount: 256})
 	if got := OfficialQQGroupDisplayName(d, "OpenQQ-Group:10001-G1"); got != "读书分享会" {
 		t.Fatalf("expect console name, got %q", got)
 	}
@@ -679,6 +679,44 @@ func TestChatConsoleSearch(t *testing.T) {
 	// 6) 空搜索
 	if convs, msgs, _ := s.Search("   ", 10); len(convs) != 0 || len(msgs) != 0 {
 		t.Fatalf("empty query should return nothing")
+	}
+}
+
+func TestChatConsoleGroupProfile(t *testing.T) {
+	s := newTestChatConsoleStore(t)
+	recordTestMsg(t, s, ChatConsoleRecord{Kind: chatConsoleKindGroup, TargetID: "G9"}, "hi", 1000)
+
+	conv := s.SetGroupInfo("group:G9", ChatConsoleGroupInfo{
+		Name:        "跑团集合地",
+		MemberCount: 88,
+		FingerMemo:  "每周三晚上八点开车，禁止剧透。",
+		ClassText:   "游戏/桌游",
+		Tags:        []string{"跑团", "COC"},
+	})
+	if conv == nil {
+		t.Fatalf("group info not applied")
+	}
+	if conv.FingerMemo != "每周三晚上八点开车，禁止剧透。" || conv.ClassText != "游戏/桌游" ||
+		len(conv.Tags) != 2 || conv.Tags[0] != "跑团" || conv.Tags[1] != "COC" {
+		t.Fatalf("profile fields lost: %+v", conv)
+	}
+
+	// 重新打开库后简介 / 分类 / 标签要能读回来（存的是 JSON 列）
+	s.Flush()
+	dir := s.Dir()
+	s.Close()
+
+	reopened := NewChatConsoleStore(dir)
+	t.Cleanup(reopened.Close)
+
+	again := reopened.Conversation("group:G9")
+	if again == nil || again.FingerMemo != "每周三晚上八点开车，禁止剧透。" || again.ClassText != "游戏/桌游" || len(again.Tags) != 2 {
+		t.Fatalf("profile fields not persisted: %+v", again)
+	}
+
+	// 没连官方接口时，手动刷新要给出可读的错误而不是崩
+	if _, err := RefreshChatConsoleGroupInfo(nil, "group:G9"); err == nil {
+		t.Fatalf("nil dice should return an error")
 	}
 }
 

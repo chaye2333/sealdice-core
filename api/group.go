@@ -42,7 +42,16 @@ func groupList(c echo.Context) error {
 	// 这里先用聊天控制台已经拿到的名字回填；还没有的，登录状态下顺手在后台拉一次。
 	authed := doAuth(c)
 	for _, item := range items {
-		if item.GroupName != "" || !strings.HasPrefix(item.GroupID, "OpenQQ-Group:") {
+		if !strings.HasPrefix(item.GroupID, "OpenQQ-Group:") {
+			continue
+		}
+		// 群简介/分类/标签同样是官方接口才有的资料，控制台里缓存过就用它。
+		if conv := dice.OfficialQQGroupConsoleInfo(myDice, item.GroupID); conv != nil {
+			item.TmpFingerMemo = conv.FingerMemo
+			item.TmpClassText = conv.ClassText
+			item.TmpGroupTags = conv.Tags
+		}
+		if item.GroupName != "" {
 			continue
 		}
 		if name := dice.OfficialQQGroupDisplayName(myDice, item.GroupID); name != "" {

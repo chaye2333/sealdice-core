@@ -25,6 +25,7 @@
 | 存储管理 | 顶部「存储」按钮：查看总占用 / 每个群占用（字节、条数、天数），调整保留天数（0 = 永久），一键清空单个会话或全部历史 |
 | 实时 | 新消息通过 SSE 自动出现；SSE 断开时前端降级为定时轮询 |
 | 改名 | 群名拉不到或被官方省略号截断时，可以手动给会话起名 |
+| 群资料 | 顶部「资料」按钮：群名 / 群号 / 人数 / 分类 / 标签 / 简介，点「刷新」立刻向官方 `/v2/groups/{id}/info` 要一次（白名单机器人以外的账号拿不到简介这些字段） |
 
 ## 二、做不到什么（平台限制，不是 bug）
 
@@ -90,6 +91,7 @@
 | POST | `/sd-api/chat-console/purge` | `{key}` 清空单个会话；`{all:true}` 清空全部 |
 | POST | `/sd-api/chat-console/read` | `{key}` 清未读 |
 | POST | `/sd-api/chat-console/rename` | `{key, name}` 手动改名 |
+| POST | `/sd-api/chat-console/group-info` | `{key}` 立刻查一次官方群资料（群名 / 人数 / 简介 / 分类 / 标签），返回更新后的会话 |
 | GET | `/sd-api/chat-console/events?token=` | SSE 实时推送（`message` / `recall` / `conversation` 事件） |
 
 会话 key 形如 `group:<group_openid>`、`c2c:<user_openid>`，
