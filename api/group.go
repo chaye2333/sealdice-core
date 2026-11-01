@@ -14,29 +14,42 @@ import (
 
 func groupList(c echo.Context) error {
 	var items []*dice.GroupInfo
+	var groupIDs []string
 	// Pinenutn: Range模板 ServiceAtNew重构代码
 	myDice.ImSession.ServiceAtNew.Range(func(groupID string, item *dice.GroupInfo) bool {
 		// Pinenutn: ServiceAtNew重构
+		if item == nil {
+			return true
+		}
 		item.GroupID = groupID
 		if !strings.HasPrefix(item.GroupID, "PG-") {
-			if item != nil {
-				var exts []string
-				item.TmpPlayerNum, _ = service.GroupPlayerNumGet(myDice.DBOperator, item.GroupID)
-				// 使用 Raw 版本避免触发全量初始化
-				for _, i := range item.GetActivatedExtListRaw() {
-					if i != nil {
-						exts = append(exts, i.Name)
-					}
+			var exts []string
+			// 使用 Raw 版本避免触发全量初始化
+			for _, i := range item.GetActivatedExtListRaw() {
+				if i != nil {
+					exts = append(exts, i.Name)
 				}
-				item.TmpExtList = exts
+			}
+			item.TmpExtList = exts
 
-				if item.DiceIDExistsMap.Len() > 0 {
-					items = append(items, item)
-				}
+			if item.DiceIDExistsMap.Len() > 0 {
+				items = append(items, item)
+				groupIDs = append(groupIDs, groupID)
 			}
 		}
 		return true
 	})
+
+	// 玩家数一次查完：以前是每个群一次 COUNT，几百个群就是几百次查询。
+	if myDice.DBOperator != nil {
+		playerNum, err := service.GroupPlayerNumGetBatch(myDice.DBOperator, groupIDs)
+		if err != nil {
+			myDice.Logger.Warnf("统计群玩家数失败: %v", err)
+		}
+		for _, item := range items {
+			item.TmpPlayerNum = playerNum[item.GroupID]
+		}
+	}
 
 	// 官方 QQ 群的群名官方只在 /v2/groups/{id}/info 里给，dice 层的 GroupName 通常是空的。
 	// 这里先用聊天控制台已经拿到的名字回填；还没有的，登录状态下顺手在后台拉一次。

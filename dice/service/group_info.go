@@ -80,6 +80,35 @@ func GroupPlayerNumGet(operator engine2.DatabaseOperator, groupID string) (int64
 	return count, nil
 }
 
+// GroupPlayerNumGetBatch 一次查出多个群组的玩家数量，返回 group_id → 人数。
+//
+// 群组管理页一次要渲染几百个群，逐个调用 GroupPlayerNumGet 就是几百次 COUNT（N+1）；
+// 这里按 group_id 分组查一遍就够了。没有玩家的群不会出现在结果里，取值方按 0 处理即可。
+func GroupPlayerNumGetBatch(operator engine2.DatabaseOperator, groupIDs []string) (map[string]int64, error) {
+	result := make(map[string]int64, len(groupIDs))
+	if len(groupIDs) == 0 {
+		return result, nil
+	}
+
+	db := operator.GetDataDB(constant.READ)
+	var rows []struct {
+		GroupID string
+		Num     int64
+	}
+	err := db.Model(&model.GroupPlayerInfoBase{}).
+		Select("group_id AS group_id, COUNT(*) AS num").
+		Where("group_id IN ?", groupIDs).
+		Group("group_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		result[row.GroupID] = row.Num
+	}
+	return result, nil
+}
+
 // GroupPlayerInfoGet 获取指定群组中的玩家信息
 func GroupPlayerInfoGet(operator engine2.DatabaseOperator, groupID string, playerID string) *model.GroupPlayerInfoBase {
 	// 使用读数据库

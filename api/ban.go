@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,15 +69,72 @@ func banMapList(c echo.Context) error {
 	if !doAuth(c) {
 		return c.JSON(http.StatusForbidden, nil)
 	}
-	lst := myDice.GetBanList()
-	return c.JSON(http.StatusOK, lst)
+	return c.JSON(http.StatusOK, banListForAPI(myDice))
+}
+
+// banMergeLists 把「库里的」和「内存里的」黑白名单条目合并成一份。
+//
+// 黑白名单不跟着 serve.yaml 自动保存，落库只由三处触发：AfterLoads 里那个每分钟的 cron、
+// 程序退出、以及导入 / JS API。而后台拉黑和 .ban 指令改的都只是内存里的 Map，
+// 所以"拉黑完立刻刷新列表"（秒级）读到的还是旧库：群组管理页的复核会误报成“操作没有生效”，
+// 用户过一会儿再打开黑白名单却又能看到（cron 已经写进去了）。内存里的条目更新鲜，优先它。
+func banMergeLists(dbItems []*dice.BanListInfoItem, memory *dice.SyncMap[string, *dice.BanListInfoItem]) []*dice.BanListInfoItem {
+	byID := make(map[string]*dice.BanListInfoItem, len(dbItems))
+	for _, item := range dbItems {
+		if item == nil || item.ID == "" {
+			continue
+		}
+		byID[item.ID] = item
+	}
+	if memory != nil {
+		memory.Range(func(id string, item *dice.BanListInfoItem) bool {
+			if item == nil {
+				return true
+			}
+			tmp := *item // 拷一份，别让调用方改到运行时那张表里的对象
+			if tmp.ID == "" {
+				tmp.ID = id
+			}
+			byID[tmp.ID] = &tmp
+			return true
+		})
+	}
+	lst := make([]*dice.BanListInfoItem, 0, len(byID))
+	for _, item := range byID {
+		lst = append(lst, item)
+	}
+	sort.Slice(lst, func(i, j int) bool { return lst[i].ID < lst[j].ID })
+	return lst
+}
+
+// banListForAPI 返回给后台的黑白名单：库 + 内存合并后的结果。
+func banListForAPI(d *dice.Dice) []*dice.BanListInfoItem {
+	if d == nil {
+		return nil
+	}
+	var memory *dice.SyncMap[string, *dice.BanListInfoItem]
+	if d.Config.BanList != nil {
+		memory = d.Config.BanList.Map
+	}
+	return banMergeLists(d.GetBanList(), memory)
 }
 
 func banMapDeleteOne(c echo.Context) error {
+	if !doAuth(c) {
+		return c.JSON(http.StatusForbidden, nil)
+	}
+	if dm != nil && dm.JustForTest {
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"testMode": true,
+		})
+	}
 	v := dice.BanListInfoItem{}
 	err := c.Bind(&v)
 	if err != nil {
 		return c.String(430, err.Error())
+	}
+	if strings.TrimSpace(v.ID) == "" {
+		return c.String(430, "ID 不能为空")
 	}
 	(&myDice.Config).BanList.DeleteByID(myDice, v.ID)
 	return c.JSON(http.StatusOK, nil)
@@ -124,8 +182,11 @@ func banPickEndpoint(d *dice.Dice, id string) *dice.EndPointInfo {
 }
 
 func banMapAddOne(c echo.Context) error {
-	if dm.JustForTest {
-		return c.JSON(200, map[string]interface{}{
+	if !doAuth(c) {
+		return c.JSON(http.StatusForbidden, nil)
+	}
+	if dm != nil && dm.JustForTest {
+		return c.JSON(http.StatusOK, map[string]interface{}{
 			"testMode": true,
 		})
 	}
@@ -153,6 +214,11 @@ func banMapAddOne(c echo.Context) error {
 	if v.Rank == dice.BanRankTrusted {
 		(&myDice.Config).BanList.SetTrustByID(v.ID, "海豹后台", "骰主后台设置")
 	}
+
+	// 立刻落库：黑白名单不跟着 serve.yaml 自动保存，只由每分钟的 cron / 退出 / 导入落库，
+	// 而界面拉黑完会马上重新拉名单复核，等不了那最多 60 秒。不在这里写的话，
+	// 复核读到的库还是旧的（群组管理页报“没有变化”），进程被强杀时这条拉黑也会丢。
+	(&myDice.Config).BanList.SaveChanged(myDice)
 
 	return c.JSON(http.StatusOK, nil)
 }

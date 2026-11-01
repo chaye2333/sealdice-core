@@ -8,11 +8,20 @@ package dice
 
 import (
 	"strings"
+	"sync"
 	"time"
 )
 
 // officialQQGroupNameSem 限制同时进行的群名查询数量（官方 30 QPM，别打满）。
 var officialQQGroupNameSem = make(chan struct{}, 2)
+
+// officialQQGroupNameQueue 限制"排队中"的群名查询数量。
+// 群组管理页一次可能给几百个群补名，不设上限就是几百个 goroutine 一起等信号量；
+// 队列满了就直接放弃，这次没轮到的群下次刷新接着补，不会漏。
+var officialQQGroupNameQueue = make(chan struct{}, 64)
+
+// officialQQGroupNamePending 保证同一个群在同一时刻只排一个任务（页面被反复刷新时）。
+var officialQQGroupNamePending sync.Map // groupID -> struct{}
 
 // ParseOfficialQQGroupID 把 OpenQQ-Group:<uin>-<group_openid> 拆成两部分。
 func ParseOfficialQQGroupID(groupID string) (uin, groupOpenID string, ok bool) {
@@ -107,16 +116,33 @@ func RefreshOfficialQQGroupName(d *Dice, groupID string) {
 	if pa.Api == nil {
 		return
 	}
-	if !pa.allowChatConsoleInfoFetch(groupOpenID) {
+
+	// 同一个群同时只排一个任务：群列表被反复刷新时不要堆一串重复请求。
+	if _, loaded := officialQQGroupNamePending.LoadOrStore(groupID, struct{}{}); loaded {
+		return
+	}
+	select {
+	case officialQQGroupNameQueue <- struct{}{}:
+	default:
+		// 队列已满（一次要补几百个群），这次跳过，下次刷新接着补。
+		officialQQGroupNamePending.Delete(groupID)
 		return
 	}
 
 	go func() {
+		defer officialQQGroupNamePending.Delete(groupID)
+		defer func() { <-officialQQGroupNameQueue }()
+
 		select {
 		case officialQQGroupNameSem <- struct{}{}:
 			defer func() { <-officialQQGroupNameSem }()
 		case <-time.After(5 * time.Second):
-			// 排队太久就算了，下次刷新再来
+			// 排队太久就算了，这次不占节流额度，下次刷新再来
+			return
+		}
+		// 真正要发请求了才打节流戳：排队超时/放弃的不算一次尝试，
+		// 否则那个群会被静默锁 10 分钟，却一次都没查过。
+		if !pa.allowChatConsoleInfoFetch(groupOpenID) {
 			return
 		}
 		info, err := pa.fetchChatConsoleGroupInfo(groupOpenID)
