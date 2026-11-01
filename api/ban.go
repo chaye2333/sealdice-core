@@ -7,7 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -103,7 +103,7 @@ func banMergeLists(dbItems []*dice.BanListInfoItem, memory *dice.SyncMap[string,
 	for _, item := range byID {
 		lst = append(lst, item)
 	}
-	sort.Slice(lst, func(i, j int) bool { return lst[i].ID < lst[j].ID })
+	slices.SortFunc(lst, func(a, b *dice.BanListInfoItem) int { return strings.Compare(a.ID, b.ID) })
 	return lst
 }
 

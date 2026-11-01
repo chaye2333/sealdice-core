@@ -1,4 +1,4 @@
-package service
+package service_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"sealdice-core/dice/service"
 	"sealdice-core/model"
 	"sealdice-core/utils/constant"
 	"sealdice-core/utils/dboperator/engine/sqlite"
@@ -64,7 +65,7 @@ func TestGroupPlayerNumGetBatch(t *testing.T) {
 		}
 	}
 
-	got, err := GroupPlayerNumGetBatch(op, []string{"QQ-Group:1", "QQ-Group:2", "QQ-Group:3", "QQ-Group:4"})
+	got, err := service.GroupPlayerNumGetBatch(op, []string{"QQ-Group:1", "QQ-Group:2", "QQ-Group:3", "QQ-Group:4"})
 	if err != nil {
 		t.Fatalf("批量查询失败: %v", err)
 	}
@@ -77,9 +78,9 @@ func TestGroupPlayerNumGetBatch(t *testing.T) {
 			t.Fatalf("%s 人数 = %d, want %d", id, got[id], wantNum)
 		}
 		// 和逐个查询的口径对齐
-		single, err := GroupPlayerNumGet(op, id)
-		if err != nil {
-			t.Fatalf("单个查询失败: %v", err)
+		single, singleErr := service.GroupPlayerNumGet(op, id)
+		if singleErr != nil {
+			t.Fatalf("单个查询失败: %v", singleErr)
 		}
 		if single != got[id] {
 			t.Fatalf("%s 批量=%d 单个=%d，两者必须一致", id, got[id], single)
@@ -87,7 +88,7 @@ func TestGroupPlayerNumGetBatch(t *testing.T) {
 	}
 
 	// 只查一个群时也要正确
-	one, err := GroupPlayerNumGetBatch(op, []string{"QQ-Group:2"})
+	one, err := service.GroupPlayerNumGetBatch(op, []string{"QQ-Group:2"})
 	if err != nil {
 		t.Fatalf("单群批量查询失败: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestGroupPlayerNumGetBatch(t *testing.T) {
 	}
 
 	// 空列表不该产生查询（传 nil operator 也不该崩）
-	empty, err := GroupPlayerNumGetBatch(nil, nil)
+	empty, err := service.GroupPlayerNumGetBatch(nil, nil)
 	if err != nil {
 		t.Fatalf("空列表不该报错: %v", err)
 	}

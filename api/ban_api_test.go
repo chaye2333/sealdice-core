@@ -99,7 +99,7 @@ func banDo(t *testing.T, e *echo.Echo, method, path, token, body string) (int, [
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	}
 	if token != "" {
-		req.Header.Set("token", token)
+		req.Header.Set("Token", token)
 	}
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
