@@ -40,16 +40,23 @@ func groupList(c echo.Context) error {
 
 	// 官方 QQ 群的群名官方只在 /v2/groups/{id}/info 里给，dice 层的 GroupName 通常是空的。
 	// 这里先用聊天控制台已经拿到的名字回填；还没有的，登录状态下顺手在后台拉一次。
+	// 群资料（简介 / 分类 / 标签）一次查完，避免每个群一次 SQL。
+	var convByOpenID map[string]*dice.ChatConsoleConversation
 	authed := doAuth(c)
 	for _, item := range items {
 		if !strings.HasPrefix(item.GroupID, "OpenQQ-Group:") {
 			continue
 		}
-		// 群简介/分类/标签同样是官方接口才有的资料，控制台里缓存过就用它。
-		if conv := dice.OfficialQQGroupConsoleInfo(myDice, item.GroupID); conv != nil {
-			item.TmpFingerMemo = conv.FingerMemo
-			item.TmpClassText = conv.ClassText
-			item.TmpGroupTags = conv.Tags
+		// 群 ID 一定是 <uin>-<group_openid>；万一格式不对就只做群名回填，不因为解析失败而跳过
+		if _, groupOpenID, ok := dice.ParseOfficialQQGroupID(item.GroupID); ok {
+			if convByOpenID == nil {
+				convByOpenID = dice.OfficialQQGroupConsoleInfoByTarget(myDice)
+			}
+			if conv := convByOpenID[groupOpenID]; conv != nil {
+				item.TmpFingerMemo = conv.FingerMemo
+				item.TmpClassText = conv.ClassText
+				item.TmpGroupTags = conv.Tags
+			}
 		}
 		if item.GroupName != "" {
 			continue

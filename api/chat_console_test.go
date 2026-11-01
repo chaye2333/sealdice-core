@@ -58,6 +58,7 @@ func chatConsoleTestEnv(t *testing.T) (*echo.Echo, string) {
 	e.POST("/sd-api/chat-console/pin", chatConsolePin)
 	e.GET("/sd-api/chat-console/media", chatConsoleMedia)
 	e.GET("/sd-api/chat-console/search", chatConsoleSearch)
+	e.POST("/sd-api/chat-console/group-info", chatConsoleGroupInfo)
 	return e, token
 }
 
@@ -360,6 +361,40 @@ func TestChatConsoleAPIPin(t *testing.T) {
 	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/pin", token, `{"key":"group:NOPE","pinned":true}`)
 	if res["result"] != false {
 		t.Fatalf("expect failure for unknown conversation: %+v", res)
+	}
+}
+
+func TestChatConsoleAPIGroupInfo(t *testing.T) {
+	e, token := chatConsoleTestEnv(t)
+
+	// 没带 token 403
+	req := httptest.NewRequest(http.MethodPost, "/sd-api/chat-console/group-info", strings.NewReader(`{"key":"group:G1"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expect 403 without token, got %d", rec.Code)
+	}
+
+	// 缺 key
+	res := chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/group-info", token, `{}`)
+	if res["result"] != false {
+		t.Fatalf("expect failure without key: %+v", res)
+	}
+
+	// 会话不存在
+	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/group-info", token, `{"key":"group:NOPE"}`)
+	if res["result"] != false {
+		t.Fatalf("expect failure for unknown conversation: %+v", res)
+	}
+
+	// 会话存在但没有官方 QQ 适配器（测试环境没接机器人）：给出可读错误，不能 500
+	res = chatConsoleDo(t, e, http.MethodPost, "/sd-api/chat-console/group-info", token, `{"key":"group:G1"}`)
+	if res["result"] != false {
+		t.Fatalf("expect failure without official adapter: %+v", res)
+	}
+	if msg, _ := res["err"].(string); msg == "" {
+		t.Fatalf("expect readable error message: %+v", res)
 	}
 }
 

@@ -82,6 +82,47 @@ func banMapDeleteOne(c echo.Context) error {
 	return c.JSON(http.StatusOK, nil)
 }
 
+// banPickEndpoint 给 AddScoreBase 挑一个和 ID 同源的端点做上下文。
+//
+// 为什么不让所有端点都来一遍：AddScoreBase 会累加怒气值，多端点各来一次会重复计数；
+// 而它只在"首次跨过阈值"时用到 ctx（Platform 为 QQ 时还会顺手删好友，参数是 "海豹后台"
+// 这种占位串），所以这里挑最贴近那个 ID 的端点：官方 ID 用官方适配器、民间 ID 优先同平台
+// 的民间适配器；实在没有匹配的就退回 UI 端点（Platform=UI，不会触发删好友），
+// 既保证"后台点了拉黑真的生效"，又不会拿不相干的端点去打腾讯接口。
+func banPickEndpoint(d *dice.Dice, id string) *dice.EndPointInfo {
+	if d == nil || d.ImSession == nil {
+		return nil
+	}
+	// OpenQQ-Group:… / OpenQQ:… / OpenQQ-Member:… 都来自官方机器人适配器
+	wantOfficial := strings.HasPrefix(id, "OpenQQ")
+	prefix := strings.SplitN(id, ":", 2)[0]
+	platform := strings.Replace(prefix, "-Group", "", 1)
+	if platform == "OpenQQ" {
+		platform = "QQ"
+	}
+
+	var samePlatform *dice.EndPointInfo
+	for _, ep := range d.ImSession.EndPoints {
+		if ep == nil || !ep.Enable {
+			continue
+		}
+		if ep.Platform == platform && samePlatform == nil {
+			samePlatform = ep
+		}
+		_, isOfficial := ep.Adapter.(*dice.PlatformAdapterOfficialQQ)
+		if isOfficial == wantOfficial {
+			// 官方 ID → 官方适配器；民间 ID → 同平台的民间适配器
+			if wantOfficial || ep.Platform == platform {
+				return ep
+			}
+		}
+	}
+	if samePlatform != nil {
+		return samePlatform
+	}
+	return d.UIEndpoint
+}
+
 func banMapAddOne(c echo.Context) error {
 	if dm.JustForTest {
 		return c.JSON(200, map[string]interface{}{
@@ -101,35 +142,8 @@ func banMapAddOne(c echo.Context) error {
 			reason = v.Reasons[0]
 		}
 
-		// 从 ID 前缀推断平台：QQ-Group:123 -> QQ；OpenQQ-Group:... -> QQ（官方 bot 端点 Platform 就是 QQ）
-		prefix := strings.Split(v.ID, ":")[0]
-		platform := strings.Replace(prefix, "-Group", "", 1)
-		if platform == "OpenQQ" {
-			platform = "QQ"
-		}
-
-		// 只用一个端点做上下文：AddScoreBase 会累加怒气值，多个端点各来一次会重复计数。
-		var chosen *dice.EndPointInfo
-		for _, i := range myDice.ImSession.EndPoints {
-			if i.Platform == platform && i.Enable {
-				chosen = i
-				break
-			}
-		}
-		// 官方群的平台名与端点 Platform 可能对不上（或该平台端点暂时禁用）：
-		// 退化为任意一个启用端点，否则退化为 UI 端点，避免"点了没反应"。
-		if chosen == nil {
-			for _, i := range myDice.ImSession.EndPoints {
-				if i.Enable {
-					chosen = i
-					break
-				}
-			}
-		}
-		if chosen == nil {
-			chosen = myDice.UIEndpoint
-		}
-		if chosen != nil {
+		// 挑一个和 ID 同源的端点做上下文：只用一个，避免多端点重复累加怒气值。
+		if chosen := banPickEndpoint(myDice, v.ID); chosen != nil {
 			v2 := (&myDice.Config).BanList.AddScoreBase(v.ID, score, "海豹后台", reason, &dice.MsgContext{Dice: myDice, EndPoint: chosen})
 			if v2 != nil && v.Name != "" {
 				v2.Name = v.Name

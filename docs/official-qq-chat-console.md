@@ -57,6 +57,8 @@
   长期用会越来越慢；SQLite 用 `(conv_key, ts)` 和 `msg_id` 索引，翻页 / 撤回 / 按天删除都是走索引。
 - 库文件**独立于** `data.db`：不改任何既有 schema，删掉 `chat-console/` 目录等于清空控制台，回退安全。
 - 表：`chat_console_conversations`（会话）、`chat_console_messages`（消息），`PRAGMA journal_mode=WAL`。
+  会话表里 `finger_memo` / `class_text` / `tags` 三列是**后加的**：旧库启动时由 GORM `AutoMigrate`
+  自动补列（`tags` 存 JSON 数组），旧版本程序不会删列、也不会读这三列，**回退安全**。
 - 保留天数**默认 30 天**，可在「存储」里改成任意天数（上限 3650），**0 = 永久保留**；
   清理每小时最多执行一次，改小保留天数时会立刻清理一次。
 - 「清空全部历史」会 `DELETE` 后执行 `VACUUM` 把库文件真正缩回去；单个会话清空只删数据，空间由 SQLite 复用。
@@ -91,7 +93,7 @@
 | POST | `/sd-api/chat-console/purge` | `{key}` 清空单个会话；`{all:true}` 清空全部 |
 | POST | `/sd-api/chat-console/read` | `{key}` 清未读 |
 | POST | `/sd-api/chat-console/rename` | `{key, name}` 手动改名 |
-| POST | `/sd-api/chat-console/group-info` | `{key}` 立刻查一次官方群资料（群名 / 人数 / 简介 / 分类 / 标签），返回更新后的会话 |
+| POST | `/sd-api/chat-console/group-info` | `{key}` 立刻查一次官方群资料（群名 / 人数 / 简介 / 分类 / 标签），返回更新后的会话；3 秒内的重复请求直接返回缓存，避免打满官方 30 QPM |
 | GET | `/sd-api/chat-console/events?token=` | SSE 实时推送（`message` / `recall` / `conversation` 事件） |
 
 会话 key 形如 `group:<group_openid>`、`c2c:<user_openid>`，

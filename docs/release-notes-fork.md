@@ -132,7 +132,10 @@ $\scriptsize\textcolor{#E5484D}{\text{调查员甲 HP12/12 AC16}}$
 ## 九、兼容性与回退
 
 - **数据兼容**：仅在本 fork 的 `BaseConfig` **末尾追加**配置字段（有位置错位回归测试），
-  数据库 schema 不变；新增的只有 `data/<实例>/chat-console/` 目录。
+  主库 `data.db` 的 schema 不变；新增的只有 `data/<实例>/chat-console/` 目录
+  （它自己的 `console.db` 会自动补 `finger_memo` / `class_text` / `tags` 三列，旧版程序不读也不删列）。
+  群组数据里也只多出 `tmpFingerMemo` / `tmpClassText` / `tmpGroupTags` 三个临时字段（和官方原有的
+  `tmpPlayerNum` / `tmpExtList` 同一套路），官方版反序列化时直接忽略未知字段。
 - **回退**：换回官方 exe 即可，官方版不认 `chat-console/` 目录、也不会动它；
   详细步骤见 `docs/how-to-revert-to-upstream.md`。
 - **未包含**：民间 bot（OneBot）侧的聊天界面；聊天控制台图片/文件的本地缓存（链接过期目前只能显示占位）。

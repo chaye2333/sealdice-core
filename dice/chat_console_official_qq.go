@@ -230,9 +230,12 @@ func (pa *PlatformAdapterOfficialQQ) fetchChatConsoleGroupInfo(groupOpenID strin
 	return info, nil
 }
 
+// chatConsoleManualInfoInterval 手动刷新的最小间隔：前端连点 / 多人同时点时不至于打满官方配额（30 QPM）。
+const chatConsoleManualInfoInterval = 3 * time.Second
+
 // RefreshChatConsoleGroupInfo 立刻向官方接口拉一次群资料（骰主在控制台点「刷新」时用）。
-// 和后台的节流版本不同：这是用户显式触发，不吃 chatConsoleInfoThrottle 的限制，
-// 但成功后仍然记录时间，避免前端连点把官方配额打满。
+// 和后台的节流版本不同：这是用户显式触发，不吃 chatConsoleInfoThrottle 的 10 分钟限制，
+// 只挡 3 秒内的重复请求，避免前端连点把官方配额打满。
 func RefreshChatConsoleGroupInfo(d *Dice, key string) (*ChatConsoleConversation, error) {
 	if d == nil {
 		return nil, errors.New("骰子还没初始化")
@@ -251,6 +254,9 @@ func RefreshChatConsoleGroupInfo(d *Dice, key string) (*ChatConsoleConversation,
 	var pa *PlatformAdapterOfficialQQ
 	if d.ImSession != nil {
 		for _, ep := range d.ImSession.EndPoints {
+			if ep == nil || ep.Adapter == nil {
+				continue
+			}
 			p, ok := ep.Adapter.(*PlatformAdapterOfficialQQ)
 			if !ok || p == nil {
 				continue
@@ -266,6 +272,14 @@ func RefreshChatConsoleGroupInfo(d *Dice, key string) (*ChatConsoleConversation,
 	}
 	if pa == nil {
 		return nil, errors.New("找不到对应的官方 QQ 机器人，只有官方 QQ 群能查群资料")
+	}
+	// 3 秒内刚查过就直接返回缓存，别把官方配额打满
+	pa.consoleInfoMu.Lock()
+	last, hasLast := pa.consoleInfoAt[conv.TargetID]
+	tooSoon := hasLast && time.Since(last) < chatConsoleManualInfoInterval
+	pa.consoleInfoMu.Unlock()
+	if tooSoon {
+		return conv, nil
 	}
 	info, err := pa.fetchChatConsoleGroupInfo(conv.TargetID)
 	if err != nil {

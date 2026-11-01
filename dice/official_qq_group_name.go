@@ -68,21 +68,24 @@ func OfficialQQGroupDisplayName(d *Dice, groupID string) string {
 	return conv.Name
 }
 
-// OfficialQQGroupConsoleInfo 返回聊天控制台里缓存的官方群资料（群名、人数、简介、分类、标签）。
-// 拿不到或还没有缓存时返回 nil。
-func OfficialQQGroupConsoleInfo(d *Dice, groupID string) *ChatConsoleConversation {
+// OfficialQQGroupConsoleInfoByTarget 返回 group_openid → 会话 的映射，供群列表批量补群资料。
+// 群列表一次可能有几百个群，逐个 Conversation() 就是几百次 SQL；这里一次查完。
+func OfficialQQGroupConsoleInfoByTarget(d *Dice) map[string]*ChatConsoleConversation {
 	if d == nil {
-		return nil
-	}
-	_, groupOpenID, ok := ParseOfficialQQGroupID(groupID)
-	if !ok {
 		return nil
 	}
 	store := d.GetChatConsole()
 	if store == nil {
 		return nil
 	}
-	return store.Conversation(chatConsoleGroupKey(groupOpenID))
+	convs := store.Conversations()
+	out := make(map[string]*ChatConsoleConversation, len(convs))
+	for _, conv := range convs {
+		if conv != nil && conv.Kind == chatConsoleKindGroup {
+			out[conv.TargetID] = conv
+		}
+	}
+	return out
 }
 
 // RefreshOfficialQQGroupName 给一个官方群补群名。
