@@ -4,15 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -182,7 +178,7 @@ func uploadV105(env UploadEnv) (string, string, error) {
 		return "", env.Notice, err
 	}
 
-	url = parquetUploadToSealBackends(env, b)
+	url, backendErr := parquetUploadToSealBackends(env, b.Bytes())
 	if errDB := service.LogSetUploadInfo(env.Db, env.GroupID, env.LogName, url); errDB != nil {
 		env.Log.Errorf("记录Log上传信息失败: %v", errDB)
 	}
@@ -190,7 +186,7 @@ func uploadV105(env UploadEnv) (string, string, error) {
 		if fallbackURL, notice, ok := fallbackToCachedLogURL(&env, cachedURL, probeResult); ok {
 			return fallbackURL, notice, nil
 		}
-		return "", env.Notice, errors.New("上传 log 到服务器失败，未能获取染色器链接")
+		return "", env.Notice, logUploadFailedErr(backendErr)
 	}
 	return url, env.Notice, nil
 }
@@ -247,79 +243,20 @@ func formatAndBackupV105(env *UploadEnv, tempLog *os.File, parquetFile *bytes.Bu
 	return nil
 }
 
-func parquetUploadToSealBackends(env UploadEnv, data io.Reader) string {
+func parquetUploadToSealBackends(env UploadEnv, data []byte) (string, string) {
 	// 逐个尝试所有后端地址
+	var firstErr string
 	for _, backend := range env.Backends {
 		if backend == "" {
 			continue
 		}
-		ret := uploadToBackendParquet(env, backend, data)
+		ret, errMsg := postLogToBackend(env, backend, data, "Parquet")
 		if ret != "" {
-			return ret
+			return ret, ""
+		}
+		if firstErr == "" {
+			firstErr = errMsg
 		}
 	}
-	return ""
-}
-
-func uploadToBackendParquet(env UploadEnv, backend string, data io.Reader) string {
-	client := &http.Client{}
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	field, err := writer.CreateFormField("name")
-	if err == nil {
-		_, _ = field.Write([]byte(env.LogName))
-	}
-
-	field, err = writer.CreateFormField("uniform_id")
-	if err == nil {
-		_, _ = field.Write([]byte(env.UniformID))
-	}
-
-	field, err = writer.CreateFormField("client")
-	if err == nil {
-		_, _ = field.Write([]byte("Parquet"))
-	}
-
-	field, err = writer.CreateFormField("version")
-	if err == nil {
-		_, _ = field.Write([]byte(strconv.Itoa(int(env.Version))))
-	}
-
-	part, _ := writer.CreateFormFile("file", "log-zlib-compressed")
-	_, _ = io.Copy(part, data)
-	_ = writer.Close()
-
-	req, err := http.NewRequest(http.MethodPut, backend, body)
-	if err != nil {
-		env.Log.Errorf(err.Error())
-		return ""
-	}
-
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	if len(env.Token) > 0 {
-		req.Header.Set("Authorization", "Bearer "+env.Token)
-	}
-
-	resp, err := client.Do(req) //nolint:gosec
-	if err != nil {
-		env.Log.Errorf(err.Error())
-		return ""
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	bodyText, err := io.ReadAll(resp.Body)
-	if err != nil {
-		env.Log.Errorf(err.Error())
-		return ""
-	}
-
-	var ret struct {
-		URL string `json:"url"`
-	}
-	_ = json.Unmarshal(bodyText, &ret)
-	if ret.URL == "" {
-		env.Log.Error("日志上传的返回结果异常:", string(bodyText))
-	}
-	return ret.URL
+	return "", firstErr
 }

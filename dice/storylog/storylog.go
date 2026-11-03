@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -183,39 +184,69 @@ func cachedLogProbeIsHTMLErrorPage(contentType string, snippet []byte) bool {
 	return false
 }
 
-func uploadToBackend(env UploadEnv, backend string, data io.Reader) string {
-	client := &http.Client{}
+// uploadHTTPTimeout 上传日志的 HTTP 超时。
+// 以前用 http.Client{} 没有任何超时，染色器后端卡住时海豹会一直挂着不返回。
+const uploadHTTPTimeout = 60 * time.Second
+
+// logUploadFailedErr 在保留原有报错文案的前提下，把染色器后端的真实原因带出来，
+// 例如「染色器后端返回 HTTP 413: File size exceeds 5MB limit」。
+func logUploadFailedErr(reason string) error {
+	if reason == "" {
+		return errors.New("上传 log 到服务器失败，未能获取染色器链接")
+	}
+	return fmt.Errorf("上传 log 到服务器失败，未能获取染色器链接：%s", reason)
+}
+
+// logBodySnippet 把响应体压成一行并截断，方便塞进日志和报错信息里。
+func logBodySnippet(body []byte) string {
+	const limit = 200
+	text := strings.ReplaceAll(strings.ReplaceAll(string(body), "\r", " "), "\n", " ")
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return text
+}
+
+// postLogToBackend 把日志数据以 multipart 形式 PUT 给染色器后端。
+// 成功返回染色器链接；失败返回空链接，以及一段可以直接转给用户看的原因。
+//
+// data 用 []byte 而不是 io.Reader：多个后端轮流重试时，
+// 同一个 io.Reader 被第一个后端读完之后，后面几个后端只能收到空 body。
+func postLogToBackend(env UploadEnv, backend string, data []byte, clientName string) (string, string) {
+	client := &http.Client{Timeout: uploadHTTPTimeout}
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	field, err := writer.CreateFormField("name")
-	if err == nil {
-		_, _ = field.Write([]byte(env.LogName))
+	writeField := func(name, value string) {
+		field, err := writer.CreateFormField(name)
+		if err != nil {
+			return
+		}
+		_, _ = field.Write([]byte(value))
 	}
+	writeField("name", env.LogName)
+	writeField("uniform_id", env.UniformID)
+	writeField("client", clientName)
+	writeField("version", strconv.Itoa(int(env.Version)))
 
-	field, err = writer.CreateFormField("uniform_id")
+	part, err := writer.CreateFormFile("file", "log-zlib-compressed")
 	if err == nil {
-		_, _ = field.Write([]byte(env.UniformID))
+		_, err = part.Write(data)
 	}
-
-	field, err = writer.CreateFormField("client")
-	if err == nil {
-		_, _ = field.Write([]byte("SealDice"))
+	if closeErr := writer.Close(); err == nil {
+		err = closeErr
 	}
-
-	field, err = writer.CreateFormField("version")
-	if err == nil {
-		_, _ = field.Write([]byte(strconv.Itoa(int(env.Version))))
+	if err != nil {
+		env.Log.Errorf("构造日志上传请求失败: %v", err)
+		return "", "构造上传请求失败"
 	}
-
-	part, _ := writer.CreateFormFile("file", "log-zlib-compressed")
-	_, _ = io.Copy(part, data)
-	_ = writer.Close()
 
 	req, err := http.NewRequest(http.MethodPut, backend, body)
 	if err != nil {
-		env.Log.Errorf(err.Error())
-		return ""
+		env.Log.Errorf("构造日志上传请求失败: %v", err)
+		return "", "构造上传请求失败"
 	}
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -225,23 +256,34 @@ func uploadToBackend(env UploadEnv, backend string, data io.Reader) string {
 
 	resp, err := client.Do(req) //nolint:gosec
 	if err != nil {
-		env.Log.Errorf(err.Error())
-		return ""
+		env.Log.Errorf("日志上传请求失败: %v", err)
+		return "", "连接染色器后端失败（" + err.Error() + "）"
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	bodyText, err := io.ReadAll(resp.Body)
 	if err != nil {
-		env.Log.Errorf(err.Error())
-		return ""
+		env.Log.Errorf("读取日志上传响应失败: %v", err)
+		return "", "读取染色器响应失败"
 	}
 
 	var ret struct {
 		URL string `json:"url"`
 	}
 	_ = json.Unmarshal(bodyText, &ret)
-	if ret.URL == "" {
-		env.Log.Error("日志上传的返回结果异常:", string(bodyText))
+	if ret.URL != "" {
+		return ret.URL, ""
 	}
-	return ret.URL
+
+	snippet := logBodySnippet(bodyText)
+	// 带上状态码：以前只打印响应体，413 / 544 / SPA 的 index.html 在日志里长得一模一样，没法判断。
+	env.Log.Errorf("日志上传的返回结果异常: HTTP %s body=%s", resp.Status, snippet)
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Sprintf("染色器后端返回 HTTP %d: %s", resp.StatusCode, snippet)
+	}
+	if strings.HasPrefix(snippet, "<") {
+		return "", fmt.Sprintf("染色器后端返回的是网页而不是 JSON（后端地址可能填成了前端地址）: %s", snippet)
+	}
+	return "", "染色器后端未返回链接: " + snippet
 }

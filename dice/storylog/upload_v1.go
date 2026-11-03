@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,7 +75,7 @@ func uploadV1(env UploadEnv) (string, string, error) {
 		return "", env.Notice, err
 	}
 
-	url = uploadToSealBackends(env, &zlibBuffer)
+	url, backendErr := uploadToSealBackends(env, zlibBuffer.Bytes())
 	if errDB := service.LogSetUploadInfo(env.Db, env.GroupID, env.LogName, url); errDB != nil {
 		env.Log.Errorf("记录Log上传信息失败: %v", errDB)
 	}
@@ -84,7 +83,7 @@ func uploadV1(env UploadEnv) (string, string, error) {
 		if fallbackURL, notice, ok := fallbackToCachedLogURL(&env, cachedURL, probeResult); ok {
 			return fallbackURL, notice, nil
 		}
-		return "", env.Notice, errors.New("上传 log 到服务器失败，未能获取染色器链接")
+		return "", env.Notice, logUploadFailedErr(backendErr)
 	}
 	return url, env.Notice, nil
 }
@@ -154,16 +153,20 @@ func formatAndBackup(env *UploadEnv) (err error) {
 	return nil
 }
 
-func uploadToSealBackends(env UploadEnv, data io.Reader) string {
+func uploadToSealBackends(env UploadEnv, data []byte) (string, string) {
 	// 逐个尝试所有后端地址
+	var firstErr string
 	for _, backend := range env.Backends {
 		if backend == "" {
 			continue
 		}
-		ret := uploadToBackend(env, backend, data)
+		ret, errMsg := postLogToBackend(env, backend, data, "SealDice")
 		if ret != "" {
-			return ret
+			return ret, ""
+		}
+		if firstErr == "" {
+			firstErr = errMsg
 		}
 	}
-	return ""
+	return "", firstErr
 }
