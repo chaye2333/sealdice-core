@@ -888,6 +888,9 @@ type MsgContext struct {
 	// OfficialQQStatusBarSuppressed 表示本条指令明确不要状态栏（例如 .sc）。
 	// 用它挡住"按回复文本兜底"的逻辑，避免 .sc 又被挂上。
 	OfficialQQStatusBarSuppressed bool `json:"-" yaml:"-"`
+	// OfficialQQStatusBarLine 是本次发送里真正拼上去的状态栏前缀（含结尾换行）。
+	// 它只用于展示，写跑团日志等"只记正文"的场景时要剥掉，见 stripOfficialQQStatusBar。
+	OfficialQQStatusBarLine string `json:"-" yaml:"-"`
 
 	// DataUserID / DataGroupID 是「数据层」身份：如果当前身份参与过身份绑定，
 	// 这里就是归一后的 ID（官方身份↔旧QQ号、官方群↔旧群），否则与真实 ID 相同。

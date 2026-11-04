@@ -272,6 +272,8 @@ func withOfficialQQCharacterStatusBar(ctx *MsgContext, text string) string {
 	if ctx == nil {
 		return text
 	}
+	// 每条回复先清掉上一次的记录：这条不加状态栏时，日志钩子不该去剥别的东西。
+	ctx.OfficialQQStatusBarLine = ""
 	suppressed := ctx.OfficialQQStatusBarSuppressed
 	ctx.OfficialQQStatusBarSuppressed = false
 	pending := takeOfficialQQStatusBarPending(ctx)
@@ -295,9 +297,30 @@ func withOfficialQQCharacterStatusBar(ctx *MsgContext, text string) string {
 	}
 	// 状态栏已在顶部时不重复添加
 	if strings.HasPrefix(text, bar) {
+		ctx.OfficialQQStatusBarLine = bar + "\n"
 		return text
 	}
+	// 记下真正拼上去的前缀（含结尾换行），发送层之外的地方（如跑团日志）据此剥掉。
+	ctx.OfficialQQStatusBarLine = bar + "\n"
 	return bar + "\n" + text
+}
+
+// officialQQStatusBarLineOf 返回本次发送里拼上去的状态栏前缀（没加则为空）。
+func officialQQStatusBarLineOf(ctx *MsgContext) string {
+	if ctx == nil {
+		return ""
+	}
+	return ctx.OfficialQQStatusBarLine
+}
+
+// stripOfficialQQStatusBar 去掉仅用于展示的状态栏前缀。
+// 状态栏在别名 / 代骰前缀之后、正文之前，所以按首次出现位置移除；
+// 正文里恰好也有同样的文字时也只会去掉第一处，不会误伤。
+func stripOfficialQQStatusBar(line, text string) string {
+	if line == "" || text == "" {
+		return text
+	}
+	return strings.Replace(text, line, "", 1)
 }
 
 // ---------------- 标记的存取（跨代理上下文） ----------------

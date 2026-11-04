@@ -1138,6 +1138,8 @@ func RegisterBuiltinExtLog(self *Dice) {
 			if flag == "skip" {
 				return
 			}
+			// 官方 QQ 的 .sn 状态栏红字只用于展示，跑团日志里保留干净正文。
+			message := stripOfficialQQStatusBar(officialQQStatusBarLineOf(ctx), msg.Message)
 			privateCommandListenCheck()
 			if msg.MessageType == "private" && ctx.CommandHideFlag != "" {
 				if privateCommandListenHas(ctx.CommandID) {
@@ -1162,7 +1164,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 						IMUserID:    UserIDExtract(ctx.EndPoint.UserID),
 						UniformID:   ctx.EndPoint.UserID,
 						Time:        time.Now().Unix(),
-						Message:     msg.Message,
+						Message:     message,
 						IsDice:      true,
 						CommandID:   ctx.CommandID,
 						CommandInfo: ctx.CommandInfo,
@@ -1196,7 +1198,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 						IMUserID:    UserIDExtract(ctx.EndPoint.UserID),
 						UniformID:   ctx.EndPoint.UserID,
 						Time:        time.Now().Unix(),
-						Message:     msg.Message,
+						Message:     message,
 						IsDice:      true,
 						CommandID:   ctx.CommandID,
 						CommandInfo: ctx.CommandInfo,

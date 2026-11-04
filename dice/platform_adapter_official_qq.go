@@ -941,6 +941,9 @@ func (pa *PlatformAdapterOfficialQQ) sendBatchPage(ctx *MsgContext, page []strin
 		Session:  pa.EndPoint.Session,
 		Dice:     pa.EndPoint.Session.Parent,
 	}
+	// 记录用的上下文是新建的，把"只用于展示"的状态栏前缀带过来，
+	// 否则批量分页的第一页会把 .sn 红字写进跑团日志。
+	recordCtx.OfficialQQStatusBarLine = officialQQStatusBarLineOf(ctx)
 	record := func(msg *dto.Message, text string) {
 		recordCtx.MessageType = msgType
 		pa.EndPoint.Session.OnMessageSend(recordCtx, &Message{
