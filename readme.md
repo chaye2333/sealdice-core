@@ -2,19 +2,24 @@
 
 > 一个以「QQ 官方机器人」为中心的 sealdice-core 分支：
 > 让**官 bot 与民间 bot 的数据实时共通**，并把官 bot 缺的那部分能力补齐
-> （虚拟角色状态栏、发送文件保留文件名……）。
+> （WebUI 聊天控制台、虚拟角色状态栏、群组管理一键拉黑、发送文件保留文件名……）。
 > 代码主要由 AI 写成，**仅供体验**；用之前请读完这份说明，并做好数据备份。
 
 ---
 
 ## ⚠️ 先看这里
 
-- **没有改动数据库结构**：全分支没有新增表、没有新增字段，换回官方主线可以直接沿用同一份 `data/`。
-- **本项目跟随海豹主线**：定期 `git fetch upstream && git merge upstream/master`，
-  冲突一律「主线优先」。最近一次同步：**2026-09-16**（已并入上游 #1811 / #1817 / #1819）。
+- **没有改动数据库结构**：主库 `data.db` 没有新增表、没有新增字段，换回官方主线可以直接沿用同一份 `data/`。
+  唯一的额外目录是聊天控制台自己的 `data/<骰子名>/chat-console/`（独立 SQLite，官版不读也不动它）。
+- **本项目跟随海豹主线**：定期 `git fetch upstream && git merge upstream/master`，冲突一律「主线优先」。
+  最近一次同步：**2026-10-03（基线 `4c2d1603`）**，此后本分支累计 111 个提交；
+  上游在那之后又合入了新的 PR（如 #1877 / #1873），需要时再同步一次。
 - 但「跟随主线」不等于零风险：绑定功能侵入了 `dice/ext_log.go`、
-  `dice/platform_adapter_official_qq.go`、`dice/builtin_commands.go` 等文件，
+  `dice/platform_adapter_official_qq.go`、`dice/builtin_commands.go` 等文件；
+  聊天控制台与一键拉黑还改了 `api/*.go`、`dice/chat_console*.go` 与内嵌前端 `static/frontend`。
   上游大改这些地方时仍然需要手工合并。
+- 完整改动清单（按功能分组，含兼容性与回退说明）见
+  [`docs/release-notes-fork.md`](docs/release-notes-fork.md)。
 - 用这版就默认你已经看过上面的声明。**叠甲、叠甲、叠甲。**
 
 ---
@@ -35,7 +40,28 @@
 设计要点：**规范 ID 固定是「旧身份」**，数据一条都不搬移——绑定只是一张对照表
 （`data/<骰子名>/identity-bindings.json`），`.unbind` 后立刻恢复原状。
 
-### 2. 验证码（防抢号）
+### 2. 官方 QQ 聊天控制台（WebUI）
+
+WebUI → 扩展功能 → **聊天控制台**：像桌面 QQ 一样看/发官方机器人的消息。
+
+| 能力 | 说明 |
+|---|---|
+| 会话与消息流 | 群聊 / 私聊、未读角标、在线状态、`仅 @ 消息` 权限提示；SSE 实时推送，断线降级轮询 |
+| 发送文字 | 以机器人身份发言；群聊基本不受限，私聊受官方主动消息额度限制（失败会给出原因） |
+| 发图片/语音/视频/文件 | 输入框「图片/文件」，≤30MB，复用适配器富媒体上传（含分片上传保留文件名） |
+| **@ 与引用** | 悬停「回复」时，**最近 4 分钟内收到的消息**走官方被动回复做成**真引用**（QQ 里显示引用块），超窗口退回「回复 某人：原文」；正文也支持 CQ 码：`[CQ:at,qq=<openid>]`（含 `qq=all`）→ 官方 @，`[CQ:reply,id=<msg_id>]` → 被动回复真引用 |
+| 撤回 / 禁言 | 只能撤回机器人自己的消息；禁言/解禁需机器人是群管理员（1 分钟 ~ 1 天） |
+| 群资料 / 头像 / 置顶 / 改名 | 群名、人数、分类、标签、简介（白名单机器人才有），点「刷新」立刻向官方查一次 |
+| 存储管理 | 总占用、每会话占用与条数、保留天数（0=永久）、清空单个/全部 |
+
+> **@ 的注意点**：`<qqbot-at-user>` 这类提及标签只有 **markdown 消息（msg_type=2）** 才会被 QQ 解析，
+> 纯文本会原样显示成标签。所以带 @ 的消息会自动按 markdown 发出；发送失败会退化回纯文本
+> （@ 变成 `@昵称`），消息不会丢。
+
+详见 [`docs/official-qq-chat-console.md`](docs/official-qq-chat-console.md)，
+实现取舍见 [`docs/official-qq-chat-console-design.md`](docs/official-qq-chat-console-design.md)。
+
+### 3. 验证码（防抢号）
 
 答题拦不住抢号（知道卡名就能接管），所以整套出题/判题逻辑已删除，只走验证码：
 
@@ -54,7 +80,7 @@
   骰主用 `.bind pending` 看列表、`.bind approve <旧QQ号>` / `.group approve <旧群号>`
   核实身份后确认（会跳过验证码）
 
-### 3. 虚拟角色状态栏（官 bot 专属）
+### 4. 虚拟角色状态栏（官 bot 专属）
 
 官方机器人**改不了群名片**，所以用 `.sn` 模板渲染成一行小号红字挂在回复顶部：
 
@@ -66,8 +92,18 @@ $\scriptsize\textcolor{#E5484D}{\text{马丁·弗卢吉尔 SAN69 HP12/12 DEX65}}
 - 属性实时求值，不硬编码任何规则系统（COC / DND / FU / 自定义 `.sn expr` 都行）
 - `.sn off` 可彻底关掉；**需要开启「官方QQ使用Markdown」**，否则状态栏自动隐藏
 - 只对官方 QQ 端点生效，OneBot / TG / Discord 等平台回复格式完全不变
+- **状态栏不进跑团日志**：红字只是展示用，写日志前会按本次发送的前缀剥掉，
+  `.log` 导出的是干净正文（分页 / 批量发送的上下文也一并处理）
 
-### 4. 官方 QQ 适配增强
+### 5. 群组管理（一键拉黑 + 官方群资料）
+
+- 群卡片右上角「**拉黑 / 解除拉黑**」直接写黑白名单（禁止，-30），已拉黑的群标题旁显示标签；
+  不用再去「综合设置 › 黑白名单」手输群号，**拉黑后立刻落库**，刷新列表就能核对
+- 官方机器人群的 ID 很长，窄屏下会**折行**，不会再出现「拉黑 / 退出按钮被挤出卡片」的情况
+- 官方群名、简介、分类、标签自动补全（`/v2/groups/{id}/info`，简介这些字段只有白名单机器人拿得到）；
+  群列表的玩家数改成一次批量查询，几百个群也不会卡
+
+### 6. 官方 QQ 适配增强
 
 | 改动 | 说明 |
 |---|---|
@@ -76,7 +112,7 @@ $\scriptsize\textcolor{#E5484D}{\text{马丁·弗卢吉尔 SAN69 HP12/12 DEX65}}
 | 掉线防崩 | 连接失败后端点 `Enable` 仍为 true，旧实现发消息会 nil 接口 panic 并**冲掉整条 websocket**；现在发送入口有守卫 |
 | 邮件 | SMTP 支持 `host` 或 `host:port`，默认 465（隐式 TLS）、587 强制 STARTTLS，失败会如实报错 |
 
-### 5. 内容安全（公益服务向）
+### 7. 内容安全（公益服务向）
 
 | 改动 | 说明 |
 |---|---|
@@ -85,11 +121,13 @@ $\scriptsize\textcolor{#E5484D}{\text{马丁·弗卢吉尔 SAN69 HP12/12 DEX65}}
 
 详见 [`docs/helpdoc-image-and-censor-mask.md`](docs/helpdoc-image-and-censor-mask.md)。
 
-### 6. 其它
+### 8. 其它
 
 - `.help` 第一行固定为 `鲸娘与豹 <版本号>`
 - 私聊（`PG-` 伪群号）也参与归一：官方私聊与旧号私聊共用同一份属性/默认卡
 - `.group doctor` / `.bind doctor` 一键自检所有绑定
+- **日志上传**：缓存链接失效时自动重新上传（上游 #1811）；本版还修了「染色器返回 SPA 的
+  index.html 却当成链接有效」导致永不上传的问题，日志页每张卡片提供「**强制重传**」按钮
 
 ---
 
@@ -135,6 +173,9 @@ powershell -File scripts\build-windows.ps1
 产物在 `dist-build\sealdice-core.exe`（脚本会先把管理界面装进 `static/frontend` 再编译）。
 把 exe 放到**固定目录**（不要在系统临时目录）运行，浏览器打开 `http://127.0.0.1:3211` 即可。
 
+> 前端产物是**内嵌进 exe** 的：改了前端（`sealdice-ui`）要重新 `pnpm build` 并同步
+> `static/frontend`，再 `go build`，否则页面还是旧的（浏览器强刷也没用）。
+
 ---
 
 ## 配置速查（`data/<名字>/serve.yaml` 或管理界面）
@@ -147,6 +188,7 @@ powershell -File scripts\build-windows.ps1
 | `identityBindCodeLength` | `6` | 4~8 |
 | `identityBindCodeExpireSec` | `600` | 60~3600 秒 |
 | `identityBindCooldownSec` | `60` | 同一用户两次发起的最小间隔 |
+| `officialQQUseMarkdown` | `false` | **虚拟角色状态栏与聊天控制台的 @ 需要它**（状态栏靠 markdown 渲染，@ 靠 msg_type=2 才会被解析） |
 | `officialQQRequestTimeoutSec` | `60` | 官方 QQ 请求超时（5~600） |
 | `officialQQChunkedUploadEnable` | `false` | 本地文件分片上传（**发文件必走，保留文件名**；图片/语音 ≥1MB 才走） |
 | `logMultiBotDedupWindowSec` | `5` | **建议保持 5**：调大并不能跨 bot 去重，只会把同一人窗口内的重复正文并成一条 |
@@ -158,6 +200,9 @@ powershell -File scripts\build-windows.ps1
 `imageRenderMaskInImage`、`imageRenderUrl`、`imageRenderToken`、
 `imageRenderTimeoutSec`、`imageRenderWidth`。
 
+聊天控制台的保留天数等设置也不在 `serve.yaml`：它在
+`data/<骰子名>/chat-console/settings.json`，在 WebUI 的聊天控制台「存储」面板里改。
+
 已删除的历史配置项：`identityBindQuestionCount`、`identityBindKeepQuiz`、
 `identityBindFailCooldownSec`、`identityBindUseEmailCode`（答题路径与邮箱开关都已取消；
 残留的旧键会被静默忽略）。
@@ -166,6 +211,10 @@ powershell -File scripts\build-windows.ps1
 
 ## 更详细的文档
 
+- [`docs/release-notes-fork.md`](docs/release-notes-fork.md)
+  —— **本分支改动总清单**：按功能分组，含数据兼容与回退说明
+- [`docs/official-qq-chat-console.md`](docs/official-qq-chat-console.md)
+  —— 聊天控制台：能力、平台限制、数据存放、常见问题
 - [`docs/identity-bind-and-ghcr.md`](docs/identity-bind-and-ghcr.md)
   —— 绑定与验证码的完整说明、镜像构建、常见问题与排查手册
 - [`docs/how-to-revert-to-upstream.md`](docs/how-to-revert-to-upstream.md)
@@ -188,6 +237,11 @@ powershell -File scripts\build-windows.ps1
   （一般用法是官 bot 在官方群、民间 bot 在旧群，不受影响）
 - 群配置（前缀、自定义回复、牌堆、扩展开关）**不共享**，只共享日志与玩家数据
 - 群绑定后只看得到归一后（旧群）那一份日志；官方群自己那份**不会被删**，解绑或回退后又能看到
+- **聊天控制台只能看到授权后的消息**：群消息是否完整取决于群主有没有在官方群设置里开启
+  「允许机器人获取群消息」；官方也不提供历史回溯，只能记录功能启用之后的消息
+- **聊天控制台的真引用受官方窗口限制**：只有最近几分钟内收到的消息能挂 `msg_id`，且同一个
+  `msg_id` 的被动回复次数有限（官方约 5 次），超了会被拒并提示原因；私聊主动消息也有额度
+- 聊天控制台只做群聊与私聊，不镜像频道（Guild）
 
 ---
 
