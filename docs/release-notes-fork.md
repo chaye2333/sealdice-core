@@ -137,6 +137,9 @@ $\scriptsize\textcolor{#E5484D}{\text{调查员甲 HP12/12 AC16}}$
   "官网 / Lagrange Sign / Google / GitHub"导致四个红叉的问题），并显示各平台耗时；
 - 日志页「强制重传」按钮、图片加载失败显示"已过期"占位、聊天控制台存储面板；
 - 群组管理页的「已拉黑」标签与一键拉黑按钮、官方群简介 / 分类 / 标签展示；
+- 群组管理页窄屏适配：官方机器人群的 ID（`OpenQQ-Group:<uin>-<openid>`）很长，以前会把
+  「拉黑 / 退出」按钮挤出卡片（`el-card` 是 `overflow:hidden`，挤出去就等于按钮消失）；
+  现在标题行允许换行、窄屏下长 ID 自动折行，按钮始终留在卡片内（QQ 群 ID 短，所以只有官方群暴露这个问题）。
 - `Dockerfile` 的 `UI_REF` 钉在本 fork 的具体 commit（见 `Dockerfile`），本地 `static/frontend` 已内嵌同一份产物。
 
 ---
