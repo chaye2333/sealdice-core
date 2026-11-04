@@ -189,7 +189,10 @@ data/chat-console/
 
 - 出站记录挂在 `sendQQGroupMsgRaw` / `sendC2CMsgRaw` 的**实际发送成功**分支上（逐条记录，含分页拆分的每一条）；
   富媒体消息没有正文，记 `[富媒体消息]` 占位。
-- 控制台发送走 `MsgType=0` 纯文本（不跟随 `OfficialQQUseMarkdown`），保证在未配置 Markdown 模板的 bot 上也能发出去。
+- 控制台发送默认走 `MsgType=0` 纯文本（不跟随 `OfficialQQUseMarkdown`），保证在未配置 Markdown 模板的 bot 上也能发出去；
+  **但带 `@` 的消息必须走 `MsgType=2` markdown**——`<qqbot-at-user>` 这类提及标签只有 markdown 消息才会被 QQ 解析，
+  纯文本会原样显示成 `<qqbot-at-user id="..." />`。`OfficialQQUseMarkdown` 开启时也跟随设置全走 markdown；
+  markdown 发送失败会退化回纯文本（`@` 变 `@昵称`），至少消息不丢。
 - 会话 key 不含 UIN：同一群被多个官方 bot 拉入时会合并成一个会话（罕见，暂不处理）。
 
 ### v1.1 追加（骰主操作）

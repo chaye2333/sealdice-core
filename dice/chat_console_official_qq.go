@@ -520,18 +520,50 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleDisplayText(kind, targetID, text
 	})
 }
 
+// chatConsoleSendPayload 组装好的待发消息 + 历史展示文本 + 不支持 markdown 时的退化正文。
+type chatConsoleSendPayload struct {
+	toCreate    *dto.MessageToCreate
+	displayText string // 历史里展示的正文（@ 标签已还原成 @昵称）
+	plainText   string // markdown 发不出去时的退化正文（@ 变纯文本 @昵称）
+	quote       *ChatConsoleQuote
+}
+
+// content 返回真正发出去的正文（markdown 模式下正文在 Markdown.Content 里）。
+func (p *chatConsoleSendPayload) content() string {
+	if p == nil || p.toCreate == nil {
+		return ""
+	}
+	if p.toCreate.Markdown != nil {
+		return p.toCreate.Markdown.Content
+	}
+	return p.toCreate.Content
+}
+
+// chatConsoleUseMarkdown 控制台消息是否走 markdown（msg_type=2）。
+// `<qqbot-at-user>` / `<qqbot-at-everyone>` 只有在 markdown 消息里才会被 QQ 解析，
+// 纯文本会把它原样显示出来（“<qqbot-at-user id="..." />耶耶耶”就是这么来的），
+// 所以带 @ 的消息必须走 markdown；其余情况跟随「官方QQ使用Markdown」设置，和骰子本体保持一致。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleUseMarkdown(content string) bool {
+	if strings.Contains(content, "qqbot-at-") {
+		return true
+	}
+	if pa == nil || pa.EndPoint == nil || pa.EndPoint.Session == nil || pa.EndPoint.Session.Parent == nil {
+		return false
+	}
+	return pa.EndPoint.Session.Parent.Config.OfficialQQUseMarkdown
+}
+
 // chatConsoleBuildSend 组装一条待发送的官方消息（不触发网络请求，便于单测）。
-// 返回：待发消息、历史里展示的正文、记录用的引用信息。
-func (pa *PlatformAdapterOfficialQQ) chatConsoleBuildSend(kind, targetID, text string, opts ChatConsoleSendOptions) (*dto.MessageToCreate, string, *ChatConsoleQuote, error) {
+func (pa *PlatformAdapterOfficialQQ) chatConsoleBuildSend(kind, targetID, text string, opts ChatConsoleSendOptions) (*chatConsoleSendPayload, error) {
 	rendered, cqReplyID, err := pa.chatConsoleParseCQ(kind, text)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
 	if strings.TrimSpace(rendered) == "" && len(opts.Mentions) == 0 {
-		return nil, "", nil, errors.New("消息不能为空")
+		return nil, errors.New("消息不能为空")
 	}
 	if runes := []rune(rendered); len(runes) > chatConsoleSendMaxLen {
-		return nil, "", nil, fmt.Errorf("消息过长（%d 字），单条请控制在 %d 字以内", len(runes), chatConsoleSendMaxLen)
+		return nil, fmt.Errorf("消息过长（%d 字），单条请控制在 %d 字以内", len(runes), chatConsoleSendMaxLen)
 	}
 
 	// 界面上的「回复」：只有最近收到、还在被动回复窗口内的消息才能挂 msg_id
@@ -546,10 +578,18 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleBuildSend(kind, targetID, text s
 		sendOpts.Quote = nil // 真引用由 message_reference 表达，正文里不再加「回复 某人」前缀
 	}
 
+	content := sendOpts.platformText(kind, rendered)
+	displayText := pa.chatConsoleDisplayText(kind, targetID, sendOpts.displayText(kind, rendered))
+
 	toCreate := &dto.MessageToCreate{
-		Content: sendOpts.platformText(kind, rendered),
 		MsgType: dto.TextMsg,
 		MsgSeq:  rand.Uint32()%10000000 + 1, //nolint:gosec // 仅用于消息去重序号
+	}
+	if pa.chatConsoleUseMarkdown(content) {
+		toCreate.MsgType = 2 // markdown 消息
+		toCreate.Markdown = &dto.Markdown{Content: content}
+	} else {
+		toCreate.Content = content
 	}
 	if replyID != "" {
 		toCreate.MsgID = replyID
@@ -559,8 +599,12 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleBuildSend(kind, targetID, text s
 		}
 	}
 
-	displayText := sendOpts.displayText(kind, rendered)
-	return toCreate, pa.chatConsoleDisplayText(kind, targetID, displayText), quote, nil
+	return &chatConsoleSendPayload{
+		toCreate:    toCreate,
+		displayText: displayText,
+		plainText:   displayText,
+		quote:       quote,
+	}, nil
 }
 
 // SendChatConsoleMessage 以机器人身份向会话发送一条文字消息，并记入历史。
@@ -580,10 +624,11 @@ func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text
 		return nil, fmt.Errorf("未知的会话类型: %s", kind)
 	}
 
-	toCreate, displayText, quote, err := pa.chatConsoleBuildSend(kind, targetID, strings.TrimSpace(text), opts)
+	payload, err := pa.chatConsoleBuildSend(kind, targetID, strings.TrimSpace(text), opts)
 	if err != nil {
 		return nil, err
 	}
+	toCreate := payload.toCreate
 
 	ctx, cancel := context.WithTimeout(context.Background(), chatConsoleSendTimeout)
 	defer cancel()
@@ -602,14 +647,27 @@ func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text
 		}
 	}
 
+	send := func(msg *dto.MessageToCreate) (*dto.Message, error) {
+		switch kind {
+		case chatConsoleKindGroup:
+			return pa.Api.PostGroupMessage(ctx, targetID, msg)
+		default:
+			return pa.Api.PostC2CMessage(ctx, targetID, msg)
+		}
+	}
+
 	var (
 		res *dto.Message
 	)
-	switch kind {
-	case chatConsoleKindGroup:
-		res, err = pa.Api.PostGroupMessage(ctx, targetID, toCreate)
-	case chatConsoleKindC2C:
-		res, err = pa.Api.PostC2CMessage(ctx, targetID, toCreate)
+	res, err = send(toCreate)
+	if err != nil && toCreate.Markdown != nil {
+		// 这个 bot 发不了 markdown：退化成纯文本（@ 变成 @昵称），至少消息能发出去
+		pa.chatConsoleLogf("official qq 控制台 markdown 发送失败，退化为纯文本: %v", err)
+		fallback := *toCreate
+		fallback.MsgType = dto.TextMsg
+		fallback.Markdown = nil
+		fallback.Content = payload.plainText
+		res, err = send(&fallback)
 	}
 	if err != nil {
 		pa.chatConsoleLogf("official qq 控制台发送失败: %v", err)
@@ -621,7 +679,7 @@ func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text
 		msgID = res.ID
 	}
 
-	msg, appendErr := pa.chatConsoleAppendOutgoing(kind, targetID, displayText, msgID, quote)
+	msg, appendErr := pa.chatConsoleAppendOutgoing(kind, targetID, payload.displayText, msgID, payload.quote)
 	if appendErr != nil {
 		pa.chatConsoleLogf("official qq 聊天控制台记录控制台消息失败: %v", appendErr)
 	}
@@ -635,9 +693,9 @@ func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text
 		Source:     chatConsoleSourceConsole,
 		SenderID:   pa.EndPoint.UserID,
 		SenderName: pa.EndPoint.Nickname,
-		Text:       displayText,
+		Text:       payload.displayText,
 		MsgID:      msgID,
-		Quote:      quote,
+		Quote:      payload.quote,
 	}, nil
 }
 

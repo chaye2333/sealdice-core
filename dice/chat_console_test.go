@@ -729,7 +729,7 @@ func errTest(s string) error { return testError(s) }
 // ---------------- 控制台发送：CQ 码（@ / 引用） ----------------
 
 // newCQTestAdapter 造一个带控制台存储的官方 QQ 适配器（不连真实接口）。
-func newCQTestAdapter(t *testing.T) (*PlatformAdapterOfficialQQ, *ChatConsoleStore) {
+func newCQTestAdapter(t *testing.T) (*PlatformAdapterOfficialQQ, *ChatConsoleStore, *Dice) {
 	t.Helper()
 	d := &Dice{BaseConfig: BaseConfig{DataDir: t.TempDir()}, ImSession: &IMSession{}}
 	d.ImSession.Parent = d
@@ -739,7 +739,7 @@ func newCQTestAdapter(t *testing.T) (*PlatformAdapterOfficialQQ, *ChatConsoleSto
 		UIN:      "10001",
 		EndPoint: &EndPointInfo{EndPointInfoBase: EndPointInfoBase{ID: "ep1", Session: d.ImSession}},
 	}
-	return pa, store
+	return pa, store, d
 }
 
 func TestChatConsoleParseCQ(t *testing.T) {
@@ -790,32 +790,34 @@ func TestChatConsoleParseCQ(t *testing.T) {
 }
 
 func TestChatConsoleBuildSendCQReply(t *testing.T) {
-	pa, _ := newCQTestAdapter(t)
+	pa, _, _ := newCQTestAdapter(t)
 
-	toCreate, display, quote, err := pa.chatConsoleBuildSend(
+	payload, err := pa.chatConsoleBuildSend(
 		chatConsoleKindGroup, "GROUP-1", "[CQ:reply,id=MSG-9] 收到", ChatConsoleSendOptions{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
+	toCreate := payload.toCreate
 	if toCreate.MsgID != "MSG-9" {
 		t.Fatalf("MsgID = %q, want MSG-9（真引用要走被动回复）", toCreate.MsgID)
 	}
 	if toCreate.MessageReference == nil || toCreate.MessageReference.MessageID != "MSG-9" {
 		t.Fatalf("message_reference 没挂上: %+v", toCreate.MessageReference)
 	}
-	if strings.Contains(toCreate.Content, "「回复") {
-		t.Fatalf("真引用不该再加正文前缀: %q", toCreate.Content)
+	if strings.Contains(payload.content(), "「回复") {
+		t.Fatalf("真引用不该再加正文前缀: %q", payload.content())
 	}
-	if display != "收到" {
-		t.Fatalf("display = %q, want 收到", display)
+	if payload.displayText != "收到" {
+		t.Fatalf("display = %q, want 收到", payload.displayText)
 	}
+	quote := payload.quote
 	if quote == nil || quote.MsgID != "MSG-9" {
 		t.Fatalf("引用信息丢了: %+v", quote)
 	}
 }
 
 func TestChatConsoleBuildSendQuoteWindow(t *testing.T) {
-	pa, store := newCQTestAdapter(t)
+	pa, store, _ := newCQTestAdapter(t)
 	conv := ChatConsoleRecord{
 		Kind: chatConsoleKindGroup, TargetID: "GROUP-1",
 		Dir: chatConsoleDirIn, Source: chatConsoleSourceUser,
@@ -826,38 +828,40 @@ func TestChatConsoleBuildSendQuoteWindow(t *testing.T) {
 	freshConv := conv
 	freshConv.MessageID = "MSG-IN-FRESH"
 	fresh := recordTestMsg(t, store, freshConv, "骰个侦查", time.Now().Unix())
-	toCreate, display, quote, err := pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "收到",
+	payload, err := pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "收到",
 		ChatConsoleSendOptions{Quote: &ChatConsoleQuote{Sender: "许烁", Text: "骰个侦查", MsgID: fresh.MsgID}})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
+	toCreate := payload.toCreate
 	if toCreate.MsgID != "MSG-IN-FRESH" {
 		t.Fatalf("窗口内的消息应该能被真引用，MsgID = %q", toCreate.MsgID)
 	}
 	if toCreate.MessageReference == nil || toCreate.MessageReference.MessageID != "MSG-IN-FRESH" {
 		t.Fatalf("窗口内的消息应该挂 message_reference: %+v", toCreate.MessageReference)
 	}
-	if strings.Contains(toCreate.Content, "「回复") {
-		t.Fatalf("真引用不该再加正文前缀: %q", toCreate.Content)
+	if strings.Contains(payload.content(), "「回复") {
+		t.Fatalf("真引用不该再加正文前缀: %q", payload.content())
 	}
-	if display != "收到" || quote == nil || quote.MsgID != "MSG-IN-FRESH" {
-		t.Fatalf("展示/引用信息异常: display=%q quote=%+v", display, quote)
+	if payload.displayText != "收到" || payload.quote == nil || payload.quote.MsgID != "MSG-IN-FRESH" {
+		t.Fatalf("展示/引用信息异常: display=%q quote=%+v", payload.displayText, payload.quote)
 	}
 
 	// 超出被动回复窗口：退回伪引用
 	staleConv := conv
 	staleConv.MessageID = "MSG-IN-STALE"
 	stale := recordTestMsg(t, store, staleConv, "旧消息", time.Now().Add(-30*time.Minute).Unix())
-	toCreate, _, _, err = pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "收到",
+	payload, err = pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "收到",
 		ChatConsoleSendOptions{Quote: &ChatConsoleQuote{Sender: "许烁", Text: "旧消息", MsgID: stale.MsgID}})
 	if err != nil {
 		t.Fatalf("build stale: %v", err)
 	}
+	toCreate = payload.toCreate
 	if toCreate.MsgID != "" || toCreate.MessageReference != nil {
 		t.Fatalf("超出窗口不该挂 msg_id: %+v", toCreate)
 	}
-	if !strings.Contains(toCreate.Content, "「回复 许烁：旧消息」") {
-		t.Fatalf("超出窗口应退回正文前缀: %q", toCreate.Content)
+	if !strings.Contains(payload.content(), "「回复 许烁：旧消息」") {
+		t.Fatalf("超出窗口应退回正文前缀: %q", payload.content())
 	}
 
 	// 机器人自己发的消息不能被"引用回复"
@@ -866,19 +870,60 @@ func TestChatConsoleBuildSendQuoteWindow(t *testing.T) {
 	out.Source = chatConsoleSourceBot
 	out.MessageID = "BOT-OUT-1"
 	botMsg := recordTestMsg(t, store, out, "我发的", time.Now().Unix())
-	toCreate, _, _, err = pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "收到",
+	payload, err = pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "收到",
 		ChatConsoleSendOptions{Quote: &ChatConsoleQuote{MsgID: botMsg.MsgID}})
 	if err != nil {
 		t.Fatalf("build bot msg: %v", err)
 	}
-	if toCreate.MsgID != "" {
+	if payload.toCreate.MsgID != "" {
 		t.Fatal("不该拿机器人自己的消息当被动回复目标")
 	}
 }
 
+// TestChatConsoleBuildSendMarkdownForAt 回归：<qqbot-at-user> 只有在 markdown 消息里才被 QQ 解析，
+// 纯文本会把标签原样显示出来（“<qqbot-at-user id=... />耶耶耶”）。
+func TestChatConsoleBuildSendMarkdownForAt(t *testing.T) {
+	pa, _, d := newCQTestAdapter(t)
+	d.Config.OfficialQQUseMarkdown = false
+
+	// 带 @：即使没开 md 也必须走 markdown
+	payload, err := pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "[CQ:at,qq=MEMBER-1] 耶耶耶", ChatConsoleSendOptions{})
+	if err != nil {
+		t.Fatalf("build at: %v", err)
+	}
+	if payload.toCreate.MsgType != 2 || payload.toCreate.Markdown == nil {
+		t.Fatalf("带 @ 的消息必须走 markdown，MsgType=%d", payload.toCreate.MsgType)
+	}
+	if !strings.Contains(payload.content(), `<qqbot-at-user id="MEMBER-1" />`) {
+		t.Fatalf("markdown 正文里缺 @ 标签: %q", payload.content())
+	}
+	if payload.toCreate.Content != "" {
+		t.Fatalf("markdown 模式下不该再塞 Content: %q", payload.toCreate.Content)
+	}
+
+	// 不带 @、md 关闭：保持纯文本
+	payload, err = pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "耶耶耶", ChatConsoleSendOptions{})
+	if err != nil {
+		t.Fatalf("build text: %v", err)
+	}
+	if payload.toCreate.MsgType != 0 || payload.toCreate.Markdown != nil || payload.toCreate.Content != "耶耶耶" {
+		t.Fatalf("不该走 markdown: %+v", payload.toCreate)
+	}
+
+	// 不带 @、md 开启：跟随设置
+	d.Config.OfficialQQUseMarkdown = true
+	payload, err = pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "耶耶耶", ChatConsoleSendOptions{})
+	if err != nil {
+		t.Fatalf("build md: %v", err)
+	}
+	if payload.toCreate.MsgType != 2 || payload.toCreate.Markdown == nil {
+		t.Fatalf("开启 md 后应该跟随设置: %+v", payload.toCreate)
+	}
+}
+
 func TestChatConsoleBuildSendRejectsMediaCQ(t *testing.T) {
-	pa, _ := newCQTestAdapter(t)
-	if _, _, _, err := pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "[CQ:file,file=a.txt]", ChatConsoleSendOptions{}); err == nil {
+	pa, _, _ := newCQTestAdapter(t)
+	if _, err := pa.chatConsoleBuildSend(chatConsoleKindGroup, "GROUP-1", "[CQ:file,file=a.txt]", ChatConsoleSendOptions{}); err == nil {
 		t.Fatal("文件 CQ 码应该报错，提示用上传按钮")
 	}
 }
