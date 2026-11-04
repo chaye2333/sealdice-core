@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -385,12 +386,187 @@ func chatConsoleQuotePrefix(q ChatConsoleQuote) string {
 	return fmt.Sprintf("「回复 %s：%s」\n", sender, string(quoted))
 }
 
-// SendChatConsoleMessage 以机器人身份向会话发送一条文字消息，并记入历史。
-func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text string, opts ChatConsoleSendOptions) (*ChatConsoleMessage, error) {
-	text = strings.TrimSpace(text)
-	if text == "" && len(opts.Mentions) == 0 {
-		return nil, errors.New("消息不能为空")
+// chatConsoleKey 会话在控制台存储里的 key。
+func chatConsoleKey(kind, targetID string) string {
+	return kind + ":" + targetID
+}
+
+// chatConsoleQuotePassiveWindow 官方被动回复窗口。
+// 只有这个时长以内收到的消息才能挂 msg_id 做"真引用"；更早的消息只能退回正文前缀那种伪引用，
+// 因为官方不允许主动消息带 message_reference。
+const chatConsoleQuotePassiveWindow = 4 * time.Minute
+
+// chatConsoleMediaCQRe 控制台文本里不能直接塞富媒体：官方富媒体要单独上传接口，
+// 而且 message.ConvertStringMessage 会把无效的媒体码静默丢掉，所以这里先拦一次给个明确的提示。
+var chatConsoleMediaCQRe = regexp.MustCompile(`\[CQ:(?:image|record|video|file)[,\]]`)
+
+// chatConsoleParseCQ 把控制台输入里的 CQ 码翻成官方 QQ 认的形态：
+//
+//	[CQ:at,qq=<openid>]      → <qqbot-at-user id="<openid>" />（群聊）
+//	[CQ:at,qq=all]           → <qqbot-at-everyone />（群聊）
+//	[CQ:reply,id=<msg_id>]   → 记为被动回复目标，正文里去掉
+//
+// 图片 / 语音 / 文件这类 CQ 码在控制台没有对应上传通道，直接报错，
+// 免得骰主以为已经发出去了。返回正文、被动回复的 msg_id。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleParseCQ(kind, text string) (string, string, error) {
+	if chatConsoleMediaCQRe.MatchString(text) {
+		return "", "", errors.New("控制台输入不支持图片 / 语音 / 文件的 CQ 码，请用输入框旁的上传按钮发送")
 	}
+	var (
+		b       strings.Builder
+		replyID string
+	)
+	for _, element := range message.ConvertStringMessage(text) {
+		switch elem := element.(type) {
+		case *message.TextElement:
+			b.WriteString(elem.Content)
+		case *message.ReplyElement:
+			if replyID == "" {
+				replyID = strings.TrimSpace(elem.ReplySeq)
+			}
+		case *message.AtElement:
+			if kind != chatConsoleKindGroup {
+				continue // 私聊没有 @
+			}
+			target := normalizeOfficialQQGroupAtTarget(pa.UIN, elem.Target)
+			switch target {
+			case "":
+				continue
+			case "all":
+				b.WriteString("<qqbot-at-everyone />")
+			default:
+				b.WriteString(formatOfficialQQAtUser(target))
+			}
+		case *message.ImageElement, *message.RecordElement, *message.FileElement:
+			return "", "", errors.New("控制台输入不支持图片 / 语音 / 文件的 CQ 码，请用输入框旁的上传按钮发送")
+		}
+	}
+	return b.String(), replyID, nil
+}
+
+// chatConsoleQuoteFromMsgID 用 msg_id 反查一条引用信息（查不到就只留 id）。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleQuoteFromMsgID(kind, targetID, msgID string) *ChatConsoleQuote {
+	quote := &ChatConsoleQuote{MsgID: msgID}
+	store := pa.chatConsoleStore()
+	if store == nil {
+		return quote
+	}
+	if msg := store.Find(chatConsoleKey(kind, targetID), msgID); msg != nil {
+		quote.Sender = msg.SenderName
+		quote.Text = msg.Text
+	}
+	return quote
+}
+
+// chatConsoleResolveQuote 决定 opts.Quote 能不能做成真引用。
+// 返回（展示 / 记录用的引用信息, 可用的被动回复 msg_id）。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleResolveQuote(kind, targetID string, quote *ChatConsoleQuote) (*ChatConsoleQuote, string) {
+	if quote == nil {
+		return nil, ""
+	}
+	want := strings.TrimSpace(quote.MsgID)
+	if want == "" {
+		return quote, ""
+	}
+	store := pa.chatConsoleStore()
+	if store == nil {
+		return quote, ""
+	}
+	msg := store.Find(chatConsoleKey(kind, targetID), want)
+	if msg == nil || msg.Dir != chatConsoleDirIn || msg.MsgID == "" {
+		return quote, ""
+	}
+	if time.Since(time.Unix(msg.TS, 0)) > chatConsoleQuotePassiveWindow {
+		return quote, ""
+	}
+	out := *quote
+	out.MsgID = msg.MsgID
+	if strings.TrimSpace(out.Sender) == "" {
+		out.Sender = msg.SenderName
+	}
+	if strings.TrimSpace(out.Text) == "" {
+		out.Text = msg.Text
+	}
+	return &out, msg.MsgID
+}
+
+// chatConsoleAtDisplayName 把 openid 换回昵称，取最近发言过的那个人。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleAtDisplayName(kind, targetID, openid string) string {
+	store := pa.chatConsoleStore()
+	if store != nil {
+		if msgs, _, err := store.Messages(chatConsoleKey(kind, targetID), 0, 200); err == nil {
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].SenderOpenID == openid && msgs[i].SenderName != "" {
+					return msgs[i].SenderName
+				}
+			}
+		}
+	}
+	return openid
+}
+
+// chatConsoleDisplayText 把正文里的官方 @ 标签换回 `@昵称`，历史里不该出现标签原文。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleDisplayText(kind, targetID, text string) string {
+	if !strings.Contains(text, "qqbot-at") {
+		return text
+	}
+	text = strings.ReplaceAll(text, "<qqbot-at-everyone />", "@全体成员")
+	return officialQQAtRegex.ReplaceAllStringFunc(text, func(tag string) string {
+		target := officialQQMentionTarget(officialQQAtRegex.FindStringSubmatch(tag))
+		if target == "" {
+			return tag
+		}
+		return "@" + pa.chatConsoleAtDisplayName(kind, targetID, target)
+	})
+}
+
+// chatConsoleBuildSend 组装一条待发送的官方消息（不触发网络请求，便于单测）。
+// 返回：待发消息、历史里展示的正文、记录用的引用信息。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleBuildSend(kind, targetID, text string, opts ChatConsoleSendOptions) (*dto.MessageToCreate, string, *ChatConsoleQuote, error) {
+	rendered, cqReplyID, err := pa.chatConsoleParseCQ(kind, text)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if strings.TrimSpace(rendered) == "" && len(opts.Mentions) == 0 {
+		return nil, "", nil, errors.New("消息不能为空")
+	}
+	if runes := []rune(rendered); len(runes) > chatConsoleSendMaxLen {
+		return nil, "", nil, fmt.Errorf("消息过长（%d 字），单条请控制在 %d 字以内", len(runes), chatConsoleSendMaxLen)
+	}
+
+	// 界面上的「回复」：只有最近收到、还在被动回复窗口内的消息才能挂 msg_id
+	quote, replyID := pa.chatConsoleResolveQuote(kind, targetID, opts.Quote)
+	if cqReplyID != "" {
+		replyID = cqReplyID
+		quote = pa.chatConsoleQuoteFromMsgID(kind, targetID, cqReplyID)
+	}
+
+	sendOpts := opts
+	if replyID != "" {
+		sendOpts.Quote = nil // 真引用由 message_reference 表达，正文里不再加「回复 某人」前缀
+	}
+
+	toCreate := &dto.MessageToCreate{
+		Content: sendOpts.platformText(kind, rendered),
+		MsgType: dto.TextMsg,
+		MsgSeq:  rand.Uint32()%10000000 + 1, //nolint:gosec // 仅用于消息去重序号
+	}
+	if replyID != "" {
+		toCreate.MsgID = replyID
+		toCreate.MessageReference = &dto.MessageReference{
+			MessageID:             replyID,
+			IgnoreGetMessageError: true,
+		}
+	}
+
+	displayText := sendOpts.displayText(kind, rendered)
+	return toCreate, pa.chatConsoleDisplayText(kind, targetID, displayText), quote, nil
+}
+
+// SendChatConsoleMessage 以机器人身份向会话发送一条文字消息，并记入历史。
+// 正文里可以带 CQ 码：`[CQ:at,qq=<openid>]` 会被翻成官方 @，`[CQ:reply,id=<msg_id>]`
+// 会走被动回复（真引用）；其它富媒体 CQ 码请用上传接口。
+func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text string, opts ChatConsoleSendOptions) (*ChatConsoleMessage, error) {
 	if pa == nil || pa.Api == nil {
 		return nil, errors.New("官方 QQ 机器人尚未连接")
 	}
@@ -400,35 +576,34 @@ func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text
 	if targetID == "" {
 		return nil, errors.New("会话目标为空")
 	}
-	if runes := []rune(text); len(runes) > chatConsoleSendMaxLen {
-		return nil, fmt.Errorf("消息过长（%d 字），单条请控制在 %d 字以内", len(runes), chatConsoleSendMaxLen)
+	if kind != chatConsoleKindGroup && kind != chatConsoleKindC2C {
+		return nil, fmt.Errorf("未知的会话类型: %s", kind)
+	}
+
+	toCreate, displayText, quote, err := pa.chatConsoleBuildSend(kind, targetID, strings.TrimSpace(text), opts)
+	if err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), chatConsoleSendTimeout)
 	defer cancel()
 
-	switch kind {
-	case chatConsoleKindGroup:
-		if err := pa.waitGroupActiveQuota(ctx, targetID); err != nil {
-			return nil, chatConsoleQuotaError(err)
+	// 主动消息才排队限流；被动回复（带 msg_id）不占主动消息额度
+	if toCreate.MsgID == "" {
+		switch kind {
+		case chatConsoleKindGroup:
+			if quotaErr := pa.waitGroupActiveQuota(ctx, targetID); quotaErr != nil {
+				return nil, chatConsoleQuotaError(quotaErr)
+			}
+		case chatConsoleKindC2C:
+			if quotaErr := pa.waitC2CActiveQuota(ctx, targetID); quotaErr != nil {
+				return nil, chatConsoleQuotaError(quotaErr)
+			}
 		}
-	case chatConsoleKindC2C:
-		if err := pa.waitC2CActiveQuota(ctx, targetID); err != nil {
-			return nil, chatConsoleQuotaError(err)
-		}
-	default:
-		return nil, fmt.Errorf("未知的会话类型: %s", kind)
-	}
-
-	toCreate := &dto.MessageToCreate{
-		Content: opts.platformText(kind, text),
-		MsgType: dto.TextMsg,
-		MsgSeq:  rand.Uint32()%10000000 + 1, //nolint:gosec // 仅用于消息去重序号
 	}
 
 	var (
 		res *dto.Message
-		err error
 	)
 	switch kind {
 	case chatConsoleKindGroup:
@@ -446,8 +621,7 @@ func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text
 		msgID = res.ID
 	}
 
-	displayText := opts.displayText(kind, text)
-	msg, appendErr := pa.chatConsoleAppendOutgoing(kind, targetID, displayText, msgID, opts.Quote)
+	msg, appendErr := pa.chatConsoleAppendOutgoing(kind, targetID, displayText, msgID, quote)
 	if appendErr != nil {
 		pa.chatConsoleLogf("official qq 聊天控制台记录控制台消息失败: %v", appendErr)
 	}
@@ -463,7 +637,7 @@ func (pa *PlatformAdapterOfficialQQ) SendChatConsoleMessage(kind, targetID, text
 		SenderName: pa.EndPoint.Nickname,
 		Text:       displayText,
 		MsgID:      msgID,
-		Quote:      opts.Quote,
+		Quote:      quote,
 	}, nil
 }
 

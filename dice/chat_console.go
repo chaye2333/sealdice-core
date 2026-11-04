@@ -72,10 +72,12 @@ type ChatConsoleMedia struct {
 }
 
 // ChatConsoleQuote 是骰主在控制台里"引用回复"的引用信息。
-// 官方主动消息挂不了 msg_id，所以这只是展示层面的引用块 + 正文前缀。
+// MsgID 用来做"真引用"：官方被动回复窗口内（4 分钟）收到的消息能挂 message_reference，
+// 超出窗口就只能退化成正文前缀「回复 某人：原文」。
 type ChatConsoleQuote struct {
 	Sender string `json:"sender"`
 	Text   string `json:"text"`
+	MsgID  string `json:"msgId,omitempty"`
 }
 
 // ChatConsoleMessage 一条消息。Text 保留原始文本（可能含 CQ 码），
