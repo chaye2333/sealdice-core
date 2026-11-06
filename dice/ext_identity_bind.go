@@ -926,10 +926,13 @@ func runIdentityBindCommand(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) Cmd
 	}
 
 	if !identityBindEnabled(d) {
+		identityBindWarn(d, "身份绑定被拒绝: identityBindEnable 未开启 用户=%s", ctx.Player.UserID)
 		ReplyToSender(ctx, msg, "身份绑定功能未开启，请让骰主在 serve.yaml 中把 identityBindEnable 设为 true。")
 		return solved
 	}
 	if !identityBindSupported(ctx.EndPoint) {
+		identityBindWarn(d, "身份绑定被拒绝: 端点不支持 用户=%s 端点=%s/%s",
+			ctx.Player.UserID, ctx.EndPoint.Platform, ctx.EndPoint.ProtocolType)
 		ReplyToSender(ctx, msg, "身份绑定仅用于 QQ 官方机器人，当前连接方式无需绑定。")
 		return solved
 	}
@@ -1040,6 +1043,8 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 	solved := CmdExecuteResult{Matched: true, Solved: true}
 
 	if remaining := identityBindCooldownRemaining(d, ctx.EndPoint.ID, ctx.Player.UserID, identityBindActionUser); remaining > 0 {
+		identityBindInfo(d, "身份绑定被冷却拦截: 用户=%s 剩余=%s",
+			ctx.Player.UserID, identityBindFormatDuration(remaining))
 		ReplyToSender(ctx, msg, fmt.Sprintf("操作过于频繁，请在 %d 秒后重试。", int(remaining.Seconds())+1))
 		return solved
 	}
@@ -1047,12 +1052,16 @@ func identityBindStartUserSession(ctx *MsgContext, msg *Message, cmdArgs *CmdArg
 	// 双向索引之后，同一个旧 QQ 号只能属于一个人。
 	// 不加这个检查的话，后绑定的人会把先绑定的人的数据「抢」过去。
 	if existing, ok := identityBindStoreOf(d).find(d, oldUserID); ok && existing.Action == identityBindActionUser {
+		identityBindWarn(d, "身份绑定被拒绝: 旧QQ=%s 已绑定到官方身份=%s 申请者=%s",
+			oldUserID, existing.New.UserID, ctx.Player.UserID)
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"该旧账号 %s 已经被绑定过了，无法重复绑定。\n如果你认为这是误绑，请联系管理员处理。", oldUserID))
 		return solved
 	}
 
 	if existing, ok := identityBindStoreOf(d).find(d, ctx.Player.UserID); ok {
+		identityBindWarn(d, "身份绑定被拒绝: 官方身份=%s 已绑定旧QQ=%s",
+			ctx.Player.UserID, existing.Old.UserID)
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"你已经绑定到 %s 了，如需更换请先发送 `.unbind`。", existing.Old.UserID))
 		return solved
@@ -1112,6 +1121,7 @@ func identityBindStartCodeChallenge(
 	action identityBindAction,
 	newEndpoint, oldEndpoint identityBindEndpoint,
 	deliverTo string,
+	extraLines ...string,
 ) CmdExecuteResult {
 	d := ctx.Dice
 	solved := CmdExecuteResult{Matched: true, Solved: true}
@@ -1243,6 +1253,26 @@ func identityBindStartCodeChallenge(
 			lines = append(lines, "请确认民间 bot（OneBot 连接）在线且已启用；修好后稍等片刻会自动重试。")
 		}
 	}
+	// 调用方补充的「日志现状 / 报错提醒」（例如旧群根本没有日志）。
+	if len(extraLines) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, extraLines...)
+	}
+
+	// 后台日志：把这次申请登记成一条可检索的记录，
+	// 以后用户说"我绑了但没生效"时，能直接看到当时目标、通道、投递状态。
+	channel := identityBindCodeChannelNone
+	status := identityBindCodePending
+	if latest != nil {
+		channel = latest.Channel
+		status = latest.Status
+	}
+	identityBindInfo(d, "身份绑定申请已登记: 类型=%s 发起者=%s 目标=%s 通道=%s 状态=%s 原因=%s",
+		action,
+		identityBindChallengeOwnerID(action, newEndpoint),
+		identityBindChallengeTargetText(challenge),
+		channel, status, reason,
+	)
 	if needMaster {
 		lines = append(lines, "", "这条申请会保留 12 小时，骰主确认后立即生效。")
 	} else {
@@ -1360,6 +1390,7 @@ func identityBindDoctorReport(d *Dice, ctx *MsgContext) string {
 		}
 
 		var issues []string
+		note := ""
 		if newID == "" {
 			issues = append(issues, "缺少官方侧 ID（记录损坏）")
 		}
@@ -1373,11 +1404,24 @@ func identityBindDoctorReport(d *Dice, ctx *MsgContext) string {
 			} else if _, ok := ctx.Session.ServiceAtNew.Load(oldID); !ok {
 				issues = append(issues, "目标旧群不在内存里，读取会静默回退到当前群（让骰子去那个群发一条消息即可恢复）")
 			}
+			// 日志清单：绑定到底有没有接上东西，看这个最直接。
+			names, listErr := identityBindListGroupLogs(d, oldID)
+			switch {
+			case listErr != nil:
+				issues = append(issues, fmt.Sprintf("读取旧群日志失败: %v", listErr))
+			case len(names) == 0:
+				// 0 份日志不算「绑定异常」（可能只是还没开始跑团），但必须在报告里
+				// 说清楚——否则用户排查「绑定成功但 .log list 为空」时还是没有任何线索。
+				note = fmt.Sprintf("  旧群日志: 0 份（.log list 会显示暂无记录；若旧群确实跑过日志，请核对旧群号 %s）", oldID)
+			default:
+				note = fmt.Sprintf("  旧群日志: %s（读取位置: %s）",
+					identityBindLogGroupNames(d, oldID, names), oldID)
+			}
 		}
 
 		head := fmt.Sprintf("%s绑定: %s → %s", kind, newID, oldID)
 		if len(issues) == 0 {
-			lines = append(lines, head+"  [正常]")
+			lines = append(lines, head+"  [正常]"+note)
 			continue
 		}
 		problemCount++
@@ -1420,6 +1464,17 @@ func identityBindDoctorReport(d *Dice, ctx *MsgContext) string {
 			"  请让玩家各自执行一次 .bind <旧QQ号>。",
 		)
 	}
+	// 自检结果也写一份进后台日志：用户看到的只是回执，骰主排查时更需要可检索的记录。
+	if ctx != nil && ctx.Player != nil {
+		groupText := "<无群>"
+		if ctx.Group != nil {
+			groupText = identityBindGroupLabel(ctx, ctx.Group.GroupID)
+		}
+		identityBindInfo(d, "绑定自检: 操作者=%s 群=%s 个人绑定=%d 群绑定=%d 异常=%d",
+			ctx.Player.UserID, groupText, userCount, groupCount, problemCount)
+	} else {
+		identityBindInfo(d, "绑定自检: 个人绑定=%d 群绑定=%d 异常=%d", userCount, groupCount, problemCount)
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -1436,6 +1491,8 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 	solved := CmdExecuteResult{Matched: true, Solved: true}
 
 	if !identityBindSupported(ctx.EndPoint) {
+		identityBindWarn(d, "解除身份绑定被拒绝: 端点不支持 用户=%s 端点=%s/%s",
+			ctx.Player.UserID, ctx.EndPoint.Platform, ctx.EndPoint.ProtocolType)
 		ReplyToSender(ctx, msg, "身份绑定仅用于 QQ 官方机器人，当前连接方式无需解绑。")
 		return solved
 	}
@@ -1444,6 +1501,8 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 	// 之前这里漏了这道门：群里任何一个普通成员敲一句 .group unbind
 	// 就能把大家共用的群绑定删掉（个人维度无所谓，本来就是自己的东西）。
 	if action == identityBindActionGroup && ctx.PrivilegeLevel < 50 {
+		identityBindWarn(d, "解除群绑定被拒绝: 权限不足 群=%s 用户=%s 权限=%d",
+			ctx.Group.GroupID, ctx.Player.UserID, ctx.PrivilegeLevel)
 		ReplyToSender(ctx, msg, "解除群绑定需要管理权限（群主或管理员）。")
 		return solved
 	}
@@ -1455,22 +1514,39 @@ func identityBindRunUnbind(ctx *MsgContext, msg *Message, action identityBindAct
 	}
 	record, ok := identityBindStoreOf(d).find(d, lookupID)
 	if !ok || record.Action != action {
+		identityBindInfo(d, "解除身份绑定: 没有对应记录 类型=%s 标识=%s", action, lookupID)
 		ReplyToSender(ctx, msg, "没有找到属于你的绑定记录。")
 		return solved
 	}
 	deleted, err := identityBindStoreOf(d).delete(d, record)
 	if err != nil {
+		identityBindError(d, "解除身份绑定失败: 类型=%s 群=%s 用户=%s 旧侧=%s err=%v",
+			record.Action, ctx.Group.GroupID, ctx.Player.UserID, identityBindRecordOldID(record), err)
 		ReplyToSender(ctx, msg, fmt.Sprintf("解除绑定失败: %v", err))
 		return solved
 	}
 	if !deleted {
+		identityBindWarn(d, "解除身份绑定未命中记录: 类型=%s 群=%s 用户=%s",
+			record.Action, ctx.Group.GroupID, ctx.Player.UserID)
 		ReplyToSender(ctx, msg, "没有找到属于你的绑定记录。")
 		return solved
 	}
-	ReplyToSender(ctx, msg, "已解除绑定，之后将重新使用当前官方机器人身份的数据。")
+	if record.Action == identityBindActionGroup {
+		identityBindInfo(d, "身份绑定已解除[群]: 官方群=%s(%s) 旧群=%s 操作者=%s(%s)",
+			ctx.Group.GroupName, ctx.Group.GroupID, record.Old.GroupID, msg.Sender.Nickname, ctx.Player.UserID)
+		ReplyToSender(ctx, msg, fmt.Sprintf(
+			"已解除绑定，之后将重新使用当前官方机器人身份的数据。\n"+
+				"（原本与旧群 %s 共用的日志已恢复为各看各的；旧群那边的日志没有被修改。）",
+			record.Old.GroupID))
+	} else {
+		identityBindInfo(d, "身份绑定已解除[个人]: 官方身份=%s 旧QQ=%s 操作者=%s(%s)",
+			ctx.Player.UserID, record.Old.UserID, msg.Sender.Nickname, ctx.Player.UserID)
+		ReplyToSender(ctx, msg, "已解除绑定，之后将重新使用当前官方机器人身份的数据。")
+	}
 	ctx.Notice(fmt.Sprintf(
-		"身份绑定已解除: 群 <%s>(%s) 用户 <%s>(%s)",
+		"身份绑定已解除: 群 <%s>(%s) 用户 <%s>(%s) 类型=%s 旧侧=%s",
 		ctx.Group.GroupName, ctx.Group.GroupID, msg.Sender.Nickname, ctx.Player.UserID,
+		record.Action, identityBindRecordOldID(record),
 	), NoticeTypeGroup)
 	d.LastUpdatedTime = time.Now().Unix()
 	return solved
@@ -1509,6 +1585,14 @@ func identityBindLogHelp() string {
 申请会自动转人工并私聊通知骰主，骰主用 .group approve <旧群号> 确认
 ——**请先自行核实对方身份**。
 
+【回执会告诉你「接上了哪些日志」】
+* 发起时：会列出旧群名下现有的日志名（旧群一份日志都没有时会直接警告）；
+* 成功时：回执与骰主后台日志都会写出「旧群: N 份（日志名 条数）」
+  以及官方群原有日志（绑定期内隐藏，不删除，解绑后恢复）；
+* 旧群查不到日志时：会明确说明 .log list 仍为空，并提示核对旧群号，
+  必要时列出「号码相同、但群 ID 不同」的候选群，便于发现群号填错。
+* 读日志失败（数据库异常）会报错并通知骰主。
+
 说明：
 * 数据不做任何搬移，规范位置固定在旧群 / 旧号名下，.unbind 后立刻恢复原状。
 * 兼容写法：.log bind / .log unbind / .log bindstatus 与上面等价。`
@@ -1527,6 +1611,20 @@ func identityBindGroupStatus(d *Dice, ctx *MsgContext) string {
 			lines = append(lines, fmt.Sprintf("旧群名称: %s", record.Old.GroupName))
 		}
 		lines = append(lines, fmt.Sprintf("数据存放位置: %s（旧群名下，数据未做任何搬移）", record.Old.GroupID))
+		// 日志现状：用户最关心的就是「到底有哪些日志被接上了」。
+		// 旧群 0 份日志时 .log list 会显示暂无记录，这里必须把原因直接摆出来。
+		switch names, err := identityBindListGroupLogs(d, record.Old.GroupID); {
+		case err != nil:
+			lines = append(lines, fmt.Sprintf("旧群日志: 读取失败（%v）—— 请让骰主查看后台日志", err))
+		case len(names) == 0:
+			lines = append(lines,
+				"旧群日志: 0 份 —— .log list 会显示暂无记录",
+				fmt.Sprintf("  · 请确认旧群号是否填对（当前为 %s）；旧群没有日志时，绑定只对以后新写的日志生效。",
+					record.Old.GroupID))
+		default:
+			lines = append(lines, fmt.Sprintf("旧群日志: %s",
+				identityBindLogGroupNames(d, record.Old.GroupID, names)))
+		}
 		lines = append(lines, fmt.Sprintf("绑定时间: %s", time.Unix(record.Created, 0).Format("2006-01-02 15:04")))
 		lines = append(lines, "解除方式: .group unbind")
 	} else {
@@ -1686,14 +1784,20 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 	action := identityBindActionGroup
 
 	if !identityBindSupported(ctx.EndPoint) {
+		identityBindWarn(d, "群绑定被拒绝: 端点不支持 群=%s 端点=%s/%s",
+			ctx.Group.GroupID, ctx.EndPoint.Platform, ctx.EndPoint.ProtocolType)
 		ReplyToSender(ctx, msg, "群绑定仅用于 QQ 官方机器人，当前连接方式无需绑定。")
 		return solved
 	}
 	if !identityBindEnabled(d) {
+		identityBindWarn(d, "群绑定被拒绝: identityBindEnable 未开启 群=%s 用户=%s",
+			ctx.Group.GroupID, ctx.Player.UserID)
 		ReplyToSender(ctx, msg, "身份与日志绑定功能未开启，请让骰主在 serve.yaml 中把 identityBindEnable 设为 true。")
 		return solved
 	}
 	if ctx.PrivilegeLevel < 50 {
+		identityBindWarn(d, "群绑定被拒绝: 权限不足 群=%s 用户=%s 权限=%d",
+			ctx.Group.GroupID, ctx.Player.UserID, ctx.PrivilegeLevel)
 		ReplyToSender(ctx, msg, "群绑定需要管理权限（群主或管理员）。")
 		return solved
 	}
@@ -1715,28 +1819,37 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		rawGroup = sub
 	}
 	if rawGroup == "" {
+		identityBindInfo(d, "群绑定未填写旧群号: 群=%s 用户=%s", ctx.Group.GroupID, ctx.Player.UserID)
 		ReplyToSender(ctx, msg, "请使用 `.group bind <旧群号>` 的格式，例如 `.group bind 123456`。")
 		return solved
 	}
 	oldGroupID, err := normalizeIdentityBindGroup(rawGroup)
 	if err != nil {
+		identityBindWarn(d, "群绑定旧群号格式错误: 群=%s 用户=%s 输入=%q err=%v",
+			ctx.Group.GroupID, ctx.Player.UserID, rawGroup, err)
 		ReplyToSender(ctx, msg, err.Error())
 		return solved
 	}
 
 	if remaining := identityBindCooldownRemaining(d, ctx.EndPoint.ID, ctx.Player.UserID, action); remaining > 0 {
+		identityBindInfo(d, "群绑定被冷却拦截: 群=%s 用户=%s 旧群=%s 剩余=%s",
+			ctx.Group.GroupID, ctx.Player.UserID, oldGroupID, identityBindFormatDuration(remaining))
 		ReplyToSender(ctx, msg, fmt.Sprintf("操作过于频繁，请在 %d 秒后重试。", int(remaining.Seconds())+1))
 		return solved
 	}
 
 	// 双向索引之后，同一个旧群也只能绑定一次。
 	if existing, ok := identityBindStoreOf(d).find(d, oldGroupID); ok && existing.Action == identityBindActionGroup {
+		identityBindWarn(d, "群绑定被拒绝: 旧群=%s 已被官方群=%s 绑定",
+			oldGroupID, existing.New.GroupID)
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"旧群 %s 已经被绑定到另一个群了，无法重复绑定。", oldGroupID))
 		return solved
 	}
 
 	if existing, ok := identityBindStoreOf(d).find(d, ctx.Group.GroupID); ok {
+		identityBindWarn(d, "群绑定被拒绝: 官方群=%s 已绑定到旧群=%s",
+			ctx.Group.GroupID, existing.Old.GroupID)
 		ReplyToSender(ctx, msg, fmt.Sprintf("本群已经绑定到 %s 了，如需更换请先发送 `.group unbind`。", existing.Old.GroupID))
 		return solved
 	}
@@ -1766,6 +1879,8 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 	//   · 私聊 → 直接发给邀请人本人
 	//   · 邮箱 → 寄 邀请人QQ号@qq.com（连民间 bot 都不需要，适合纯官 bot 部署）
 	if !oldGroupInMemory || oldGroupObj == nil {
+		identityBindWarn(d, "群绑定被拒绝: 旧群不在内存 官方群=%s 旧群=%s 用户=%s",
+			ctx.Group.GroupID, oldGroupID, ctx.Player.UserID)
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"旧群 %s 目前不在骰子内存里，无法确定把验证码发给谁。\n"+
 				"请先让骰子在旧群收到一条消息，然后再试一次。", oldGroupID))
@@ -1775,6 +1890,8 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 	// （纯官 bot 部署、没有民间 bot 时，邮箱是唯一出路。）
 	confirmer := strings.TrimSpace(oldGroupObj.InviteUserID)
 	if confirmer == "" {
+		identityBindWarn(d, "群绑定被拒绝: 旧群没有邀请人信息 官方群=%s 旧群=%s",
+			ctx.Group.GroupID, oldGroupID)
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"拿不到旧群 %s 的邀请人信息，无法确定把验证码发给谁。\n"+
 				"可以：\n"+
@@ -1783,7 +1900,35 @@ func identityBindRunGroupBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 			oldGroupID, oldGroupID))
 		return solved
 	}
-	return identityBindStartCodeChallenge(ctx, msg, action, newEndpoint, oldEndpoint, confirmer)
+
+	// 发起阶段就先看一眼旧群有哪些日志。
+	//
+	// 这是「绑定成功了但 .log list 还是空的」最常见的成因，必须在**确认之前**提醒，
+	// 否则用户会以为卡在验证码/绑定没生效，白白折腾一轮。
+	// 只提示、不阻断：旧群也可能只是还没开过日志。
+	var logHints []string
+	names, listErr := identityBindListGroupLogs(d, oldGroupID)
+	switch {
+	case listErr != nil:
+		identityBindError(d, "群绑定发起时读取旧群日志失败: 官方群=%s 旧群=%s err=%v",
+			ctx.Group.GroupID, oldGroupID, listErr)
+		logHints = append(logHints,
+			"⚠️ 读取旧群日志失败: "+listErr.Error(),
+			"   绑定可以继续，但日志是否接上无法确认，请让骰主查看后台日志。")
+	case len(names) == 0:
+		identityBindWarn(d, "群绑定发起时旧群没有日志: 官方群=%s(%s) 旧群=%s —— 绑定后 .log list 仍会是空的",
+			ctx.Group.GroupName, ctx.Group.GroupID, oldGroupID)
+		logHints = append(logHints,
+			fmt.Sprintf("⚠️ 注意：旧群 %s 名下没有任何日志，绑定成立后 .log list 依然会是空的。", oldGroupID),
+			"   请确认旧群号填对了；旧群没有日志时，本次绑定只对以后新写的日志生效。")
+	default:
+		identityBindInfo(d, "群绑定发起: 官方群=%s(%s) 旧群=%s 用户=%s 旧群日志=%s",
+			ctx.Group.GroupName, ctx.Group.GroupID, oldGroupID, ctx.Player.UserID,
+			identityBindLogGroupNames(d, oldGroupID, names))
+		logHints = append(logHints, fmt.Sprintf("旧群现有日志：%s",
+			identityBindLogGroupNames(d, oldGroupID, names)))
+	}
+	return identityBindStartCodeChallenge(ctx, msg, action, newEndpoint, oldEndpoint, confirmer, logHints...)
 }
 
 // identityBindFormatPendingList 列出待处理的绑定申请（骰主排查用）。
@@ -1896,6 +2041,12 @@ func identityBindRunApprove(ctx *MsgContext, msg *Message, rawTarget string) Cmd
 	}
 
 	if err := identityBindCommitChallenge(d, challenge); err != nil {
+		oldID := challenge.Old.UserID
+		if challenge.Action == identityBindActionGroup {
+			oldID = challenge.Old.GroupID
+		}
+		identityBindError(d, "身份绑定手动确认失败: 类型=%s 申请人=%s 旧侧=%s err=%v",
+			challenge.Action, challenge.New.UserID, oldID, err)
 		ReplyToSender(ctx, msg, fmt.Sprintf("手动确认失败: %v", err))
 		return solved
 	}
@@ -1911,15 +2062,28 @@ func identityBindRunApprove(ctx *MsgContext, msg *Message, rawTarget string) Cmd
 	identityBindNotifyNewSide(d, challenge)
 
 	if challenge.Action == identityBindActionGroup {
-		ReplyToSender(ctx, msg, fmt.Sprintf(
+		// 日志接续体检：把「这次绑定接上了哪些日志」写进回执与后台日志。
+		summary := identityBindInspectLogShare(d, challenge.New.GroupID, challenge.Old.GroupID)
+		identityBindReportLogShare(d, "身份绑定[群·approve]", summary)
+		reply := fmt.Sprintf(
 			"已手动确认：官方群 %s 与旧群 %s 绑定成功，双方共用同一份日志。\n"+
 				"（本次跳过了验证码——请确认你确实核实过对方身份。）\n"+
 				"如需解除请让对方在群里发送 `.group unbind`。",
-			challenge.New.GroupID, challenge.Old.GroupID))
+			challenge.New.GroupID, challenge.Old.GroupID)
+		if report := summary.ReportText(d); report != "" {
+			reply += "\n\n" + report
+		}
+		ReplyToSender(ctx, msg, reply)
 		ctx.Notice(fmt.Sprintf(
-			"群绑定（骰主手动确认）: 群 %s 已绑定到旧群 %s，申请人 %s",
+			"群绑定（骰主手动确认）: 群 %s 已绑定到旧群 %s，申请人 %s\n%s",
 			challenge.New.GroupID, challenge.Old.GroupID, challenge.New.UserID,
+			summary.LogText(d),
 		), NoticeTypeGroup)
+		if summary.HasError() {
+			ctx.Notice(fmt.Sprintf(
+				"⚠️ 群绑定已完成，但日志接续检查失败：官方群 %s → 旧群 %s 的日志清单读不出来，请检查日志数据库。",
+				challenge.New.GroupID, challenge.Old.GroupID), NoticeTypeGroup)
+		}
 	} else {
 		ReplyToSender(ctx, msg, fmt.Sprintf(
 			"已手动确认：%s 与旧 QQ 号 %s 绑定成功，双方共用同一份数据。\n"+
@@ -1951,14 +2115,19 @@ func identityBindRunForceBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 	d := ctx.Dice
 
 	if !identityBindSupported(ctx.EndPoint) {
+		identityBindWarn(d, "骰主手动群绑定被拒绝: 端点不支持 群=%s 端点=%s/%s",
+			ctx.Group.GroupID, ctx.EndPoint.Platform, ctx.EndPoint.ProtocolType)
 		ReplyToSender(ctx, msg, "该指令仅用于 QQ 官方机器人。")
 		return solved
 	}
 	if !identityBindEnabled(d) {
+		identityBindWarn(d, "骰主手动群绑定被拒绝: identityBindEnable 未开启 群=%s", ctx.Group.GroupID)
 		ReplyToSender(ctx, msg, "身份与日志绑定功能未开启，请让骰主在 serve.yaml 中把 identityBindEnable 设为 true。")
 		return solved
 	}
 	if ctx.PrivilegeLevel < 100 {
+		identityBindWarn(d, "骰主手动群绑定被拒绝: 权限不足 群=%s 用户=%s 权限=%d",
+			ctx.Group.GroupID, ctx.Player.UserID, ctx.PrivilegeLevel)
 		ReplyToSender(ctx, msg, "手动确认需要 master 权限（该操作会跳过验证码，等同骰主替对方作证）。")
 		return solved
 	}
@@ -1990,6 +2159,8 @@ func identityBindRunForceBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		issues = append(issues, fmt.Sprintf("本群已经绑定到 %s 了，请先 .group unbind", existing.Old.GroupID))
 	}
 	if len(issues) > 0 {
+		identityBindWarn(d, "骰主手动群绑定被拒绝: 官方群=%s 旧群=%s 原因=%s",
+			ctx.Group.GroupID, oldGroupID, strings.Join(issues, "；"))
 		ReplyToSender(ctx, msg, "无法手动确认：\n  · "+strings.Join(issues, "\n  · "))
 		return solved
 	}
@@ -2017,6 +2188,8 @@ func identityBindRunForceBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 		Creator: ctx.Player.UserID,
 	}
 	if err := identityBindStoreOf(d).put(d, record); err != nil {
+		identityBindError(d, "群绑定保存失败: 官方群=%s 旧群=%s 操作者=%s err=%v",
+			ctx.Group.GroupID, oldGroupID, ctx.Player.UserID, err)
 		ReplyToSender(ctx, msg, fmt.Sprintf("保存绑定失败: %v", err))
 		return solved
 	}
@@ -2027,14 +2200,28 @@ func identityBindRunForceBind(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) C
 	// 顺手清掉这个群里可能挂着的、还没被确认的挑战
 	identityBindCancelCode(identityBindActionGroup, ctx.Group.GroupID)
 
-	ReplyToSender(ctx, msg, fmt.Sprintf(
+	// 日志接续体检：回执里明确列出「这次绑定接上了哪些日志」，后台日志留完整摘要。
+	summary := identityBindInspectLogShare(d, ctx.Group.GroupID, oldGroupID)
+	identityBindReportLogShare(d, "身份绑定[群·骰主手动确认]", summary)
+
+	reply := fmt.Sprintf(
 		"已由骰主手动确认：本群与旧群 %s 绑定成功，双方共用同一份日志。\n"+
 			"（本次跳过了验证码——请确认你确实核实过对方身份。）\n"+
-			"如需解除请发送 `.group unbind`。", oldGroupID))
+			"如需解除请发送 `.group unbind`。", oldGroupID)
+	if report := summary.ReportText(d); report != "" {
+		reply += "\n\n" + report
+	}
+	ReplyToSender(ctx, msg, reply)
 	ctx.Notice(fmt.Sprintf(
-		"群绑定（骰主手动确认）: 群 <%s>(%s) 已绑定到旧群 %s，操作者 <%s>(%s)",
+		"群绑定（骰主手动确认）: 群 <%s>(%s) 已绑定到旧群 %s，操作者 <%s>(%s)\n%s",
 		ctx.Group.GroupName, ctx.Group.GroupID, oldGroupID, msg.Sender.Nickname, ctx.Player.UserID,
+		summary.LogText(d),
 	), NoticeTypeGroup)
+	if summary.HasError() {
+		ctx.Notice(fmt.Sprintf(
+			"⚠️ 群绑定已完成，但日志接续检查失败：群 %s → 旧群 %s 的日志清单读不出来，请检查日志数据库。",
+			ctx.Group.GroupID, oldGroupID), NoticeTypeGroup)
+	}
 	d.LastUpdatedTime = time.Now().Unix()
 	return solved
 }
@@ -2089,6 +2276,12 @@ func identityBindResetRealGroupLogState(ctx *MsgContext, realGroup *GroupInfo) {
 	realGroup.ClearLogState()
 	if ctx != nil && ctx.Dice != nil {
 		realGroup.MarkDirty(ctx.Dice)
+		// 这是「绑定后被隐藏的那份日志」的唯一线索：
+		// 这里只清运行时状态、不动数据，日志行仍然留在库里（解绑后恢复可见）。
+		identityBindInfo(ctx.Dice,
+			"群绑定清理真实群日志状态: 群=%s(%s) 原记录=%q logID=%d 原状态=%s —— 数据未删除，解绑后恢复",
+			realGroup.GroupName, realGroup.GroupID, state.Name, state.ID,
+			identityBindBoolText(state.On))
 	}
 }
 

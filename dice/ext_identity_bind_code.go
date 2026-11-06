@@ -1321,6 +1321,8 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	}
 	if existing, ok := identityBindStoreOf(d).find(d, oldID); ok {
 		identityBindFinishChallenge(matchedKey, "确认时该旧身份已被绑定")
+		identityBindWarn(d, "身份绑定确认失败: %s 已被绑定到 %s 认证人=%s",
+			oldID, identityBindRecordEndpointID(existing), msg.Sender.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"绑定失败：%s 已经被绑定到 %s 了，请先解除那边的绑定。",
 			oldID, identityBindRecordEndpointID(existing)))
@@ -1328,6 +1330,8 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	}
 	if existing, ok := identityBindStoreOf(d).find(d, newID); ok {
 		identityBindFinishChallenge(matchedKey, "确认时发起者已有绑定")
+		identityBindWarn(d, "身份绑定确认失败: %s 已绑定 %s 认证人=%s",
+			newID, identityBindRecordOldID(existing), msg.Sender.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"绑定失败：当前身份已经绑定了 %s，请先发送 `.unbind`。",
 			identityBindRecordOldID(existing)))
@@ -1335,6 +1339,8 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	}
 	if err := identityBindStoreOf(d).put(d, record); err != nil {
 		identityBindCodeUpdate(matchedKey, func(c *identityBindCodeChallenge) { c.Attempts++ })
+		identityBindError(d, "身份绑定保存失败: 类型=%s 发起者=%s 旧侧=%s err=%v",
+			matched.Action, matched.New.UserID, oldID, err)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf("绑定保存失败: %v", err))
 		return true
 	}
@@ -1362,6 +1368,14 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	// 清理可能存在的同目标旧挑战与答题会话
 	identityBindClearSession(identityBindSessionKey(ctx.EndPoint.ID, matched.New.UserID, matched.Action))
 
+	// 日志接续体检 + 后台日志。
+	// 个人绑定不涉及日志，只有群绑定需要这一步。
+	var summary *identityBindLogShareSummary
+	if matched.Action == identityBindActionGroup {
+		summary = identityBindInspectLogShare(d, matched.New.GroupID, matched.Old.GroupID)
+		identityBindReportLogShare(d, "身份绑定[群·验证码确认]", summary)
+	}
+
 	// 回执给确认人。
 	//
 	// 两种通道都回：这是**被动回复**（引用对方刚发的那条消息），一定能发出去，
@@ -1369,9 +1383,20 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	// 而邮箱通道靠官方群里的主动通知——那条通知受"群内主动发言"权限/额度限制，
 	// 发不出去时用户就完全收不到任何反馈（用户实测正是这个症状）。
 	if matched.Action == identityBindActionGroup {
-		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
-			"验证通过！官方群已经和旧群 %s 绑定，双方现在共用同一份日志。", matched.Old.GroupID))
+		reply := fmt.Sprintf(
+			"验证通过！官方群已经和旧群 %s 绑定，双方现在共用同一份日志。", matched.Old.GroupID)
+		if report := summary.ReportText(d); report != "" {
+			reply += "\n\n" + report
+		}
+		identityBindReplyPerson(ctx, msg.Sender.UserID, reply)
+		if summary.HasError() {
+			ctx.Notice(fmt.Sprintf(
+				"⚠️ 群绑定已完成，但日志接续检查失败：官方群 %s → 旧群 %s 的日志清单读不出来，请检查日志数据库。",
+				matched.New.GroupID, matched.Old.GroupID), NoticeTypeGroup)
+		}
 	} else {
+		identityBindInfo(d, "身份绑定成功[个人]: 官方身份=%s 旧QQ=%s 确认人=%s",
+			matched.New.UserID, matched.Old.UserID, msg.Sender.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"验证通过！你的官方身份 %s 现在与旧 QQ 号 %s 共用同一份数据。",
 			matched.New.UserID, matched.Old.UserID))
@@ -1427,6 +1452,11 @@ func identityBindNotifyNewSide(d *Dice, c *identityBindCodeChallenge) {
 	if c.Action == identityBindActionGroup {
 		text = fmt.Sprintf("【绑定成功】验证码已确认，官方群已与旧群 %s 绑定。\n"+
 			"双方现在共用同一份日志：`.log list` 即可看到。", c.Old.GroupID)
+		// 发起绑定的人最想知道「到底接上了哪些日志」，而这条通知往往是他唯一能看到的结果。
+		// 旧群 0 份日志时也要明确提示，否则他只会以为 .log list 坏了。
+		if report := identityBindInspectLogShare(d, c.New.GroupID, c.Old.GroupID).ReportText(d); report != "" {
+			text += "\n\n" + report
+		}
 	} else {
 		text = fmt.Sprintf("【绑定成功】验证码已确认，%s 现在与旧 QQ 号 %s 共用同一份数据。\n"+
 			"发送 `.pc list` / `.st show` 即可看到旧角色卡。", c.New.UserID, c.Old.UserID)

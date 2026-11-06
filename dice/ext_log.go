@@ -593,6 +593,7 @@ func RegisterBuiltinExtLog(self *Dice) {
 					groupID = ctx.Group.GroupID
 				}
 				// QQ 官方机器人做过日志绑定时，列出的是旧群的日志
+				requestedGroupID := groupID
 				groupID = identityBindLogReadGroupID(ctx, groupID)
 
 				var text strings.Builder
@@ -606,8 +607,22 @@ func RegisterBuiltinExtLog(self *Dice) {
 					}
 					if len(index.entries) == 0 {
 						text.WriteString("暂无记录")
+						// 绑群之后列表改读旧群；旧群没日志时会静默回退到本群。
+						// 只回一句「暂无记录」用户根本判断不出是哪种情况，这里补一句指向。
+						if hint := identityBindLogListBindingHint(ctx.Dice, groupID); hint != "" {
+							text.WriteString("\n")
+							text.WriteString(hint)
+						}
+					}
+					if groupID != requestedGroupID {
+						// 这条只在「确实读了绑定旧群」时打，避免普通 .log list 刷日志。
+						identityBindInfo(ctx.Dice, "日志列表: 请求群=%s 已改读绑定旧群=%s 条数=%d",
+							requestedGroupID, groupID, len(index.entries))
 					}
 				} else {
+					// 以前这里只回给用户，后台一点痕迹都没有，"loglist 显示无"根本无从排查。
+					identityBindError(ctx.Dice, "日志列表读取失败: 请求群=%s 实际读取群=%s err=%v",
+						requestedGroupID, groupID, err)
 					text.WriteString("获取记录出错: ")
 					text.WriteString(err.Error())
 				}
