@@ -44,17 +44,29 @@ if (-not $UiDist) {
         $UiDist = Join-Path $env:TEMP "sealdice-ui-fork\dist"
     }
 }
+# 没有外部构建产物时，只要仓库自带的 static/frontend 已经是真 UI 就沿用它。
+# 这样日常「重新编译一个 Windows 版」不必先折腾 sealdice-ui；
+# 也避免有人图省事直接 go build —— 那样会漏掉下面的版本元数据注入。
+$skipUiInstall = $false
 if (-not $UiDist -or -not (Test-Path $UiDist)) {
-    $hint = "找不到前端构建产物。请先准备（sealdice-ui 的 fork）：`n" +
-            "    git clone https://github.com/chaye2333/sealdice-ui.git `$env:TEMP\sealdice-ui-fork`n" +
-            "    cd `$env:TEMP\sealdice-ui-fork; pnpm install; pnpm run build-only`n" +
-            "然后用 -UiDist 指定它的 dist 目录，或设 `$env:SEALDICE_UI_DIST。"
-    throw $hint
+    $currentIndex = Join-Path $repo "static\frontend\index.html"
+    if ((Test-Path $currentIndex) -and ((Get-Content $currentIndex -Raw) -match "assets/index-")) {
+        Write-Host ">> 未指定 -UiDist，沿用仓库自带的 static/frontend（已包含构建产物）"
+        $skipUiInstall = $true
+    } else {
+        $hint = "找不到前端构建产物。请先准备（sealdice-ui 的 fork）：`n" +
+                "    git clone https://github.com/chaye2333/sealdice-ui.git `$env:TEMP\sealdice-ui-fork`n" +
+                "    cd `$env:TEMP\sealdice-ui-fork; pnpm install; pnpm run build-only`n" +
+                "然后用 -UiDist 指定它的 dist 目录，或设 `$env:SEALDICE_UI_DIST。"
+        throw $hint
+    }
 }
-if (-not (Test-Path (Join-Path $UiDist "index.html"))) { throw "$UiDist 里没有 index.html，不像是构建产物" }
+if (-not $skipUiInstall) {
+    if (-not (Test-Path (Join-Path $UiDist "index.html"))) { throw "$UiDist 里没有 index.html，不像是构建产物" }
 
-Write-Host ">> 安装管理界面: $UiDist"
-Copy-Item (Join-Path $UiDist "*") -Destination (Join-Path $repo "static\frontend") -Recurse -Force
+    Write-Host ">> 安装管理界面: $UiDist"
+    Copy-Item (Join-Path $UiDist "*") -Destination (Join-Path $repo "static\frontend") -Recurse -Force
+}
 
 $uiIndex = Get-Content (Join-Path $repo "static\frontend\index.html") -Raw
 if ($uiIndex -match "not bundled in this checkout") {
@@ -73,10 +85,15 @@ $outDir = Join-Path $repo "dist-build"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "sealdice-core.exe"
 
-Write-Host ">> 编译: 版本元数据 $meta"
+Write-Host ">> 编译: 版本 1.6.2-dev$meta"
 $env:GOOS = "windows"; $env:GOARCH = "amd64"
 & go build -trimpath -ldflags "-s -w -X 'sealdice-core/dice.VERSION_BUILD_METADATA=$meta'" -o $exe .
 if ($LASTEXITCODE -ne 0) { throw "go build 失败" }
+
+# 自检：把注入后的版本号打出来，免得又编出一个只有 1.6.2-dev 的无版本产物。
+$builtVersion = (& $exe --version | Select-Object -First 1)
+if (-not $builtVersion) { throw "无法读取产物版本号" }
+Write-Host ">> 自检版本: $builtVersion"
 Write-Host ">> 产物: $exe ($([math]::Round((Get-Item $exe).Length / 1MB, 1)) MB)"
 
 # ---------- 打包 ----------
