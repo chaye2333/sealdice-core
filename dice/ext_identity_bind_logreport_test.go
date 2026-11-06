@@ -13,11 +13,10 @@ import (
 	"sealdice-core/utils/constant"
 )
 
-// 本文件锁定「群绑定到底接上了哪些日志」这件事必须被输出。
-//
-// 以前的问题：绑定成功只回一句「双方共用同一份日志」，后台日志里什么都没有。
-// 旧群没有日志时用户看到的只是一句「暂无记录」，既不知道是旧群号填错了，
-// 也不知道该去哪里看原因 —— 本文件的用例就是防止这种静默回归。
+// 本文件锁定群绑定日志清单的展示边界：
+//  1. **发起/验证阶段**（绑定还没成立）绝不能把旧群日志名/条数发到 QQ；
+//  2. **绑定成立之后**的回执/通知可以列出「迁移了哪些日志」，方便用户确认；
+//  3. 完整清单无论如何都要写进骰主后台日志，否则 .log list 为空时无从排查。
 
 // captureLogWriter 收集 zap 输出的原始 JSON，供断言后台日志内容（并发安全）。
 type captureLogWriter struct {
@@ -84,8 +83,8 @@ func confirmGroupBindWithCode(t *testing.T, env *bindTestEnv, code string) strin
 	return oldRecorder.waitNextReply(t, before)
 }
 
-// TestGroupBindReportsMigratedLogs 群绑定成功时必须列出「接上了哪些日志」。
-func TestGroupBindReportsMigratedLogs(t *testing.T) {
+// TestGroupBindStartHidesInventoryButSuccessShowsIt 发起阶段不泄露，成功后回执可以显示。
+func TestGroupBindStartHidesInventoryButSuccessShowsIt(t *testing.T) {
 	env := newCodeTestEnv(t)
 	defer env.cleanup()
 
@@ -98,30 +97,32 @@ func TestGroupBindReportsMigratedLogs(t *testing.T) {
 	env.ctx.PrivilegeLevel = 100
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
 	prompt := waitGroupMessage(t, env)
-	// 发起阶段就要把旧群现有的日志摆出来
-	if !strings.Contains(prompt, "旧群现有日志") || !strings.Contains(prompt, "追书人") {
-		t.Fatalf("the start prompt should list the old group logs, got: %s", prompt)
+	// 还没验证，绝不能出现旧群日志清单
+	if strings.Contains(prompt, "追书人") || strings.Contains(prompt, "第一话") ||
+		strings.Contains(prompt, "旧群现有日志") || strings.Contains(prompt, "日志迁移结果") {
+		t.Fatalf("the start prompt must not leak the old group log inventory, got: %s", prompt)
 	}
 
 	challenge := groupBindChallengeForTest(t, env)
 	reply := confirmGroupBindWithCode(t, env, challenge.Code)
-	if !strings.Contains(reply, "日志迁移结果") {
-		t.Fatalf("the success reply should contain the log migration report, got: %s", reply)
-	}
-	if !strings.Contains(reply, "追书人") || !strings.Contains(reply, "第一话") {
-		t.Fatalf("the success reply should list every shared log name, got: %s", reply)
+	// 绑定已经成立，回执里应该告诉用户迁移了哪些日志
+	for _, want := range []string{"日志迁移结果", "追书人", "第一话"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("the success reply should contain %q, got: %s", want, reply)
+		}
 	}
 
-	// 后台日志必须有同样一份记录，方便骰主事后排查
+	// 后台日志始终要有完整清单，骰主才能排查
 	logged := readLogs()
-	if !strings.Contains(logged, "日志接续") || !strings.Contains(logged, "追书人") {
-		t.Fatalf("the dice log should record which logs were shared, got: %s", logged)
+	for _, want := range []string{"日志接续", "追书人", "第一话"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("the dice log should contain %q, got: %s", want, logged)
+		}
 	}
 }
 
-// TestGroupBindWarnsWhenOldGroupHasNoLogs 旧群没有日志时，
-// 发起阶段与成功回执都必须明说「.log list 会是空的」。
-func TestGroupBindWarnsWhenOldGroupHasNoLogs(t *testing.T) {
+// TestGroupBindEmptyOldGroupStartSilentSuccessWarns 旧群没有日志：发起时不提示，成功后回执警告。
+func TestGroupBindEmptyOldGroupStartSilentSuccessWarns(t *testing.T) {
 	env := newCodeTestEnv(t)
 	defer env.cleanup()
 
@@ -132,17 +133,14 @@ func TestGroupBindWarnsWhenOldGroupHasNoLogs(t *testing.T) {
 	env.ctx.PrivilegeLevel = 100
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
 	prompt := waitGroupMessage(t, env)
-	if !strings.Contains(prompt, "名下没有任何日志") {
-		t.Fatalf("the start prompt should warn about an empty old group, got: %s", prompt)
+	if strings.Contains(prompt, "名下没有任何日志") || strings.Contains(prompt, "没有查到任何日志") {
+		t.Fatalf("the start prompt must not mention the old group's logs, got: %s", prompt)
 	}
 
 	challenge := groupBindChallengeForTest(t, env)
 	reply := confirmGroupBindWithCode(t, env, challenge.Code)
 	if !strings.Contains(reply, "没有查到任何日志") {
 		t.Fatalf("the success reply should warn that the list stays empty, got: %s", reply)
-	}
-	if !strings.Contains(reply, ".log list") {
-		t.Fatalf("the warning should point at .log list, got: %s", reply)
 	}
 
 	logged := readLogs()
@@ -151,9 +149,8 @@ func TestGroupBindWarnsWhenOldGroupHasNoLogs(t *testing.T) {
 	}
 }
 
-// TestGroupBindSuggestsCandidateGroups 旧群查不到日志时，
-// 要把「号码相同但群 ID 不同」的群列出来，让用户能立刻发现旧群号其实填错了。
-func TestGroupBindSuggestsCandidateGroups(t *testing.T) {
+// TestGroupBindCandidateGroupsShownAfterSuccess 候选群提示只在成功后显示，同时进后台日志。
+func TestGroupBindCandidateGroupsShownAfterSuccess(t *testing.T) {
 	env := newCodeTestEnv(t)
 	defer env.cleanup()
 
@@ -164,21 +161,28 @@ func TestGroupBindSuggestsCandidateGroups(t *testing.T) {
 		t.Fatalf("seed candidate log: %v", err)
 	}
 
+	readLogs := captureBindLogs(env)
+
 	env.ctx.PrivilegeLevel = 100
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"bind", "1001"}})
-	waitGroupMessage(t, env)
+	prompt := waitGroupMessage(t, env)
+	if strings.Contains(prompt, "旧团记录") || strings.Contains(prompt, "可能与旧群号对不上") {
+		t.Fatalf("the start prompt must not leak candidate groups, got: %s", prompt)
+	}
 
 	challenge := groupBindChallengeForTest(t, env)
 	reply := confirmGroupBindWithCode(t, env, challenge.Code)
-	if !strings.Contains(reply, "可能与旧群号对不上") {
-		t.Fatalf("the report should suggest candidate group ids, got: %s", reply)
+	if !strings.Contains(reply, "可能与旧群号对不上") || !strings.Contains(reply, "旧团记录") {
+		t.Fatalf("the success reply should suggest candidate groups, got: %s", reply)
 	}
-	if !strings.Contains(reply, "旧团记录") {
-		t.Fatalf("the candidate line should list the logs on that group, got: %s", reply)
+
+	logged := readLogs()
+	if !strings.Contains(logged, "候选群") || !strings.Contains(logged, "旧团记录") {
+		t.Fatalf("the dice log should record the candidate groups, got: %s", logged)
 	}
 }
 
-// TestLogListExplainsEmptyBinding 列表为空时必须说清楚「读的是哪个群」。
+// TestLogListExplainsEmptyBinding 列表为空时必须说清楚「读的是哪个群」（不含日志清单）。
 func TestLogListExplainsEmptyBinding(t *testing.T) {
 	env, _, _ := logShareEnv(t)
 	defer env.cleanup()
@@ -195,8 +199,8 @@ func TestLogListExplainsEmptyBinding(t *testing.T) {
 	}
 }
 
-// TestGroupStatusShowsLogInventory .group status 必须显示旧群日志现状。
-func TestGroupStatusShowsLogInventory(t *testing.T) {
+// TestGroupStatusDoesNotLeakLogInventory .group status 任何人都能看，不能列出旧群日志。
+func TestGroupStatusDoesNotLeakLogInventory(t *testing.T) {
 	env := newCodeTestEnv(t)
 	defer env.cleanup()
 
@@ -205,8 +209,36 @@ func TestGroupStatusShowsLogInventory(t *testing.T) {
 
 	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"status"}})
 	reply := waitGroupMessage(t, env)
-	if !strings.Contains(reply, "旧群日志") || !strings.Contains(reply, "追书人") {
-		t.Fatalf("group status should show the old group log inventory, got: %s", reply)
+	if strings.Contains(reply, "追书人") || strings.Contains(reply, "旧群日志") {
+		t.Fatalf("group status must not leak the old group log inventory, got: %s", reply)
+	}
+	if !strings.Contains(reply, "已绑定旧群") {
+		t.Fatalf("group status should still show the binding, got: %s", reply)
+	}
+}
+
+// TestGroupDoctorLogInventoryGoesOnlyToBackend 自检回执发在群里，同样不能带日志清单。
+func TestGroupDoctorLogInventoryGoesOnlyToBackend(t *testing.T) {
+	env := newCodeTestEnv(t)
+	defer env.cleanup()
+
+	env.addOldLog(t, "追书人")
+	bindGroupForTest(t, env)
+
+	readLogs := captureBindLogs(env)
+	env.ctx.PrivilegeLevel = 100
+	runIdentityBindGroupCommand(env.ctx, env.msg, &CmdArgs{Args: []string{"doctor"}})
+	reply := waitGroupMessage(t, env)
+	if strings.Contains(reply, "追书人") || strings.Contains(reply, "旧群日志") {
+		t.Fatalf("group doctor must not leak the old group log inventory, got: %s", reply)
+	}
+	if !strings.Contains(reply, "[正常]") {
+		t.Fatalf("group doctor should still report a healthy binding, got: %s", reply)
+	}
+
+	logged := readLogs()
+	if !strings.Contains(logged, "绑定自检: 旧群=") || !strings.Contains(logged, "追书人") {
+		t.Fatalf("group doctor should write the log inventory to the dice log, got: %s", logged)
 	}
 }
 

@@ -19,7 +19,12 @@ import (
 //
 // 这两种情况以前都是**静默**的：绑定回执只说「双方共用同一份日志」，
 // 后台日志里也一个字都没有，用户和骰主都无从判断问题出在哪。
-// 这里把「绑定涉及哪些日志」显式输出：一份给人看（回执），一份进骰主后台日志。
+// 这里把「绑定涉及哪些日志」写进骰主后台日志。
+//
+// 展示边界（重要）：
+//   - 发起 / 验证阶段**绝不能**把旧群日志名/条数发到 QQ——那时还没证明群归属；
+//   - 绑定成功之后可以在回执/通知里列出「迁移了哪些日志」，方便用户确认；
+//   - 完整清单无论如何都要写进骰主后台日志。
 
 const (
 	// identityBindLogPreviewLimit 回执 / 日志里最多列几个日志名，避免刷屏。
@@ -176,15 +181,20 @@ func (s *identityBindLogShareSummary) LogText(d *Dice) string {
 		fmt.Fprintf(&b, " 官方群原有日志=%s(绑定期内隐藏，未删除)",
 			identityBindLogGroupNames(d, s.NewGroupID, s.NewNames))
 	}
+	// 旧群没有日志时，把「号码相同、群 ID 不同」的候选群也写进后台日志。
+	// 这类信息只在后台出现：发到 QQ 群里等于把别群的日志名/条数泄露给群成员。
+	if s.OldErr == nil && len(s.OldNames) == 0 {
+		if candidates := identityBindLogCandidates(d, s.OldGroupID); len(candidates) > 0 {
+			fmt.Fprintf(&b, " 候选群={%s}", strings.Join(candidates, "；"))
+		}
+	}
 	return b.String()
 }
 
-// ReportText 给用户看的「日志迁移结果」。
+// ReportText 生成「成功绑定后」给用户看的日志迁移结果。
 //
-// 这是用户唯一能看到「到底哪些日志被接上了」的地方，所以：
-//   - 旧群有日志：把日志名和条数列出来；
-//   - 旧群没日志：明确说「.log list 会是空的」，并解释原因（而不是让用户自己猜）；
-//   - 查询失败：直接报错，并让他找骰主看后台日志。
+// 只有**绑定已经成立之后**才允许调用：这时官方群与旧群已经共用同一份日志，
+// 列出日志名/条数不会造成额外泄露。发起/验证阶段绝不能调用（那时还没证明群归属）。
 func (s *identityBindLogShareSummary) ReportText(d *Dice) string {
 	if s == nil {
 		return ""
@@ -223,11 +233,22 @@ func (s *identityBindLogShareSummary) ReportText(d *Dice) string {
 	return strings.Join(lines, "\n")
 }
 
+// identityBindLogShareReportForSuccess 生成「成功绑定之后」回执里的日志清单。
+//
+// 只允许在绑定已经成立之后调用；发起/验证阶段调用等于提前泄露旧群信息。
+func identityBindLogShareReportForSuccess(d *Dice, c *identityBindCodeChallenge) string {
+	if c == nil || c.Action != identityBindActionGroup {
+		return ""
+	}
+	return identityBindInspectLogShare(d, c.New.GroupID, c.Old.GroupID).ReportText(d)
+}
+
 // identityBindReportLogShare 把体检结果写进骰主后台日志。
 //
 // 有查询故障用 Error（需要骰主介入），只是"接不上日志"用 Warn，
-// 一切正常用 Info。回执里的展示由调用方决定，这里只负责日志，
-// 免得「验证码确认 / 骰主手动确认 / approve」三条路径各写一遍、还写得不一样。
+// 一切正常用 Info。调用方**不要**把这份内容回显到 QQ：
+// 日志名与条数是旧群的敏感信息，群消息/私聊都不该带。
+// 集中在这里写日志，免得「验证码确认 / 骰主手动确认 / approve」三条路径各写一遍。
 func identityBindReportLogShare(d *Dice, prefix string, summary *identityBindLogShareSummary) {
 	switch {
 	case summary.HasError():

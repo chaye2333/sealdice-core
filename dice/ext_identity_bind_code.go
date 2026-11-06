@@ -1383,6 +1383,7 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	// 而邮箱通道靠官方群里的主动通知——那条通知受"群内主动发言"权限/额度限制，
 	// 发不出去时用户就完全收不到任何反馈（用户实测正是这个症状）。
 	if matched.Action == identityBindActionGroup {
+		// 绑定已经成立，回执里可以列出「迁移了哪些日志」。
 		reply := fmt.Sprintf(
 			"验证通过！官方群已经和旧群 %s 绑定，双方现在共用同一份日志。", matched.Old.GroupID)
 		if report := summary.ReportText(d); report != "" {
@@ -1452,9 +1453,8 @@ func identityBindNotifyNewSide(d *Dice, c *identityBindCodeChallenge) {
 	if c.Action == identityBindActionGroup {
 		text = fmt.Sprintf("【绑定成功】验证码已确认，官方群已与旧群 %s 绑定。\n"+
 			"双方现在共用同一份日志：`.log list` 即可看到。", c.Old.GroupID)
-		// 发起绑定的人最想知道「到底接上了哪些日志」，而这条通知往往是他唯一能看到的结果。
-		// 旧群 0 份日志时也要明确提示，否则他只会以为 .log list 坏了。
-		if report := identityBindInspectLogShare(d, c.New.GroupID, c.Old.GroupID).ReportText(d); report != "" {
+		// 绑定已经成立，成功通知里可以带上「迁移了哪些日志」。
+		if report := identityBindLogShareReportForSuccess(d, c); report != "" {
 			text += "\n\n" + report
 		}
 	} else {
