@@ -52,3 +52,27 @@ sealdice-lock.lock
 upgrade_metadata.json
 
 /signature/**/*
+
+# ---- 以下为构造产物 / 本地文件，绝不入库 ----
+
+# 前端构建产物：仓库里只保留占位页 static/frontend/index.html
+# （真正的 UI 由 scripts/build-windows.ps1 或 Dockerfile 的 UI 阶段生成）
+/static/frontend/*
+!/static/frontend/index.html
+
+# helpdoc-render 是独立的 Go module，便携二进制请自行构建，不要提交
+helpdoc-render/helpdoc-render-*
+
+# 本地草稿文档（作者标注"未提交、未推送"）
+/docs/official-qq-improvements.md
+
+# 本地环境变量；模板见仓库里的 .env.example
+/.env
+
+# 本地调试脚本
+/toolbox*
+
+# 压缩包一律视为构建/分发产物
+*.zip
+*.7z
+*.tar.gz

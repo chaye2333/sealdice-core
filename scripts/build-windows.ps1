@@ -1,4 +1,4 @@
-﻿# 本地构建 Windows 版（含管理界面）的脚本
+# 本地构建 Windows 版（含管理界面）的脚本
 #
 # 为什么需要它：`static/frontend/index.html` 是**被 git 跟踪的占位页**。
 # 一旦做过 git checkout / stash / rebase / pull，它就会被恢复成占位页，
@@ -44,17 +44,18 @@ if (-not $UiDist) {
         $UiDist = Join-Path $env:TEMP "sealdice-ui-fork\dist"
     }
 }
-# 没有外部构建产物时，只要仓库自带的 static/frontend 已经是真 UI 就沿用它。
-# 这样日常「重新编译一个 Windows 版」不必先折腾 sealdice-ui；
+# 仓库里只跟踪占位页 static/frontend/index.html（构建产物已不入库）。
+# 但如果本地已经装过一份真 UI（上次构建留下的、已被 .gitignore 忽略），就沿用它，
+# 这样日常「重新编译一个 Windows 版」不必先折腾 sealdice-ui。
 # 也避免有人图省事直接 go build —— 那样会漏掉下面的版本元数据注入。
 $skipUiInstall = $false
 if (-not $UiDist -or -not (Test-Path $UiDist)) {
     $currentIndex = Join-Path $repo "static\frontend\index.html"
     if ((Test-Path $currentIndex) -and ((Get-Content $currentIndex -Raw) -match "assets/index-")) {
-        Write-Host ">> 未指定 -UiDist，沿用仓库自带的 static/frontend（已包含构建产物）"
+        Write-Host ">> 未指定 -UiDist，沿用 static/frontend 里已有的构建产物（本地文件，未入库）"
         $skipUiInstall = $true
     } else {
-        $hint = "找不到前端构建产物。请先准备（sealdice-ui 的 fork）：`n" +
+        $hint = "找不到前端构建产物（仓库只带占位页）。请先准备（sealdice-ui 的 fork）：`n" +
                 "    git clone https://github.com/chaye2333/sealdice-ui.git `$env:TEMP\sealdice-ui-fork`n" +
                 "    cd `$env:TEMP\sealdice-ui-fork; pnpm install; pnpm run build-only`n" +
                 "然后用 -UiDist 指定它的 dist 目录，或设 `$env:SEALDICE_UI_DIST。"

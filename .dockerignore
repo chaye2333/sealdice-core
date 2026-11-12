@@ -30,3 +30,14 @@ docs
 
 # 帮助文档渲染后端：独立 Go module（自带 go.mod），不属于主程序构建，也不进镜像
 helpdoc-render
+
+# 前端产物：镜像里一律由 UI 构建阶段生成。
+# 若把本地那份（可能已过期）带进上下文，`COPY --from=ui-builder ... ./static/frontend/`
+# 是**合并**而不是清空，旧 hash 的 assets 会被残留进镜像。
+/static/frontend
+
+# 本地构建产物与运行期目录
+dist-build
+cache
+backups
+update
