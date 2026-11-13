@@ -150,6 +150,13 @@ declare module 'vue-router/auto-routes' {
       Record<never, never>,
       | never
     >,
+    '/tool/chat-console': RouteRecordInfo<
+      '/tool/chat-console',
+      '/tool/chat-console',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
     '/tool/profile': RouteRecordInfo<
       '/tool/profile',
       '/tool/profile',
@@ -283,6 +290,12 @@ declare module 'vue-router/auto-routes' {
     'src/pages/mod/story.vue': {
       routes:
         | '/mod/story'
+      views:
+        | never
+    }
+    'src/pages/tool/chat-console.vue': {
+      routes:
+        | '/tool/chat-console'
       views:
         | never
     }

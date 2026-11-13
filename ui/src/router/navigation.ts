@@ -141,6 +141,13 @@ export const appNavigation: NavigationItem[] = [
         layout: 'workspace',
       },
       {
+        label: '聊天控制台',
+        title: '聊天控制台',
+        path: '/tool/chat-console',
+        icon: 'reply',
+        layout: 'workspace',
+      },
+      {
         label: '资源管理',
         title: '资源管理',
         path: '/tool/resource',
