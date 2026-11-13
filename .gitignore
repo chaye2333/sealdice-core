@@ -91,3 +91,8 @@ ui/src/api/generated/
 static/v2ui/dist/
 ui/dev-dist/
 ui/components.d.ts
+
+# ---- 测试/运行时缓存（#1839 牌堆 mmap 的本地缓存，含本机绝对路径，绝不入库）----
+/api/v2/deck/cache/
+*.blocks
+/cache/decks/
