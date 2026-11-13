@@ -100,16 +100,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 烟雾测试：确认镜像里跑的是「仓库内 ui/ 的构建产物」，而不是占位页/脚手架页。
+      # 烟雾测试：镜像里必须同时有**两套**界面，且默认入口指向老 UI。
       #
-      # 路由约定（见 ui_router.go）：`/` 默认 302 到 /v2ui/（新版 UI），
-      # /old-ui/ 只是回退入口（镜像里通常只有占位页），所以检查一律打到 /v2ui/。
+      # 路由约定（见 ui_router.go）：
+      #   `/`        → 302 到 `/old-ui/`（默认，老 UI，来自 chaye2333/sealdice-ui）
+      #   `/old-ui/` → 老 UI；`?ui=new` 或 cookie 切到 `/v2ui/`（仓库内 ui/ 的新 UI）
       #
-      # 内容校验必须覆盖**全部** chunk：Vite 按路由拆包，设置页在
-      # base-setting-*.js 这类懒加载 chunk 里，只看首页引用的 <script> 会两头出错
-      # （新字符串落在别的 chunk → 明明打对了却失败；旧字符串落别处 → 假绿）。
-      # chunk 清单从 PWA 的 sw.js（precache manifest）取，首页引用列表作兜底。
-      - name: Smoke test the admin UI is bundled
+      # 两侧都要查：老 UI 必须是真产物（仓库里只有占位 index.html，assets 缺失会白屏），
+      # 新 UI 必须含本 fork 的设置项。新 UI 的内容校验必须覆盖**全部** chunk
+      # （Vite 按路由拆包，设置页在 base-setting-*.js 这类懒加载 chunk 里），
+      # 所以清单从 PWA 的 sw.js（precache manifest）取，首页引用列表作兜底。
+      - name: Smoke test both UIs are bundled
         run: |
           set -e
           IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
@@ -123,37 +124,59 @@ jobs:
             exit 1
           }
 
+          # 默认入口是老 UI，所以先等 /old-ui/ 起来
           OK=""
           for i in $(seq 1 40); do
-            if curl -fsS -o /dev/null http://127.0.0.1:13211/v2ui/; then OK=1; break; fi
+            if curl -fsS -o /dev/null http://127.0.0.1:13211/old-ui/; then OK=1; break; fi
             sleep 1
           done
-          [ -n "$OK" ] || fail "打不开 /v2ui/，新 UI 没有打包进镜像"
+          [ -n "$OK" ] || fail "打不开 /old-ui/，老 UI 没有打包进镜像"
 
           echo "--- container logs ---"
           docker logs smktest 2>&1 | head -30 || true
 
-          # 1) 根路径必须重定向到新版 UI
+          # 1) 根路径必须 302 到老 UI
           ROOT_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:13211/ || true)
           ROOT_LOC=$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:13211/ || true)
           echo "root: $ROOT_CODE -> $ROOT_LOC"
-          [ "$ROOT_CODE" = "302" ] || fail "根路径应当 302 到新版 UI，实际 $ROOT_CODE（可能还是占位页/老镜像）"
+          [ "$ROOT_CODE" = "302" ] || fail "根路径应当 302 到老 UI，实际 $ROOT_CODE"
           case "$ROOT_LOC" in
-            */v2ui/) ;;
-            *) fail "根路径重定向目标异常：$ROOT_LOC" ;;
+            */old-ui/) ;;
+            *) fail "根路径重定向目标异常（期望 /old-ui/）：$ROOT_LOC" ;;
           esac
 
-          # 2) 新版首页不是占位页、不是 Vue 脚手架样例
-          curl -fsS http://127.0.0.1:13211/v2ui/ -o /tmp/page.html || fail "取不到 /v2ui/ 首页"
-          echo "--- fetched /v2ui/ ---"
-          cat /tmp/page.html
+          # 2) 老 UI 是真正的构建产物：有 assets、能取到资源
+          curl -fsS http://127.0.0.1:13211/old-ui/ -o /tmp/legacy.html || fail "取不到 /old-ui/ 首页"
+          echo "--- fetched /old-ui/ ($(wc -c < /tmp/legacy.html) bytes) ---"
+          head -c 600 /tmp/legacy.html
           echo
+          grep -qi "V2 UI not built" /tmp/legacy.html && fail "老 UI 拿到的是新 UI 占位页"
+          LEGACY_ASSET=$(grep -oE '(src|href)="[^"]*assets/[^"]+"' /tmp/legacy.html | head -n1 | sed -E 's/.*="([^"]*)".*/\1/' || true)
+          [ -n "$LEGACY_ASSET" ] || fail "老 UI 首页没有引用 assets（只剩占位 index.html？）"
+          LEGACY_ASSET=${LEGACY_ASSET#./}
+          case "$LEGACY_ASSET" in
+            http*) LEGACY_URL="$LEGACY_ASSET" ;;
+            /*)    LEGACY_URL="http://127.0.0.1:13211$LEGACY_ASSET" ;;
+            *)     LEGACY_URL="http://127.0.0.1:13211/old-ui/$LEGACY_ASSET" ;;
+          esac
+          echo "checking legacy asset: $LEGACY_URL"
+          curl -fsS "$LEGACY_URL" -o /tmp/legacy_asset.js || fail "老 UI 引用的资源 $LEGACY_ASSET 无法访问（白屏）"
+          echo "legacy asset size: $(wc -c < /tmp/legacy_asset.js) bytes"
+
+          # 3) 新 UI 也必须打包好
+          NEW_OK=""
+          for i in $(seq 1 20); do
+            if curl -fsS -o /dev/null http://127.0.0.1:13211/v2ui/; then NEW_OK=1; break; fi
+            sleep 1
+          done
+          [ -n "$NEW_OK" ] || fail "打不开 /v2ui/，新 UI 没有打包进镜像"
+
+          curl -fsS http://127.0.0.1:13211/v2ui/ -o /tmp/page.html || fail "取不到 /v2ui/ 首页"
           grep -qi "V2 UI not built" /tmp/page.html && fail "镜像里是 v2ui 占位页，dist 没有打进去"
           grep -qi "Vite + Vue 3\|You've successfully created" /tmp/page.html && fail "镜像里打包的是 Vue 脚手架样例页"
 
           ASSET=$(grep -oE '(src|href)="[^"]*assets/[^"]+"' /tmp/page.html | head -n1 | sed -E 's/.*="([^"]*)".*/\1/' || true)
-          [ -n "$ASSET" ] || fail "首页没有引用 assets 资源，前端不是正式构建产物"
-          # index.html 里的资源是相对路径（./assets/...）；统一去掉前缀再拼 URL
+          [ -n "$ASSET" ] || fail "新 UI 首页没有引用 assets 资源"
           ASSET=${ASSET#./}
           case "$ASSET" in
             http*) URL="$ASSET" ;;
@@ -161,10 +184,10 @@ jobs:
             *)     URL="http://127.0.0.1:13211/v2ui/$ASSET" ;;
           esac
           echo "checking asset: $URL"
-          curl -fsS "$URL" -o /tmp/asset.js || fail "首页引用的资源 $ASSET 无法访问"
+          curl -fsS "$URL" -o /tmp/asset.js || fail "新 UI 首页引用的资源 $ASSET 无法访问"
           echo "asset size: $(wc -c < /tmp/asset.js) bytes"
 
-          # 3) 用 sw.js 的 precache 清单枚举全部 chunk（拿不到时退回首页引用列表）
+          # 4) 用 sw.js 的 precache 清单枚举全部 chunk（拿不到时退回首页引用列表）
           grep -oE 'assets/[A-Za-z0-9._/-]+\.js' /tmp/page.html | sort -u > /tmp/asset_list.txt || true
           if curl -fsS http://127.0.0.1:13211/v2ui/sw.js -o /tmp/sw.js; then
             grep -oE 'assets/[A-Za-z0-9._/-]+\.js' /tmp/sw.js | sort -u >> /tmp/asset_list.txt || true
@@ -185,18 +208,18 @@ jobs:
           echo "collected $ASSET_COUNT js assets, $(wc -c < /tmp/all_assets.js) bytes"
           [ -s /tmp/all_assets.js ] || fail "没能取到任何 js 产物，无法校验前端版本"
 
-          # 4) 本 fork 的设置项必须在（含懒加载的设置页 chunk）
+          # 5) 本 fork 的设置项必须在（含懒加载的设置页 chunk）
           for NEEDLE in identityBindEnable identityBindPreferEmailCode identityBindCodeExpireSec \
                         logMultiBotDedupWindowSec officialQQRequestTimeoutSec \
                         censorMaskEnable imageRenderEnable chat-console; do
-            grep -q "$NEEDLE" /tmp/all_assets.js || fail "镜像里的 UI 缺少设置项 $NEEDLE —— 新 UI 编译产物不对或没有嵌入"
+            grep -q "$NEEDLE" /tmp/all_assets.js || fail "镜像里的新 UI 缺少设置项 $NEEDLE"
           done
 
-          # 5) 已废弃的选项必须不在
+          # 6) 已废弃的选项必须不在
           for GONE in identityBindQuestionCount identityBindKeepQuiz identityBindFailCooldownSec; do
-            grep -q "$GONE" /tmp/all_assets.js && fail "镜像里的 UI 仍包含已废弃的选项 $GONE —— 前端是旧版本"
+            grep -q "$GONE" /tmp/all_assets.js && fail "镜像里的新 UI 仍包含已废弃的选项 $GONE"
           done
 
-          echo "OK: 默认入口指向 /v2ui/，且前端是当前仓库 ui/ 的最新构建"
+          echo "OK: 老 UI（默认入口）与新 UI（/v2ui/）都已打包，且新 UI 含本 fork 设置项"
           docker rm -f smktest
 
