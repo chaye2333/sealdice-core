@@ -1,20 +1,24 @@
-# 本地构建 Windows 版（含新管理界面）的脚本
+﻿# 本地构建 Windows 版（含两套管理界面）的脚本
 #
-# 从上游 #1689 起，管理界面是**仓库里的 ui/**（新 UI），编译产物写入 static/v2ui/dist，
-# 由 static/static.go 的 `go:embed all:v2ui` 打进 exe。老流程（把外部 dist 拷到
-# static/frontend）已废弃——那条路现在只会塞一个占位页进去。
+# 管理界面有两套（见 ui_router.go）：
+#   * 新版 UI：**仓库里的 ui/**，编译产物写入 static/v2ui/dist，由 `go:embed all:v2ui` 打进 exe；
+#   * 老 UI：**默认入口**（`/` → `/old-ui/`），源码不在本仓库，从 chaye2333/sealdice-ui
+#     按 LEGACY_UI_REF 拉源码现场编译，产物写入 static/frontend，由 `go:embed frontend` 打进 exe。
+#     仓库里的 static/frontend/index.html 只是占位页，不编译老 UI 的话默认入口就是白页。
 #
-# 构建顺序必须是（对应 Taskfile.yml 的 build-with-v2ui）：
+# 构建顺序（新版部分对应 Taskfile.yml 的 build-with-v2ui）：
 #   1. go run . --gen-openapi=./ui/openapi.json   （前端契约只能由 Go 导出）
 #   2. pnpm --dir ui install --frozen-lockfile
 #   3. pnpm --dir ui run generate-client
 #   4. pnpm --dir ui run build:embed:prepared     （产物 → static/v2ui/dist）
-#   5. go build
+#   5. 拉老 UI 源码（chaye2333/sealdice-ui@LEGACY_UI_REF）→ pnpm install / build-only
+#      → 产物覆盖 static/frontend
+#   6. go build
 #
 # 用法（在仓库根目录）：
-#     pwsh -File scripts\build-windows.ps1
-#     pwsh -File scripts\build-windows.ps1 -SkipUi      # UI 没改动时跳过前三步
-#     pwsh -File scripts\build-windows.ps1 -SkipZip
+#     powershell -File scripts\build-windows.ps1
+#     powershell -File scripts\build-windows.ps1 -SkipUi      # 两套 UI 都没改动时跳过 1~5
+#     powershell -File scripts\build-windows.ps1 -SkipZip
 #
 # 产物：
 #     dist-build\sealdice-core.exe
@@ -39,16 +43,23 @@ if (Test-Path $goBin) { $env:Path = "$goBin;$env:Path" }
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) { throw "找不到 go，请把 Go 放进 PATH" }
 if (-not $env:CGO_ENABLED) { $env:CGO_ENABLED = "0" }   # 纯 Go sqlite，免 gcc
 
-# ---------- 准备 UI（仓库内 ui/） ----------
+# ---------- 准备 UI（仓库内 ui/ + 老 UI） ----------
 $uiDir = Join-Path $repo "ui"
 $v2uiDist = Join-Path $repo "static\v2ui\dist"
+$legacyDist = Join-Path $repo "static\frontend"
+# 老 UI 源码钉死在 Dockerfile 里同一个 commit；改老 UI 后两处一起改
+$legacyRepo = "chaye2333/sealdice-ui"
+$legacyRef = "84dbca34ba968bcd5736fe24c2e4c79881b452ff"
 if (-not (Test-Path $uiDir)) { throw "找不到 ui/ 目录：新 UI 应该就在仓库里（上游 #1689 起）" }
 
 if ($SkipUi) {
     if (-not (Test-Path (Join-Path $v2uiDist "index.html"))) {
         throw "-SkipUi 要求 static\v2ui\dist 里已经有编译好的 UI"
     }
-    Write-Host ">> 跳过 UI 编译，沿用 static\v2ui\dist"
+    if (-not (Test-Path (Join-Path $legacyDist "assets"))) {
+        throw "-SkipUi 要求 static\frontend 里已经有编译好的老 UI（否则默认入口是白页）"
+    }
+    Write-Host ">> 跳过 UI 编译，沿用 static\v2ui\dist 与 static\frontend"
 } else {
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "找不到 node，请安装 Node ^20.19 或 >=22.12" }
 
@@ -64,28 +75,61 @@ if ($SkipUi) {
         if ($LASTEXITCODE -ne 0) { throw ("pnpm " + ($pnpmArgs -join ' ') + " 失败") }
     }
 
-    Write-Host ">> 1/4 导出 OpenAPI 契约 (ui/openapi.json)"
+    Write-Host ">> 1/5 导出 OpenAPI 契约 (ui/openapi.json)"
     & go run . --gen-openapi=./ui/openapi.json
     if ($LASTEXITCODE -ne 0) { throw "导出 openapi.json 失败" }
     if (-not (Test-Path (Join-Path $uiDir "openapi.json"))) { throw "ui/openapi.json 没生成" }
 
     if (-not (Test-Path (Join-Path $uiDir "node_modules"))) {
-        Write-Host ">> 2/4 安装前端依赖（首次会慢）"
+        Write-Host ">> 2/5 安装前端依赖（首次会慢）"
         Invoke-Pnpm @("--dir", "ui", "install", "--frozen-lockfile")
     } else {
-        Write-Host ">> 2/4 已有 node_modules，跳过 install"
+        Write-Host ">> 2/5 已有 node_modules，跳过 install"
     }
 
-    Write-Host ">> 3/4 生成 API 客户端"
+    Write-Host ">> 3/5 生成 API 客户端"
     Invoke-Pnpm @("--dir", "ui", "run", "generate-client")
 
-    Write-Host ">> 4/4 编译 UI（embed 模式 → static/v2ui/dist）"
+    Write-Host ">> 4/5 编译新版 UI（embed 模式 → static/v2ui/dist）"
     Invoke-Pnpm @("--dir", "ui", "run", "build:embed:prepared")
 
     $index = Join-Path $v2uiDist "index.html"
     if (-not (Test-Path $index)) { throw "static\v2ui\dist\index.html 不存在，UI 没编出来" }
     if (-not (Test-Path (Join-Path $v2uiDist "assets"))) { throw "static\v2ui\dist\assets 不存在，UI 产物不完整" }
-    Write-Host ">> UI 就绪"
+
+    Write-Host ">> 5/5 编译老 UI（默认入口 → static/frontend）"
+    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { throw "找不到 curl.exe（Windows 10+ 自带），拉老 UI 源码需要它" }
+    $tmp = Join-Path $env:TEMP ("sealdice-ui-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    try {
+        $tarball = Join-Path $tmp "ui.tar.gz"
+        Write-Host "   下载 $legacyRepo@$($legacyRef.Substring(0, 7))（需要能访问 github.com）"
+        & curl.exe -fsSL "https://codeload.github.com/$legacyRepo/tar.gz/$legacyRef" -o $tarball
+        if ($LASTEXITCODE -ne 0) { throw "下载老 UI 源码失败" }
+        & tar -xzf $tarball -C $tmp
+        if ($LASTEXITCODE -ne 0) { throw "解压老 UI 源码失败" }
+
+        $src = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -ne "" } | Select-Object -First 1
+        if (-not $src -or -not (Test-Path (Join-Path $src.FullName "package.json"))) { throw "老 UI 源码里没有 package.json" }
+
+        Push-Location $src.FullName
+        try {
+            Invoke-Pnpm @("install", "--frozen-lockfile")
+            Invoke-Pnpm @("run", "build-only")
+        } finally {
+            Pop-Location
+        }
+
+        $legacyBuilt = Join-Path $src.FullName "dist"
+        if (-not (Test-Path (Join-Path $legacyBuilt "index.html"))) { throw "老 UI 没有编出 dist/index.html" }
+        if (-not (Test-Path (Join-Path $legacyBuilt "assets"))) { throw "老 UI 产物缺少 assets" }
+        Remove-Item -Recurse -Force $legacyDist -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $legacyDist | Out-Null
+        Copy-Item (Join-Path $legacyBuilt "*") $legacyDist -Recurse -Force
+        Write-Host "   老 UI 就绪: $legacyDist"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
 }
 
 # ---------- 构建 ----------
