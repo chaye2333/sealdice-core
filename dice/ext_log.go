@@ -1523,7 +1523,8 @@ func logSendToBackendForce(ctx *MsgContext, groupID string, logName string, skip
 	if err != nil {
 		return false, "", "", err
 	}
-	return uploadLogInfoToBackend(ctx, logInfo, false)
+	// 合并 #1689 时这里被上游硬编码成 false，导致「强制重传」失去作用，已修回传 force。
+	return uploadLogInfoToBackend(ctx, logInfo, force)
 }
 
 func LogSendToBackendByInfo(ctx *MsgContext, logInfo *model.LogInfo, force bool) (bool, string, error) {

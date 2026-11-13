@@ -21,11 +21,13 @@ func uploadV1(env UploadEnv) (string, string, error) {
 	url, uploadTS, updateTS, _ := service.LogGetUploadInfo(env.Db, env.GroupID, env.LogName)
 	cachedURL := url
 	probeResult := cachedLogProbeMissing
-	if len(url) > 0 && uploadTS > updateTS {
+	// Force（上游）/ ForceReupload（我们 fork 的旧字段）：强制重传时连探测都跳过，
+	// 避免为了一个注定要丢弃的旧链接多打一次网络请求。
+	forced := env.Force || env.ForceReupload
+	if !forced && len(url) > 0 && uploadTS > updateTS {
 		probeResult = checkCachedLogURL(env, url)
 	}
-	// Force 是上游字段，ForceReupload 是我们 fork 的旧字段，任一为真都强制重传。
-	if !env.Force && !env.ForceReupload && probeResult == cachedLogProbeAlive {
+	if !forced && probeResult == cachedLogProbeAlive {
 		// 已有URL且上传时间晚于Log更新时间（最后录入时间），直接返回
 		env.Log.Infof(
 			"查询到之前上传的URL, 直接使用 Log:%s.%s 上传时间:%s 更新时间:%s URL:%s",
@@ -36,7 +38,7 @@ func uploadV1(env UploadEnv) (string, string, error) {
 		)
 		return url, env.Notice, nil
 	}
-	if env.Force || env.ForceReupload {
+	if forced {
 		env.Log.Infof("强制重新上传 Log:%s.%s", env.GroupID, env.LogName)
 	} else if len(url) == 0 {
 		env.Log.Infof("没有查询到之前上传的URL Log:%s.%s", env.GroupID, env.LogName)
