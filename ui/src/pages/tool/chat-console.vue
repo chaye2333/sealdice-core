@@ -82,14 +82,11 @@
                 >
                   <n-flex align="center" justify="space-between" :wrap="false">
                     <n-flex align="center" size="small" :wrap="false">
-                      <n-avatar
-                        round
+                      <ChatConsoleAvatar
                         :size="26"
                         :src="conversationAvatarSrc(conv)"
-                        :color="chatConsoleAvatarColor(conversationLabel(conv))"
-                      >
-                        {{ chatConsoleAvatarFallback(conversationLabel(conv)) }}
-                      </n-avatar>
+                        :name="conversationLabel(conv)"
+                      />
                       <n-text strong class="conv-name">{{ conversationLabel(conv) }}</n-text>
                     </n-flex>
                     <n-flex align="center" size="small" :wrap="false">
@@ -212,14 +209,11 @@
                 :class="item.dir === 'out' ? 'out' : 'in'"
               >
                 <n-flex align="center" size="small" :wrap="false" class="msg-meta">
-                  <n-avatar
-                    round
+                  <ChatConsoleAvatar
                     :size="20"
                     :src="senderAvatarSrc(item)"
-                    :color="chatConsoleAvatarColor(item.senderName)"
-                  >
-                    {{ chatConsoleAvatarFallback(item.senderName) }}
-                  </n-avatar>
+                    :name="item.senderName"
+                  />
                   <n-text depth="3">{{ item.senderName }} · {{ formatChatConsoleTime(item.ts) }}</n-text>
                 </n-flex>
 
@@ -320,11 +314,24 @@
               <n-button size="tiny" quaternary @click="quoteTarget = null">取消</n-button>
             </n-flex>
 
+            <n-flex v-if="mentions.length" align="center" size="small" class="composer-mentions">
+              <n-tag
+                v-for="member in mentions"
+                :key="member.openid"
+                size="small"
+                closable
+                :bordered="false"
+                @close="removeMention(member.openid)"
+              >
+                @{{ member.name }}
+              </n-tag>
+            </n-flex>
+
             <n-flex vertical size="small" class="composer">
               <n-input
                 v-model:value="draft"
                 type="textarea"
-                :autosize="{ minRows: 2, maxRows: 5 }"
+                :autosize="{ minRows: 1, maxRows: 5 }"
                 :maxlength="DRAFT_MAX_LEN"
                 placeholder="输入消息：Enter 发送，Shift+Enter 换行"
                 @keydown="onDraftKeydown"
@@ -341,7 +348,32 @@
                 <n-button size="small" secondary :loading="uploading" @click="pickFiles">
                   附件
                 </n-button>
-                <n-button size="small" secondary @click="insertAtPlaceholder">@ 成员</n-button>
+                <n-popover v-model:show="mentionPickerVisible" trigger="click" placement="top-start">
+                  <template #trigger>
+                    <n-button size="small" secondary>@ 成员</n-button>
+                  </template>
+                  <n-flex vertical size="small" class="mention-picker">
+                    <n-text depth="3" class="mention-hint">
+                      从当前会话的历史消息里取成员；官方接口没有独立的成员列表。
+                    </n-text>
+                    <n-empty
+                      v-if="!mentionMembers.length"
+                      size="small"
+                      description="这个会话还没有可 @ 的成员"
+                    />
+                    <n-scrollbar v-else style="max-height: 14rem">
+                      <div
+                        v-for="member in mentionMembers"
+                        :key="member.openid"
+                        class="mention-item"
+                        @click="addMention(member)"
+                      >
+                        <ChatConsoleAvatar :size="20" :name="member.name" />
+                        <n-text>{{ member.name }}</n-text>
+                      </div>
+                    </n-scrollbar>
+                  </n-flex>
+                </n-popover>
                 <n-text depth="3" class="composer-count">{{ draft.length }}/{{ DRAFT_MAX_LEN }}</n-text>
                 <n-text depth="3" class="composer-hint">
                   {{ uploading ? '上传中…' : '图片/语音/视频/文件' }}
@@ -491,6 +523,7 @@ import { breakpointsTailwind, useBreakpoints } from '@vueuse/core';
 import { useMessage } from 'naive-ui';
 import PageHeader from '@/components/shared/PageHeader.vue';
 import ListEmptyState from '@/components/shared/ListEmptyState.vue';
+import ChatConsoleAvatar from '@/components/chatConsole/ChatConsoleAvatar.vue';
 import { notifyError } from '@/features/feedback/notifyError';
 import { copyText } from '@/features/clipboard/copyText';
 import {
@@ -510,6 +543,7 @@ import {
   uploadChatConsoleFile,
   type ChatConsoleConversation,
   type ChatConsoleEvent,
+  type ChatConsoleMention,
   type ChatConsoleMessage,
   type ChatConsoleQuote,
   type ChatConsoleSearchMessage,
@@ -523,8 +557,6 @@ import {
   sortChatConsoleConversations,
 } from '@/features/chatConsole/viewModel';
 import {
-  chatConsoleAvatarColor,
-  chatConsoleAvatarFallback,
   chatConsoleMediaLabel,
   chatConsoleMediaURL,
   chatConsoleQQGroupAvatarURL,
@@ -562,6 +594,8 @@ const uploading = ref(false);
 const refreshingInfo = ref(false);
 const draft = ref('');
 const quoteTarget = ref<ChatConsoleMessage | null>(null);
+/** 待 @ 的成员（发送时交给后端拼成官方 @ 标签 + 正文里的 @昵称）。 */
+const mentions = ref<ChatConsoleMention[]>([]);
 const messagePane = ref<HTMLElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 
@@ -610,7 +644,10 @@ const selectedConversation = computed(
   () => conversations.value.find(item => item.key === selectedKey.value) ?? null
 );
 const canSend = computed(
-  () => !!selectedKey.value && draft.value.trim().length > 0 && !sending.value
+  () =>
+    !!selectedKey.value &&
+    (draft.value.trim().length > 0 || mentions.value.length > 0) &&
+    !sending.value
 );
 
 const stream = useChatConsoleStream({ onEvent: handleStreamEvent });
@@ -750,6 +787,8 @@ async function selectConversation(conv: ChatConsoleConversation) {
   if (!conv?.key) return;
   selectedKey.value = conv.key;
   quoteTarget.value = null;
+  // 换会话就清空 @ 目标：openid 只在本群有意义
+  mentions.value = [];
   messages.value = [];
   hasMore.value = false;
   msgLoading.value = true;
@@ -799,10 +838,10 @@ async function loadMore() {
 async function send() {
   const text = draft.value.trim();
   const key = selectedKey.value;
-  if (!text || !key || sending.value) return;
+  if ((!text && !mentions.value.length) || !key || sending.value) return;
   sending.value = true;
   try {
-      const quote: ChatConsoleQuote | undefined = quoteTarget.value
+    const quote: ChatConsoleQuote | undefined = quoteTarget.value
       ? {
           sender: quoteTarget.value.senderName,
           text: quoteTarget.value.text,
@@ -810,10 +849,11 @@ async function send() {
           msgId: quoteTarget.value.msgId || quoteTarget.value.msgIdx,
         }
       : undefined;
-    const sent = await sendChatConsoleMessage(key, text, quote);
+    const sent = await sendChatConsoleMessage(key, text, quote, [...mentions.value]);
     messages.value = mergeChatConsoleMessages(messages.value, [sent]);
     draft.value = '';
     quoteTarget.value = null;
+    mentions.value = [];
     scrollToBottom();
     void refreshConversations();
   } catch (error) {
@@ -1049,15 +1089,33 @@ async function copyConversationID() {
   }
 }
 
-/** 在光标处插入 @ 片段；官方 QQ 的 openid 需要骰主自己贴。 */
-function insertAtPlaceholder() {
-  const snippet = '[CQ:at,qq=]';
-  const text = draft.value ?? '';
-  const at = text.length ? text.length : 0;
-  draft.value = `${text.slice(0, at)}${snippet}`;
+/** 可供 @ 的群成员：从已加载消息里归纳（官方接口没有独立的成员列表）。 */
+const mentionMembers = computed(() => {
+  const map = new Map<string, string>();
+  for (const item of messages.value) {
+    const openid = item.senderOpenId?.trim();
+    if (openid && item.senderName) map.set(openid, item.senderName);
+  }
+  return [...map.entries()].map(([openid, name]) => ({ openid, name }));
+});
+
+const mentionPickerVisible = ref(false);
+
+function addMention(member: ChatConsoleMention) {
+  if (mentions.value.some(item => item.openid === member.openid)) {
+    mentionPickerVisible.value = false;
+    return;
+  }
+  mentions.value = [...mentions.value, member];
+  mentionPickerVisible.value = false;
 }
 
-function handleStreamEvent(event: ChatConsoleEvent) {  if (event.type === 'conversation' && event.conversation) {
+function removeMention(openid: string) {
+  mentions.value = mentions.value.filter(item => item.openid !== openid);
+}
+
+function handleStreamEvent(event: ChatConsoleEvent) {
+  if (event.type === 'conversation' && event.conversation) {
     upsertConversation(event.conversation);
     return;
   }
@@ -1144,7 +1202,7 @@ onUnmounted(() => {
 }
 
 .conv-item {
-  padding: 0.5rem 0.6rem;
+  padding: 0.4rem 0.5rem;
   border-radius: 0.5rem;
   cursor: pointer;
   border: 1px solid transparent;
@@ -1194,7 +1252,7 @@ onUnmounted(() => {
 .msg-row {
   display: flex;
   flex-direction: column;
-  margin-bottom: 0.7rem;
+  margin-bottom: 0.5rem;
 }
 
 .msg-row.out {
@@ -1384,9 +1442,32 @@ onUnmounted(() => {
 .composer-count,
 .composer-note {
   font-size: 0.78rem;
+}.composer-note {
+  opacity: 0.75;
 }
 
-.composer-note {
-  opacity: 0.75;
+.composer-mentions {
+  margin-top: 0.4rem;
+}
+
+.mention-picker {
+  width: min(18rem, 60vw);
+}
+
+.mention-hint {
+  font-size: 0.75rem;
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.4rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.mention-item:hover {
+  background: var(--sd-hover-color, rgba(128, 128, 128, 0.12));
 }
 </style>

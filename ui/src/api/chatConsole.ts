@@ -59,6 +59,12 @@ export type ChatConsoleQuote = {
   msgId?: string;
 };
 
+/** 控制台发送时的 @ 目标：官方 QQ 群里用 `openid`。 */
+export type ChatConsoleMention = {
+  openid: string;
+  name: string;
+};
+
 export type ChatConsoleMessage = {
   id: string;
   ts: number;
@@ -143,10 +149,11 @@ export async function fetchChatConsoleMessages(
 export async function sendChatConsoleMessage(
   key: string,
   text: string,
-  quote?: ChatConsoleQuote
+  quote?: ChatConsoleQuote,
+  mentions?: ChatConsoleMention[]
 ): Promise<ChatConsoleMessage> {
   const data = await requestJson<{ message?: ChatConsoleMessage }>('post', '/sd-api/chat-console/send', {
-    body: { key, text, quote: quote ?? null },
+    body: { key, text, quote: quote ?? null, mentions: mentions ?? [] },
   });
   if (!data.message) throw new Error('发送失败：服务端没有返回消息');
   return data.message;
