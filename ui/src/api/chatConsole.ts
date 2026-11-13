@@ -16,6 +16,8 @@ export type ChatConsoleConversation = {
   key: string;
   kind: ChatConsoleKind;
   targetId: string;
+  /** 官方 QQ 是 openid，其它平台（OneBot 等）这里放群号 / QQ 号，可用来拼头像 */
+  uin?: string;
   endpointId?: string;
   avatarUrl?: string;
   name: string;
@@ -238,5 +240,51 @@ export async function muteChatConsoleMember(
 ): Promise<void> {
   await requestJson<{ text?: string }>('post', '/sd-api/chat-console/mute', {
     body: { key, memberOpenId, seconds },
+  });
+}
+
+/** 单个会话的磁盘占用（后端按列长度估算）。 */
+export type ChatConsoleUsage = {
+  key: string;
+  name: string;
+  kind: ChatConsoleKind;
+  bytes: number;
+  messages: number;
+  /** 覆盖了多少天的消息，0 表示没有消息 */
+  days: number;
+  oldestTs?: number;
+  newestTs?: number;
+};
+
+export type ChatConsoleStorage = {
+  totalBytes: number;
+  /** 0 = 永久保留 */
+  retentionDays: number;
+  conversations: ChatConsoleUsage[];
+};
+
+export async function fetchChatConsoleStorage(): Promise<ChatConsoleStorage> {
+  const data = await requestJson<Partial<ChatConsoleStorage>>('get', '/sd-api/chat-console/storage');
+  return {
+    totalBytes: data.totalBytes ?? 0,
+    retentionDays: data.retentionDays ?? 0,
+    conversations: (data.conversations ?? []).filter(item => !!item?.key),
+  };
+}
+
+/** 保存保留天数，返回后端归一化后的值（0 = 永久保留）。 */
+export async function saveChatConsoleRetention(days: number): Promise<number> {
+  const data = await requestJson<{ retentionDays?: number }>(
+    'post',
+    '/sd-api/chat-console/settings',
+    { body: { retentionDays: days } }
+  );
+  return data.retentionDays ?? days;
+}
+
+/** 清空单个会话历史；all=true 时清空全部会话。 */
+export async function purgeChatConsole(options: { key?: string; all?: boolean }): Promise<void> {
+  await requestJson<Record<string, never>>('post', '/sd-api/chat-console/purge', {
+    body: options.all ? { all: true } : { key: options.key ?? '' },
   });
 }

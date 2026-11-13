@@ -22,6 +22,30 @@ export function chatConsoleAvatarURL(raw: string | undefined, token: string): st
   return chatConsoleMediaURL(raw, token);
 }
 
+/** QQ 群号 / QQ 号的合法形态：纯数字，5~12 位。openid 之类一律不算。 */
+export function chatConsoleQQNumber(raw: string | undefined): string {
+  const value = raw?.trim() ?? '';
+  return /^\d{5,12}$/.test(value) ? value : '';
+}
+
+/**
+ * QQ 群头像地址。
+ *
+ * 官方 QQ 的会话只有 openid，没有群号，所以那边靠后端算好的 `avatarUrl`；
+ * OneBot / 其它平台会把群号放进 `uin`，这类会话用 qlogo 的群头像接口补一个，
+ * 否则界面上永远只有「名字首字」的占位圆环。
+ */
+export function chatConsoleQQGroupAvatarURL(uin: string | undefined): string {
+  const number = chatConsoleQQNumber(uin);
+  return number ? `https://p.qlogo.cn/gh/${number}/${number}/0` : '';
+}
+
+/** QQ 用户头像地址（同样需要真实 QQ 号；openid 拼不出头像）。 */
+export function chatConsoleQQUserAvatarURL(uin: string | undefined): string {
+  const number = chatConsoleQQNumber(uin);
+  return number ? `https://q1.qlogo.cn/g?b=qq&nk=${number}&s=140` : '';
+}
+
 /**
  * 卡片链接只允许 http/https：`jump_url` 的内容由群里的对方决定，
  * 直接当 `<a href>` 渲染可能被塞进 `javascript:` 之类的伪协议。

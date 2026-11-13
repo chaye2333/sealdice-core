@@ -13,9 +13,12 @@
                   {{ streamTag.text }}
                 </n-tag>
               </n-flex>
-              <n-button size="tiny" secondary :loading="convLoading" @click="refreshConversations">
-                刷新
-              </n-button>
+              <n-flex align="center" size="small">
+                <n-button size="tiny" secondary @click="openStorage">存储</n-button>
+                <n-button size="tiny" secondary :loading="convLoading" @click="refreshConversations">
+                  刷新
+                </n-button>
+              </n-flex>
             </n-flex>
           </template>
 
@@ -82,7 +85,7 @@
                       <n-avatar
                         round
                         :size="26"
-                        :src="avatarSrc(conv.avatarUrl)"
+                        :src="conversationAvatarSrc(conv)"
                       >
                         {{ chatConsoleAvatarFallback(conversationLabel(conv)) }}
                       </n-avatar>
@@ -150,6 +153,17 @@
                   {{ selectedConversation.key }}
                 </n-text>
                 <n-button
+                  v-if="selectedConversation"
+                  size="tiny"
+                  secondary
+                  @click="copyConversationID"
+                >
+                  复制 ID
+                </n-button>
+                <n-button v-if="selectedConversation" size="tiny" secondary @click="infoVisible = true">
+                  资料
+                </n-button>
+                <n-button
                   v-if="selectedConversation?.kind === 'group'"
                   size="tiny"
                   secondary
@@ -197,7 +211,7 @@
                 :class="item.dir === 'out' ? 'out' : 'in'"
               >
                 <n-flex align="center" size="small" :wrap="false" class="msg-meta">
-                  <n-avatar round :size="20" :src="avatarSrc(item.avatarUrl)">
+                  <n-avatar round :size="20" :src="senderAvatarSrc(item)">
                     {{ chatConsoleAvatarFallback(item.senderName) }}
                   </n-avatar>
                   <n-text depth="3">{{ item.senderName }} · {{ formatChatConsoleTime(item.ts) }}</n-text>
@@ -305,6 +319,7 @@
                 v-model:value="draft"
                 type="textarea"
                 :autosize="{ minRows: 2, maxRows: 5 }"
+                :maxlength="DRAFT_MAX_LEN"
                 placeholder="输入消息：Enter 发送，Shift+Enter 换行"
                 @keydown="onDraftKeydown"
               />
@@ -320,6 +335,8 @@
                 <n-button size="small" secondary :loading="uploading" @click="pickFiles">
                   附件
                 </n-button>
+                <n-button size="small" secondary @click="insertAtPlaceholder">@ 成员</n-button>
+                <n-text depth="3" class="composer-count">{{ draft.length }}/{{ DRAFT_MAX_LEN }}</n-text>
                 <n-text depth="3" class="composer-hint">
                   {{ uploading ? '上传中…' : '图片/语音/视频/文件' }}
                 </n-text>
@@ -327,6 +344,10 @@
                   发送
                 </n-button>
               </n-flex>
+              <n-text depth="3" class="composer-note">
+                私聊主动消息有官方限额；正文支持 [CQ:at,qq=openid] / [CQ:reply,id=msgid]，
+                官方 QQ 的 @ 与引用会转成平台格式。
+              </n-text>
             </n-flex>
           </template>
         </n-card>
@@ -342,6 +363,117 @@
         </n-flex>
       </template>
     </n-modal>
+    <n-modal v-model:show="storageVisible" preset="card" title="聊天记录存储" class="storage-dialog">
+      <n-spin :show="storageLoading">
+        <n-flex vertical size="medium">
+          <n-flex align="center" size="small" :wrap="false" class="storage-summary">
+            <n-text depth="3">总占用</n-text>
+            <n-text strong>{{ formatBytes(storage.totalBytes) }}</n-text>
+            <n-text depth="3">· 会话 {{ storage.conversations.length }} 个</n-text>
+            <n-button size="tiny" quaternary :loading="storageLoading" @click="reloadStorage">
+              重新统计
+            </n-button>
+          </n-flex>
+
+          <n-flex align="center" size="small" :wrap="false">
+            <n-text depth="3">保留天数</n-text>
+            <n-input-number
+              v-model:value="retentionDraft"
+              size="small"
+              :min="0"
+              :max="3650"
+              style="width: 120px"
+            />
+            <n-text depth="3">天（0 = 永久保留）</n-text>
+            <n-button size="tiny" type="primary" :loading="retentionSaving" @click="saveRetention">
+              保存
+            </n-button>
+          </n-flex>
+
+          <n-empty v-if="!storage.conversations.length" description="还没有任何聊天记录" />
+          <n-flex v-for="item in storage.conversations" :key="item.key" vertical size="small" class="storage-row">
+            <n-flex align="center" justify="space-between" :wrap="false">
+              <n-text strong class="storage-name">{{ item.name || item.key }}</n-text>
+              <n-flex align="center" size="small" :wrap="false">
+                <n-text depth="3">{{ item.messages }} 条 · {{ formatBytes(item.bytes) }}</n-text>
+                <n-popconfirm @positive-click="purgeConversation(item)">
+                  <template #trigger>
+                    <n-button size="tiny" quaternary type="error" :loading="purgingKey === item.key">
+                      清空
+                    </n-button>
+                  </template>
+                  清空「{{ item.name || item.key }}」的全部聊天记录？不可恢复。
+                </n-popconfirm>
+              </n-flex>
+            </n-flex>
+            <n-text depth="3" class="storage-kind">
+              {{ item.kind === 'group' ? '群聊' : '私聊' }}{{ item.days ? ` · 覆盖 ${item.days} 天` : '' }}
+            </n-text>
+          </n-flex>
+        </n-flex>
+      </n-spin>
+      <template #footer>
+        <n-flex justify="space-between" align="center">
+          <n-popconfirm @positive-click="purgeAllConversations">
+            <template #trigger>
+              <n-button size="small" type="error" secondary :loading="purgingAll">清空全部历史</n-button>
+            </template>
+            清空所有会话的聊天记录？不可恢复。
+          </n-popconfirm>
+          <n-button size="small" @click="storageVisible = false">关闭</n-button>
+        </n-flex>
+      </template>
+    </n-modal>
+    <n-modal v-model:show="infoVisible" preset="card" title="会话资料" class="info-dialog">
+      <n-flex v-if="selectedConversation" vertical size="small">
+        <n-flex size="small" :wrap="false">
+          <n-text depth="3" class="info-label">类型</n-text>
+          <n-text>{{ selectedConversation.kind === 'group' ? '群聊' : '私聊' }}</n-text>
+        </n-flex>
+        <n-flex size="small" :wrap="false">
+          <n-text depth="3" class="info-label">会话 ID</n-text>
+          <n-text class="info-value">{{ selectedConversation.key }}</n-text>
+        </n-flex>
+        <n-flex size="small" :wrap="false">
+          <n-text depth="3" class="info-label">目标 ID</n-text>
+          <n-text class="info-value">{{ selectedConversation.targetId || '—' }}</n-text>
+        </n-flex>
+        <n-flex size="small" :wrap="false">
+          <n-text depth="3" class="info-label">端点</n-text>
+          <n-text class="info-value">{{ selectedConversation.endpointId || '—' }}</n-text>
+        </n-flex>
+        <n-flex v-if="selectedConversation.memberCount" size="small" :wrap="false">
+          <n-text depth="3" class="info-label">成员数</n-text>
+          <n-text>{{ selectedConversation.memberCount }}</n-text>
+        </n-flex>
+        <n-flex size="small" :wrap="false">
+          <n-text depth="3" class="info-label">消息范围</n-text>
+          <n-text>
+            {{ selectedConversation.fullMessage ? '全部消息（已授权）' : '仅 @ 及被动消息' }}
+          </n-text>
+        </n-flex>
+        <n-flex v-if="selectedConversation.classText" size="small" :wrap="false">
+          <n-text depth="3" class="info-label">群分类</n-text>
+          <n-text>{{ selectedConversation.classText }}</n-text>
+        </n-flex>
+        <n-flex v-if="selectedConversation.tags?.length" size="small" :wrap="false">
+          <n-text depth="3" class="info-label">群标签</n-text>
+          <n-text>{{ selectedConversation.tags.join('、') }}</n-text>
+        </n-flex>
+        <n-flex v-if="selectedConversation.fingerMemo" vertical size="small">
+          <n-text depth="3">群简介</n-text>
+          <n-text class="info-memo">{{ selectedConversation.fingerMemo }}</n-text>
+        </n-flex>
+        <n-text depth="3" class="info-note">
+          群资料只有官方 QQ 的「白名单机器人」才拿得到；拿不到时这里只显示已知信息。
+        </n-text>
+      </n-flex>
+      <template #footer>
+        <n-flex justify="end">
+          <n-button size="small" @click="infoVisible = false">关闭</n-button>
+        </n-flex>
+      </template>
+    </n-modal>
   </main>
 </template>
 
@@ -352,15 +484,19 @@ import { useMessage } from 'naive-ui';
 import PageHeader from '@/components/shared/PageHeader.vue';
 import ListEmptyState from '@/components/shared/ListEmptyState.vue';
 import { notifyError } from '@/features/feedback/notifyError';
+import { copyText } from '@/features/clipboard/copyText';
 import {
   fetchChatConsoleConversations,
   fetchChatConsoleMessages,
+  fetchChatConsoleStorage,
   markChatConsoleRead,
   muteChatConsoleMember,
   pinChatConsoleConversation,
+  purgeChatConsole,
   recallChatConsoleMessage,
   refreshChatConsoleGroupInfo,
   renameChatConsoleConversation,
+  saveChatConsoleRetention,
   searchChatConsole,
   sendChatConsoleMessage,
   uploadChatConsoleFile,
@@ -369,6 +505,7 @@ import {
   type ChatConsoleMessage,
   type ChatConsoleQuote,
   type ChatConsoleSearchMessage,
+  type ChatConsoleStorage,
 } from '@/api/chatConsole';
 import {
   conversationLabel,
@@ -381,6 +518,8 @@ import {
   chatConsoleAvatarFallback,
   chatConsoleMediaLabel,
   chatConsoleMediaURL,
+  chatConsoleQQGroupAvatarURL,
+  chatConsoleQQUserAvatarURL,
   isChatConsoleImage,
   isChatConsoleSafeLink,
 } from '@/features/chatConsole/media';
@@ -397,6 +536,8 @@ const MESSAGE_PAGE_SIZE = 50;
 const CONVERSATION_POLL_MS = 5000;
 const MESSAGE_POLL_MS = 3000;
 const SEARCH_DEBOUNCE_MS = 300;
+/** 单条消息长度上限，和旧 UI 的计数一致（官方文本消息限制在 1500 字以内比较安全）。 */
+const DRAFT_MAX_LEN = 1500;
 
 const token = computed(() => auth.token);
 
@@ -426,6 +567,18 @@ const renameVisible = ref(false);
 const renameDraft = ref('');
 const renaming = ref(false);
 const renameKey = ref('');
+
+// 存储面板：保留天数 / 每个会话占用 / 一键清空（旧 UI 有、新 UI 之前漏了）
+const storageVisible = ref(false);
+const storageLoading = ref(false);
+const storage = ref<ChatConsoleStorage>({ totalBytes: 0, retentionDays: 0, conversations: [] });
+const retentionDraft = ref(0);
+const retentionSaving = ref(false);
+const purgingKey = ref('');
+const purgingAll = ref(false);
+
+// 会话资料弹窗（旧 UI 的「资料」按钮）
+const infoVisible = ref(false);
 
 let convTimer: number | undefined;
 let msgTimer: number | undefined;
@@ -467,6 +620,26 @@ const streamTag = computed(() => {
 
 function avatarSrc(raw: string | undefined): string {
   return chatConsoleMediaURL(raw, token.value);
+}
+
+/**
+ * 会话头像：后端只会给官方 QQ 的私聊算 `avatarUrl`（openid 拼出来的地址），
+ * 群会话和 OneBot 之类平台的会话都没有。这些会话如果有真实群号/QQ 号（`uin`），
+ * 就用 qlogo 的群头像/用户头像接口补一个，否则界面上永远只有「名字首字」。
+ */
+function conversationAvatarSrc(conv: ChatConsoleConversation): string {
+  if (conv.avatarUrl) return avatarSrc(conv.avatarUrl);
+  const raw =
+    conv.kind === 'group'
+      ? chatConsoleQQGroupAvatarURL(conv.uin)
+      : chatConsoleQQUserAvatarURL(conv.uin);
+  return avatarSrc(raw);
+}
+
+/** 消息发送者头像：官方 QQ 用 openid 算好的地址，其它平台按发送者 QQ 号补。 */
+function senderAvatarSrc(item: ChatConsoleMessage): string {
+  if (item.avatarUrl) return avatarSrc(item.avatarUrl);
+  return avatarSrc(chatConsoleQQUserAvatarURL(item.senderId));
 }
 
 function mediaSrc(raw: string | undefined): string {
@@ -777,8 +950,105 @@ function scheduleRefreshConversations() {
   }, 500);
 }
 
-function handleStreamEvent(event: ChatConsoleEvent) {
-  if (event.type === 'conversation' && event.conversation) {
+/** 打开存储面板并拉一次占用统计。 */
+async function openStorage() {  storageVisible.value = true;
+  await reloadStorage();
+}
+
+async function reloadStorage() {
+  storageLoading.value = true;
+  try {
+    storage.value = await fetchChatConsoleStorage();
+    retentionDraft.value = storage.value.retentionDays;
+  } catch (error) {
+    notifyError(error, message, '读取存储占用失败');
+  } finally {
+    storageLoading.value = false;
+  }
+}
+
+async function saveRetention() {
+  retentionSaving.value = true;
+  try {
+    const days = await saveChatConsoleRetention(Math.max(0, Math.trunc(retentionDraft.value) || 0));
+    storage.value = { ...storage.value, retentionDays: days };
+    retentionDraft.value = days;
+    message.success(days > 0 ? `已设为保留 ${days} 天` : '已设为永久保留');
+  } catch (error) {
+    notifyError(error, message, '保存保留天数失败');
+  } finally {
+    retentionSaving.value = false;
+  }
+}
+
+async function purgeConversation(item: { key: string; name: string }) {
+  purgingKey.value = item.key;
+  try {
+    await purgeChatConsole({ key: item.key });
+    message.success(`已清空 ${item.name || item.key} 的历史`);
+    await reloadStorage();
+    if (item.key === selectedKey.value) {
+      messages.value = [];
+      hasMore.value = false;
+    }
+    await refreshConversations();
+  } catch (error) {
+    notifyError(error, message, '清空失败');
+  } finally {
+    purgingKey.value = '';
+  }
+}
+
+async function purgeAllConversations() {
+  purgingAll.value = true;
+  try {
+    await purgeChatConsole({ all: true });
+    message.success('已清空全部会话历史');
+    messages.value = [];
+    hasMore.value = false;
+    await reloadStorage();
+    await refreshConversations();
+  } catch (error) {
+    notifyError(error, message, '清空失败');
+  } finally {
+    purgingAll.value = false;
+  }
+}
+
+/** 字节数转成好读的单位。 */
+function formatBytes(bytes: number): string {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
+
+/** 复制当前会话 ID（排查问题时骰主要贴给别人的就是它）。 */
+async function copyConversationID() {
+  const conv = selectedConversation.value;
+  if (!conv) return;
+  try {
+    await copyText(conv.key);
+    message.success('会话 ID 已复制');
+  } catch (error) {
+    notifyError(error, message, '复制失败');
+  }
+}
+
+/** 在光标处插入 @ 片段；官方 QQ 的 openid 需要骰主自己贴。 */
+function insertAtPlaceholder() {
+  const snippet = '[CQ:at,qq=]';
+  const text = draft.value ?? '';
+  const at = text.length ? text.length : 0;
+  draft.value = `${text.slice(0, at)}${snippet}`;
+}
+
+function handleStreamEvent(event: ChatConsoleEvent) {  if (event.type === 'conversation' && event.conversation) {
     upsertConversation(event.conversation);
     return;
   }
@@ -1055,5 +1325,59 @@ onUnmounted(() => {
 
 .rename-dialog {
   width: min(520px, calc(100vw - 2rem));
+}
+
+.storage-dialog {
+  width: min(620px, calc(100vw - 2rem));
+}
+
+.storage-summary {
+  font-size: 0.9rem;
+}
+
+.storage-row {
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.4rem;
+  background: var(--sd-hover-color, rgba(128, 128, 128, 0.08));
+}
+
+.storage-name {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-kind {
+  font-size: 0.78rem;
+}
+
+.info-dialog {
+  width: min(560px, calc(100vw - 2rem));
+}
+
+.info-label {
+  flex: 0 0 5.5rem;
+}
+
+.info-value {
+  word-break: break-all;
+}
+
+.info-memo {
+  white-space: pre-wrap;
+}
+
+.info-note {
+  font-size: 0.78rem;
+}
+
+.composer-count,
+.composer-note {
+  font-size: 0.78rem;
+}
+
+.composer-note {
+  opacity: 0.75;
 }
 </style>

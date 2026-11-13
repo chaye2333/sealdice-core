@@ -3,6 +3,9 @@ import {
   chatConsoleAvatarFallback,
   chatConsoleMediaLabel,
   chatConsoleMediaURL,
+  chatConsoleQQGroupAvatarURL,
+  chatConsoleQQNumber,
+  chatConsoleQQUserAvatarURL,
   isChatConsoleImage,
   isChatConsoleSafeLink,
 } from './media';
@@ -46,5 +49,24 @@ describe('聊天控制台媒体', () => {
     expect(isChatConsoleSafeLink('//evil.example.com/a')).toBe(false);
     expect(isChatConsoleSafeLink('')).toBe(false);
     expect(isChatConsoleSafeLink(undefined)).toBe(false);
+  });
+
+  it('只有真实 QQ 号才拼头像，openid 之类一律放弃', () => {
+    expect(chatConsoleQQNumber('123456789')).toBe('123456789');
+    expect(chatConsoleQQNumber(' 12345 ')).toBe('12345');
+    expect(chatConsoleQQNumber('ABCDEF0123456789')).toBe('');
+    expect(chatConsoleQQNumber('123')).toBe('');
+    expect(chatConsoleQQNumber(undefined)).toBe('');
+  });
+
+  it('群头像 / 用户头像地址来自 qlogo（媒体代理放行 .qlogo.cn）', () => {
+    expect(chatConsoleQQGroupAvatarURL('123456789')).toBe(
+      'https://p.qlogo.cn/gh/123456789/123456789/0'
+    );
+    expect(chatConsoleQQUserAvatarURL('123456789')).toBe(
+      'https://q1.qlogo.cn/g?b=qq&nk=123456789&s=140'
+    );
+    expect(chatConsoleQQGroupAvatarURL('openid-abc')).toBe('');
+    expect(chatConsoleQQUserAvatarURL(undefined)).toBe('');
   });
 });
