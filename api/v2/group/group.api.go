@@ -75,6 +75,10 @@ func (b *GroupService) GetSupportedPlatforms() []string {
 func (b *GroupService) visibleGroups() []*dice.GroupInfo {
 	resRaw := b.dice.ImSession.ServiceAtNew.ToList()
 	res := make([]*dice.GroupInfo, 0, len(resRaw))
+	// 官方 QQ 群的群名与资料（简介/分类/标签）只在 /v2/groups/{id}/info 里给，
+	// dice 层的 GroupName 通常为空。这里只用聊天控制台已经拿到的缓存回填 ——
+	// 本接口是公开的（RegisterRoutes），不能因为有人刷新列表就去打官方接口。
+	var officialGroupConsoleInfo map[string]*dice.ChatConsoleConversation
 	for _, g := range resRaw {
 		if g == nil || strings.HasPrefix(g.GroupID, "PG-") {
 			continue
@@ -92,6 +96,21 @@ func (b *GroupService) visibleGroups() []*dice.GroupInfo {
 		if b.dice.DBOperator != nil {
 			if count, err := diceservice.GroupPlayerNumGet(b.dice.DBOperator, g.GroupID); err == nil {
 				g.TmpPlayerNum = count
+			}
+		}
+		if strings.HasPrefix(g.GroupID, "OpenQQ-Group:") {
+			if _, groupOpenID, ok := dice.ParseOfficialQQGroupID(g.GroupID); ok {
+				if officialGroupConsoleInfo == nil {
+					officialGroupConsoleInfo = dice.OfficialQQGroupConsoleInfoByTarget(b.dice)
+				}
+				if conv := officialGroupConsoleInfo[groupOpenID]; conv != nil {
+					g.TmpFingerMemo = conv.FingerMemo
+					g.TmpClassText = conv.ClassText
+					g.TmpGroupTags = conv.Tags
+				}
+			}
+			if g.GroupName == "" {
+				g.GroupName = dice.OfficialQQGroupDisplayName(b.dice, g.GroupID)
 			}
 		}
 		res = append(res, g)

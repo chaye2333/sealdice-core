@@ -73,6 +73,22 @@
                 <n-switch v-model:value="group.active" @update:value="markGroupChanged(group)" />
                 <n-text class="group-id" tag="strong">{{ group.groupId }}</n-text>
                 <n-text>「{{ group.groupName || '未获取到' }}」</n-text>
+                <n-tag
+                  v-if="isGroupBanned(group.groupId)"
+                  type="error"
+                  size="small"
+                  :bordered="false"
+                >
+                  已拉黑
+                </n-tag>
+                <n-tag
+                  v-else-if="groupBanTag(group.groupId)"
+                  type="warning"
+                  size="small"
+                  :bordered="false"
+                >
+                  {{ groupBanTag(group.groupId) }}
+                </n-tag>
               </n-flex>
             </template>
 
@@ -92,6 +108,24 @@
 
             <template #action>
               <n-flex size="small" wrap justify="end">
+                <n-popconfirm @positive-click="toggleGroupBan(group)">
+                  <template #trigger>
+                    <n-button
+                      size="small"
+                      :type="isGroupBanned(group.groupId) ? 'warning' : 'error'"
+                      secondary
+                      :loading="isBanBusy(group.groupId)"
+                      :disabled="isBanBusy(group.groupId)"
+                    >
+                      {{ isGroupBanned(group.groupId) ? '解除拉黑' : '拉黑' }}
+                    </n-button>
+                  </template>
+                  {{
+                    isGroupBanned(group.groupId)
+                      ? '解除后机器人会重新响应这个群。'
+                      : '拉黑后机器人不再响应这个群的任何消息，可在「黑白名单」里复核。'
+                  }}
+                </n-popconfirm>
                 <n-button
                   v-for="diceId in groupDiceIDs(group)"
                   :key="diceId"
@@ -137,6 +171,24 @@
                   </n-tag>
                 </n-space>
                 <n-text v-else depth="3">未知</n-text>
+              </n-descriptions-item>
+              <n-descriptions-item v-if="group.tmpClassText" label="群分类">
+                {{ group.tmpClassText }}
+              </n-descriptions-item>
+              <n-descriptions-item v-if="group.tmpGroupTags?.length" label="群标签" :span="3">
+                <n-space size="small" wrap>
+                  <n-tag
+                    v-for="tag in group.tmpGroupTags"
+                    :key="tag"
+                    size="small"
+                    :bordered="false"
+                  >
+                    {{ tag }}
+                  </n-tag>
+                </n-space>
+              </n-descriptions-item>
+              <n-descriptions-item v-if="group.tmpFingerMemo" label="群简介" :span="3">
+                <span class="group-finger-memo">{{ group.tmpFingerMemo }}</span>
               </n-descriptions-item>
             </n-descriptions>
           </FoldableCard>
@@ -240,6 +292,9 @@ import { useMessage } from 'naive-ui';
 import { createProSearchForm, type ProSearchFormColumns } from 'pro-naive-ui';
 import {
   getSdApiV2GroupPlatformsOptions,
+  postSdApiV2BanAdd,
+  postSdApiV2BanDelete,
+  postSdApiV2BanList,
   postSdApiV2GroupBatchNotify,
   postSdApiV2GroupBatchQuit,
   postSdApiV2GroupList,
@@ -255,8 +310,16 @@ import ListPanel from '@/components/shared/ListPanel.vue';
 import ListEmptyState from '@/components/shared/ListEmptyState.vue';
 import { shouldShowListPagination } from '@/components/shared/listPagination';
 
-import { readGroupQuitDefaultText, writeGroupQuitDefaultText } from '@/features/group/model';
-import { formatGroupQuitTarget, type GroupQuitTarget } from '@/features/group/model';
+import {
+  BAN_RANK_BANNED,
+  buildGroupBanRankIndex,
+  formatGroupQuitTarget,
+  groupBanRankLabel,
+  isGroupBannedRank,
+  readGroupQuitDefaultText,
+  writeGroupQuitDefaultText,
+  type GroupQuitTarget,
+} from '@/features/group/model';
 import { cloneSearchFormValues } from '@/features/searchForm/viewModel';
 import TipBox from '@/components/shared/TipBox.vue';
 import { notifyError } from '@/features/feedback/notifyError';
@@ -308,6 +371,10 @@ const groups = ref<GroupRow[]>([]);
 const total = ref(0);
 const listLoading = ref(false);
 const savingGroupIDs = ref(new Set<string>());
+
+// 黑白名单：groupId → rank（-30 拉黑 / -10 警告 / 30 信任）
+const groupBanRanks = ref<Map<string, number>>(new Map());
+const banBusyGroupIDs = ref(new Set<string>());
 
 const notifyDialogVisible = ref(false);
 const notifyText = ref('');
@@ -433,6 +500,72 @@ function activeExtNames(group: GroupInfo): string[] {
 
 function recentText(timestamp: number): string {
   return timestamp ? dayjs.unix(timestamp).fromNow() : '从未';
+}
+
+function groupBanRank(groupId: string): number | undefined {
+  return groupBanRanks.value.get(groupId);
+}
+
+function isGroupBanned(groupId: string): boolean {
+  return isGroupBannedRank(groupBanRank(groupId));
+}
+
+/** 非拉黑档位的标签文案；已拉黑由单独的红色标签展示。 */
+function groupBanTag(groupId: string): string {
+  if (isGroupBanned(groupId)) return '';
+  return groupBanRankLabel(groupBanRank(groupId));
+}
+
+function isBanBusy(groupId: string): boolean {
+  return banBusyGroupIDs.value.has(groupId);
+}
+
+/**
+ * 拉黑名单只在打开页面时拉一次（500 条足够覆盖常见规模）。
+ * 拉不到不影响群列表本身，所以失败静默处理。
+ */
+async function loadGroupBans() {
+  try {
+    const { data } = await postSdApiV2BanList({
+      body: { page: 1, pageSize: 500 },
+      throwOnError: true,
+    });
+    groupBanRanks.value = buildGroupBanRankIndex(data.item.list);
+  } catch {
+    groupBanRanks.value = new Map();
+  }
+}
+
+/** 一键拉黑 / 解除拉黑：黑名单里的群机器人不会再响应。 */
+async function toggleGroupBan(group: GroupRow) {
+  const groupId = group.groupId;
+  if (!groupId || isBanBusy(groupId)) return;
+  const banned = isGroupBanned(groupId);
+  banBusyGroupIDs.value = new Set(banBusyGroupIDs.value).add(groupId);
+  try {
+    if (banned) {
+      await postSdApiV2BanDelete({ body: { id: groupId }, throwOnError: true });
+      message.success(`已解除拉黑「${group.groupName || groupId}」`);
+    } else {
+      await postSdApiV2BanAdd({
+        body: {
+          id: groupId,
+          rank: BAN_RANK_BANNED,
+          name: group.groupName || groupId,
+          reason: '骰主后台设置',
+        },
+        throwOnError: true,
+      });
+      message.success(`已拉黑「${group.groupName || groupId}」`);
+    }
+    await loadGroupBans();
+  } catch (error) {
+    reportOperationError(banned ? '解除拉黑失败' : '拉黑失败', error);
+  } finally {
+    const next = new Set(banBusyGroupIDs.value);
+    next.delete(groupId);
+    banBusyGroupIDs.value = next;
+  }
 }
 
 async function searchGroups() {
@@ -640,7 +773,7 @@ async function submitNotify() {
 }
 
 onMounted(async () => {
-  await searchGroups();
+  await Promise.all([searchGroups(), loadGroupBans()]);
 });
 </script>
 
@@ -667,6 +800,10 @@ onMounted(async () => {
 .group-pagination-block {
   display: flex;
   justify-content: flex-end;
+}
+
+.group-finger-memo {
+  white-space: pre-wrap;
 }
 
 .group-dialog {
