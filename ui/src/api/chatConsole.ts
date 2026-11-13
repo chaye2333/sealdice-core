@@ -40,6 +40,17 @@ export type ChatConsoleMedia = {
   name?: string;
 };
 
+/** 结构化卡片（message_type=3 的 ark_data），前端渲染成可点的链接卡片。 */
+export type ChatConsoleCard = {
+  arkName?: string;
+  arkType?: string;
+  title?: string;
+  desc?: string;
+  source?: string;
+  url?: string;
+  preview?: string;
+};
+
 export type ChatConsoleQuote = {
   sender: string;
   text: string;
@@ -58,7 +69,10 @@ export type ChatConsoleMessage = {
   avatarUrl?: string;
   text: string;
   media?: ChatConsoleMedia[];
+  card?: ChatConsoleCard;
   msgId?: string;
+  /** message_scene.ext 的 REFIDX_…，引用用户消息时后端会优先用它 */
+  msgIdx?: string;
   quote?: ChatConsoleQuote;
   recalled?: boolean;
 };

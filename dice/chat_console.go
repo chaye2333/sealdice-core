@@ -80,6 +80,18 @@ type ChatConsoleQuote struct {
 	MsgID  string `json:"msgId,omitempty"`
 }
 
+// ChatConsoleCard 是结构化卡片消息（message_type=3 的 ark_data）里前端要用的字段。
+// Text 里仍会保留一份可读文本（搜索 / 纯文本场景），这里只补"可点的链接卡片"所需结构。
+type ChatConsoleCard struct {
+	ArkName string `json:"arkName,omitempty"`
+	ArkType string `json:"arkType,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Desc    string `json:"desc,omitempty"`
+	Source  string `json:"source,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Preview string `json:"preview,omitempty"`
+}
+
 // ChatConsoleMessage 一条消息。Text 保留原始文本（可能含 CQ 码），
 // Media 是从文本里解析出来的附件，方便前端直接渲染。
 type ChatConsoleMessage struct {
@@ -95,8 +107,12 @@ type ChatConsoleMessage struct {
 	AvatarURL string             `json:"avatarUrl,omitempty"`
 	Text      string             `json:"text"`
 	Media     []ChatConsoleMedia `json:"media,omitempty"`
+	Card      *ChatConsoleCard   `json:"card,omitempty"`
 	MsgID     string             `json:"msgId,omitempty"`
-	Quote     *ChatConsoleQuote  `json:"quote,omitempty"`
+	// MsgIdx 是 message_scene.ext 里的 REFIDX_…，引用**用户消息**时必须用它做
+	// message_reference.message_id（ROBOT1.0_… 的 id 只能用于机器人自己的消息）。
+	MsgIdx string            `json:"msgIdx,omitempty"`
+	Quote  *ChatConsoleQuote `json:"quote,omitempty"`
 	// Recalled 表示骰主已经在控制台里撤回了这条消息。
 	Recalled   bool  `json:"recalled,omitempty"`
 	RecalledAt int64 `json:"recalledAt,omitempty"`
@@ -169,6 +185,10 @@ type ChatConsoleRecord struct {
 	// 入站消息现在能拿到附件元数据（语音还有转码后的 WAV 地址），
 	// 这些信息没法只靠 CQ 码还原。
 	Media []ChatConsoleMedia
+	// Card 是结构化卡片（message_type=3）的原始字段，供前端渲染成可点卡片。
+	Card *ChatConsoleCard
+	// MsgIdx 是 message_scene.ext 的 msg_idx（REFIDX_…），引用用户消息时用它。
+	MsgIdx string
 }
 
 // ChatConsoleUsage 单个会话的磁盘占用（SQLite 里按列长度估算）。
@@ -225,6 +245,8 @@ type chatConsoleMessageRow struct {
 	SenderOpenID string `gorm:"column:sender_open_id"`
 	Text         string `gorm:"column:text"`
 	Media        string `gorm:"column:media"`
+	Card         string `gorm:"column:card"`
+	MsgIdx       string `gorm:"column:msg_idx"`
 	Quote        string `gorm:"column:quote"`
 	Recalled     bool   `gorm:"column:recalled;not null;default:false"`
 	RecalledAt   int64  `gorm:"column:recalled_at;not null;default:0"`
@@ -402,6 +424,17 @@ func chatConsoleMediaJSON(media []ChatConsoleMedia) string {
 	return string(raw)
 }
 
+func chatConsoleCardJSON(card *ChatConsoleCard) string {
+	if card == nil {
+		return ""
+	}
+	raw, err := json.Marshal(card)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
 func chatConsoleQuoteJSON(quote *ChatConsoleQuote) string {
 	if quote == nil {
 		return ""
@@ -417,6 +450,7 @@ func chatConsoleRowToMessage(row chatConsoleMessageRow) ChatConsoleMessage {
 	msg := ChatConsoleMessage{
 		ID:           row.ID,
 		MsgID:        row.MsgID,
+		MsgIdx:       row.MsgIdx,
 		TS:           row.TS,
 		Dir:          row.Dir,
 		Source:       row.Source,
@@ -429,6 +463,12 @@ func chatConsoleRowToMessage(row chatConsoleMessageRow) ChatConsoleMessage {
 	}
 	if row.Media != "" {
 		_ = json.Unmarshal([]byte(row.Media), &msg.Media)
+	}
+	if row.Card != "" {
+		var card ChatConsoleCard
+		if err := json.Unmarshal([]byte(row.Card), &card); err == nil {
+			msg.Card = &card
+		}
 	}
 	if row.Quote != "" {
 		var quote ChatConsoleQuote
@@ -615,6 +655,7 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 	msg := ChatConsoleMessage{
 		ID:           rec.MessageID,
 		MsgID:        rec.MessageID,
+		MsgIdx:       rec.MsgIdx,
 		TS:           rec.TS,
 		Dir:          rec.Dir,
 		Source:       rec.Source,
@@ -625,6 +666,7 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 		// Media 显式给出时优先用它（附件元数据 / 语音 WAV 地址只有它带得动），
 		// 否则退回解析文本里的 CQ 码。
 		Media: chatConsoleRecordMedia(rec.Media, text),
+		Card:  rec.Card,
 		Quote: rec.Quote,
 	}
 	if msg.ID == "" {
@@ -634,6 +676,7 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 	row := chatConsoleMessageRow{
 		ID:           msg.ID,
 		MsgID:        msg.MsgID,
+		MsgIdx:       msg.MsgIdx,
 		ConvKey:      key,
 		TS:           msg.TS,
 		Dir:          msg.Dir,
@@ -643,6 +686,7 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 		SenderOpenID: msg.SenderOpenID,
 		Text:         msg.Text,
 		Media:        chatConsoleMediaJSON(msg.Media),
+		Card:         chatConsoleCardJSON(msg.Card),
 		Quote:        chatConsoleQuoteJSON(msg.Quote),
 	}
 
@@ -1506,6 +1550,7 @@ func (s *ChatConsoleStore) migrateLegacyJSONLLocked() {
 				batch = append(batch, chatConsoleMessageRow{
 					ID:           msg.ID,
 					MsgID:        msg.MsgID,
+					MsgIdx:       msg.MsgIdx,
 					ConvKey:      key,
 					TS:           msg.TS,
 					Dir:          msg.Dir,
@@ -1515,6 +1560,7 @@ func (s *ChatConsoleStore) migrateLegacyJSONLLocked() {
 					SenderOpenID: msg.SenderOpenID,
 					Text:         msg.Text,
 					Media:        chatConsoleMediaJSON(msg.Media),
+					Card:         chatConsoleCardJSON(msg.Card),
 					Quote:        chatConsoleQuoteJSON(msg.Quote),
 					Recalled:     msg.Recalled,
 					RecalledAt:   msg.RecalledAt,

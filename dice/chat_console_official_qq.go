@@ -88,6 +88,8 @@ func (pa *PlatformAdapterOfficialQQ) recordChatConsoleInbound(
 		Source:       chatConsoleSourceUser,
 		Text:         chatConsoleInboundText(msg.Message, payload, event),
 		Media:        chatConsoleInboundMedia(payload, event),
+		Card:         chatConsoleInboundCard(payload),
+		MsgIdx:       chatConsoleInboundMsgIdx(payload),
 		Quote:        chatConsoleInboundQuote(payload),
 		MessageID:    rawID,
 		TS:           msg.Time,
@@ -200,6 +202,40 @@ func chatConsoleArkText(ark *dto.ARKData, existing string) string {
 		return "" // 只有类型名，没有实际内容就别刷屏
 	}
 	return strings.Join(lines, "\n")
+}
+
+// chatConsoleInboundMsgIdx 取 message_scene.ext 里的 msg_idx（REFIDX_…）。
+// 引用**用户消息**时必须用它做 message_reference.message_id，不能用 ROBOT1.0_ 的 id。
+func chatConsoleInboundMsgIdx(payload *dto.Message) string {
+	if payload == nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.MessageScene.MsgIdx())
+}
+
+// chatConsoleInboundCard 还原结构化卡片（message_type=3）的原始字段，
+// 供前端渲染成可点的链接卡片；文本里那份可读摘要仍然保留，用于搜索与纯文本场景。
+func chatConsoleInboundCard(payload *dto.Message) *ChatConsoleCard {
+	if payload == nil || payload.ARKData == nil {
+		return nil
+	}
+	ark := payload.ARKData
+	card := &ChatConsoleCard{
+		ArkName: strings.TrimSpace(ark.ArkName),
+		ArkType: strings.TrimSpace(ark.ArkType),
+		Title:   strings.TrimSpace(ark.Fields["title"]),
+		Desc:    strings.TrimSpace(ark.Fields["desc"]),
+		Source:  strings.TrimSpace(ark.Fields["source"]),
+		URL:     strings.TrimSpace(ark.Fields["jump_url"]),
+		Preview: strings.TrimSpace(ark.Fields["preview"]),
+	}
+	if card.Title == "" {
+		card.Title = strings.TrimSpace(ark.Prompt)
+	}
+	if card.Title == "" && card.Desc == "" && card.URL == "" && card.ArkName == "" {
+		return nil
+	}
+	return card
 }
 
 // chatConsoleInboundQuote 还原引用消息（message_type=103）的被引用内容。
@@ -703,7 +739,37 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleResolveQuote(kind, targetID stri
 	if strings.TrimSpace(out.Text) == "" {
 		out.Text = msg.Text
 	}
-	return &out, msg.MsgID
+	// 关键：引用**用户消息**要用 message_scene.ext 的 msg_idx（REFIDX_…），
+	// ROBOT1.0_ 开头的 id 只能用于机器人自己的消息；老数据没有 msg_idx 时退回 id。
+	refID := strings.TrimSpace(msg.MsgIdx)
+	if refID == "" {
+		refID = msg.MsgID
+	}
+	return &out, refID
+}
+
+// chatConsoleReferenceID 把控制台里的消息 ID 翻译成 message_reference 能用的 ID。
+// 用户消息 → REFIDX_…（msg_idx）；机器人自己的消息 / 查不到 → 原 ID。
+func (pa *PlatformAdapterOfficialQQ) chatConsoleReferenceID(kind, targetID, msgID string) string {
+	msgID = strings.TrimSpace(msgID)
+	if msgID == "" {
+		return ""
+	}
+	store := pa.chatConsoleStore()
+	if store == nil {
+		return msgID
+	}
+	msg := store.Find(chatConsoleKey(kind, targetID), msgID)
+	if msg == nil {
+		return msgID
+	}
+	if msg.Dir == chatConsoleDirIn && strings.TrimSpace(msg.MsgIdx) != "" {
+		return strings.TrimSpace(msg.MsgIdx)
+	}
+	if strings.TrimSpace(msg.MsgID) != "" {
+		return strings.TrimSpace(msg.MsgID)
+	}
+	return msgID
 }
 
 // chatConsoleAtDisplayName 把 openid 换回昵称，取最近发言过的那个人。
@@ -785,7 +851,7 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleBuildSend(kind, targetID, text s
 	// 界面上的「回复」：只有最近收到、还在被动回复窗口内的消息才能挂 msg_id
 	quote, replyID := pa.chatConsoleResolveQuote(kind, targetID, opts.Quote)
 	if cqReplyID != "" {
-		replyID = cqReplyID
+		replyID = pa.chatConsoleReferenceID(kind, targetID, cqReplyID)
 		quote = pa.chatConsoleQuoteFromMsgID(kind, targetID, cqReplyID)
 	}
 

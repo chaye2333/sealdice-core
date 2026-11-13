@@ -209,7 +209,41 @@
                     <div v-if="item.quote" class="msg-quote">
                       <n-text depth="3">{{ item.quote.sender }}：{{ item.quote.text }}</n-text>
                     </div>
-                    <n-text v-if="item.text" class="msg-text">{{ item.text }}</n-text>
+                    <div v-if="item.card" class="msg-card">
+                      <img
+                        v-if="item.card.preview"
+                        :src="mediaSrc(item.card.preview)"
+                        class="msg-card-preview"
+                        alt=""
+                        loading="lazy"
+                      />
+                      <n-flex vertical size="small" class="msg-card-body">
+                        <n-text strong class="msg-card-title">
+                          {{ item.card.title || item.card.arkName || '卡片消息' }}
+                        </n-text>
+                        <n-text v-if="item.card.desc" depth="3" class="msg-card-desc">
+                          {{ item.card.desc }}
+                        </n-text>
+                        <n-flex align="center" size="small" :wrap="false">
+                          <n-tag v-if="item.card.source" size="small" :bordered="false">
+                            {{ item.card.source }}
+                          </n-tag>
+                          <n-text v-if="item.card.arkName" depth="3" class="msg-card-kind">
+                            {{ item.card.arkName }}
+                          </n-text>
+                          <a
+                            v-if="item.card.url"
+                            :href="item.card.url"
+                            target="_blank"
+                            rel="noreferrer"
+                            class="msg-card-link"
+                          >
+                            打开
+                          </a>
+                        </n-flex>
+                      </n-flex>
+                    </div>
+                    <n-text v-if="showMessageText(item)" class="msg-text">{{ item.text }}</n-text>
                     <template v-for="(media, index) in item.media ?? []" :key="index">
                       <n-image
                         v-if="isChatConsoleImage(media.kind)"
@@ -438,6 +472,16 @@ function mediaSrc(raw: string | undefined): string {
   return chatConsoleMediaURL(raw, token.value);
 }
 
+/**
+ * 有结构化卡片时，正文里那份「[卡片消息] …」是后端拼出来的可读副本，
+ * 再显示一遍就重复了；只有正文里还有卡片之外的内容时才显示。
+ */
+function showMessageText(item: ChatConsoleMessage): boolean {
+  if (!item.text) return false;
+  if (!item.card) return true;
+  return !item.text.startsWith('[卡片消息]');
+}
+
 function isNearBottom(): boolean {
   const el = messagePane.value;
   if (!el) return true;
@@ -575,11 +619,12 @@ async function send() {
   if (!text || !key || sending.value) return;
   sending.value = true;
   try {
-    const quote: ChatConsoleQuote | undefined = quoteTarget.value
+      const quote: ChatConsoleQuote | undefined = quoteTarget.value
       ? {
           sender: quoteTarget.value.senderName,
           text: quoteTarget.value.text,
-          msgId: quoteTarget.value.msgId,
+          // 后端会把用户消息翻译成 REFIDX_…；这里给的是控制台内的消息 ID
+          msgId: quoteTarget.value.msgId || quoteTarget.value.msgIdx,
         }
       : undefined;
     const sent = await sendChatConsoleMessage(key, text, quote);
@@ -916,6 +961,52 @@ onUnmounted(() => {
   display: block;
   margin-top: 0.3rem;
   max-width: 100%;
+}
+
+/* 结构化卡片（ARK）：预览图 + 标题/描述/来源 + 「打开」 */
+.msg-card {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+  padding: 0.4rem;
+  border-radius: 0.5rem;
+  background: rgba(128, 128, 128, 0.12);
+  max-width: min(28rem, 100%);
+}
+
+.msg-card-preview {
+  width: 4.5rem;
+  height: 4.5rem;
+  object-fit: cover;
+  border-radius: 0.35rem;
+  flex: none;
+}
+
+.msg-card-body {
+  min-width: 0;
+}
+
+.msg-card-title {
+  word-break: break-word;
+}
+
+.msg-card-desc {
+  font-size: 0.85rem;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.msg-card-kind {
+  font-size: 0.75rem;
+}
+
+.msg-card-link {
+  font-size: 0.8rem;
+  color: var(--primary-color, #63e2b7);
 }
 
 .msg-actions {

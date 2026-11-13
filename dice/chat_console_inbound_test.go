@@ -3,6 +3,7 @@ package dice //nolint:testpackage
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sealdice/botgo/dto"
 )
@@ -153,5 +154,129 @@ func TestChatConsoleRecordMediaPrefersExplicit(t *testing.T) {
 	got = chatConsoleRecordMedia(nil, "[CQ:image,file=https://x/a.jpg]")
 	if len(got) != 1 || got[0].Kind != "image" {
 		t.Fatalf("cq fallback failed, got %#v", got)
+	}
+}
+
+func TestChatConsoleInboundCard(t *testing.T) {
+	payload := &dto.Message{
+		MessageType: 3,
+		ARKData: &dto.ARKData{
+			ArkType: "miniapp",
+			ArkName: "小程序",
+			Prompt:  "摘要文本",
+			Fields: map[string]string{
+				"title":    "标题",
+				"desc":     "描述",
+				"source":   "来源",
+				"jump_url": "https://example.com/a",
+				"preview":  "https://example.com/p.png",
+			},
+		},
+	}
+	card := chatConsoleInboundCard(payload)
+	if card == nil {
+		t.Fatal("card is nil")
+	}
+	if card.ArkName != "小程序" || card.Title != "标题" || card.Desc != "描述" ||
+		card.Source != "来源" || card.URL != "https://example.com/a" ||
+		card.Preview != "https://example.com/p.png" {
+		t.Fatalf("card = %#v", card)
+	}
+
+	// 没有 title 时用 prompt 兜底
+	noTitle := chatConsoleInboundCard(&dto.Message{ARKData: &dto.ARKData{Prompt: "只有摘要"}})
+	if noTitle == nil || noTitle.Title != "只有摘要" {
+		t.Fatalf("prompt fallback failed: %#v", noTitle)
+	}
+
+	// 什么都没有 → 不产生空卡片
+	if chatConsoleInboundCard(&dto.Message{}) != nil {
+		t.Fatal("empty ark should produce no card")
+	}
+	if chatConsoleInboundCard(&dto.Message{ARKData: &dto.ARKData{}}) != nil {
+		t.Fatal("blank ark should produce no card")
+	}
+}
+
+// TestChatConsoleQuoteUsesMsgIdx 锁定引用出站的取值规则：
+// 引用**用户消息**必须用 message_scene.ext 的 msg_idx（REFIDX_…），
+// 不能用 ROBOT1.0_ 开头的消息 id。
+func TestChatConsoleQuoteUsesMsgIdx(t *testing.T) {
+	pa, store, _ := newCQTestAdapter(t)
+	key := chatConsoleKey(chatConsoleKindGroup, "G1")
+
+	msg, err := store.Append(ChatConsoleRecord{
+		Kind: chatConsoleKindGroup, TargetID: "G1",
+		Dir: chatConsoleDirIn, Source: chatConsoleSourceUser,
+		SenderName: "小明", Text: "原始消息", MessageID: "ROBOT1.0_inbound",
+		MsgIdx: "REFIDX_inbound", TS: time.Now().Unix(),
+	})
+	if err != nil || msg == nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	_, refID := pa.chatConsoleResolveQuote(chatConsoleKindGroup, "G1", &ChatConsoleQuote{MsgID: msg.ID})
+	if refID != "REFIDX_inbound" {
+		t.Fatalf("quote ref = %q, want REFIDX_inbound", refID)
+	}
+
+	// 走 [CQ:reply,id=…] 的路径也要翻译成 REFIDX
+	if got := pa.chatConsoleReferenceID(chatConsoleKindGroup, "G1", msg.ID); got != "REFIDX_inbound" {
+		t.Fatalf("cq reply ref = %q, want REFIDX_inbound", got)
+	}
+	// 查不到的消息 ID 原样返回（可能是用户自己填的 REFIDX）
+	if got := pa.chatConsoleReferenceID(chatConsoleKindGroup, "G1", "REFIDX_pasted"); got != "REFIDX_pasted" {
+		t.Fatalf("unknown id = %q, want passthrough", got)
+	}
+
+	// 机器人自己的消息没有 msg_idx，退回 ROBOT1.0 id
+	outbound, err := store.Append(ChatConsoleRecord{
+		Kind: chatConsoleKindGroup, TargetID: "G1",
+		Dir: chatConsoleDirOut, Source: chatConsoleSourceBot,
+		SenderName: "骰子", Text: "我发的", MessageID: "ROBOT1.0_outbound",
+	})
+	if err != nil || outbound == nil {
+		t.Fatalf("append outbound: %v", err)
+	}
+	if got := pa.chatConsoleReferenceID(chatConsoleKindGroup, "G1", outbound.ID); got != "ROBOT1.0_outbound" {
+		t.Fatalf("outbound ref = %q, want ROBOT1.0_outbound", got)
+	}
+	_ = key
+}
+
+// TestChatConsoleCardAndMsgIdxRoundTrip 保证 msg_idx 与结构化卡片能落库并读回
+// （这两个字段是新加的列，老库靠 AutoMigrate 补上）。
+func TestChatConsoleCardAndMsgIdxRoundTrip(t *testing.T) {
+	s := newTestChatConsoleStore(t)
+
+	_, err := s.Append(ChatConsoleRecord{
+		Kind: chatConsoleKindGroup, TargetID: "G1",
+		Dir: chatConsoleDirIn, Source: chatConsoleSourceUser,
+		SenderName: "小明", Text: "[卡片消息] 小程序", MessageID: "m-card",
+		MsgIdx: "REFIDX_card",
+		Card: &ChatConsoleCard{
+			ArkName: "小程序",
+			Title:   "标题",
+			Desc:    "描述",
+			Source:  "来源",
+			URL:     "https://example.com/a",
+			Preview: "https://example.com/p.png",
+		},
+		TS: 1000,
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	msgs, _, err := s.Messages(chatConsoleKey(chatConsoleKindGroup, "G1"), 0, 10)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("messages = %d, err = %v", len(msgs), err)
+	}
+	got := msgs[0]
+	if got.MsgIdx != "REFIDX_card" {
+		t.Fatalf("msgIdx = %q", got.MsgIdx)
+	}
+	if got.Card == nil || got.Card.Title != "标题" || got.Card.URL != "https://example.com/a" {
+		t.Fatalf("card = %#v", got.Card)
 	}
 }
