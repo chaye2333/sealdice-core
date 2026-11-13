@@ -49,6 +49,7 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 | `intrange` | `for i := 0; i < n; i++` 被判可改 | `for i := range n`（Go 1.22+） |
 | 测试产物入库 | 跑完测试 `git add -A` 会把 `api/v2/deck/cache/`、`*.blocks` 提交上去，含本机绝对路径 `c:/users/...` | 提交前看 `git status`；误提交用 `git rm -r --cached <path>` 并补 `.gitignore` |
 | 缺 `static/v2ui/dist` | `go:embed all:v2ui` 编译失败 | 先 `npx -y pnpm@10.14.0 --dir ui run build:embed:prepared` |
+| `.dockerignore` 排掉 embed 目录 | GHCR 构建在 `go run . --gen-openapi` 阶段 exit 1：`pattern frontend: no matching files found`（`static/static.go` 的 `go:embed frontend` 一个文件都匹配不到） | 忽略规则只留占位页：`/static/frontend/*` + `!/static/frontend/index.html`；验证办法是用 `git archive HEAD` 解到临时目录，在里面跑一遍 `go run . --gen-openapi=./ui/openapi.json` 和 `go build .` |
 | 手改生成物 | 不要动 `ui/src/api/generated/`、`ui/openapi.json` | `npx -y pnpm@10.14.0 --dir ui run generate-api` |
 | Windows 无 gcc | 跑不了 `go test -race ./...`（CI 会跑） | 动过并发代码（全局 `dm.Dice`、store 的 `sync.Mutex`）时人工 review；本地 `go test -count=1` |
 | 只跑 `type-check` | `pnpm run type-check` 依赖 `vite build` 生成的自动导入声明，单独跑会漏报/误报 | 一律用 `check:prepared` |

@@ -36,7 +36,13 @@ ui/openapi.json
 ui/src/api/generated
 
 # 老前端目录与 v2ui 产物：镜像里都由 UI 构建阶段生成
-/static/frontend
+#
+# ⚠️ 这里**不能**整目录排除 static/frontend：static/static.go 里有 `go:embed frontend`，
+# 一个文件都不剩时 `go run .` / `go build` 会直接失败
+# （"pattern frontend: no matching files found"，GHCR 构建就是这么红的）。
+# 只放行占位页，真实产物在镜像里由 UI 阶段生成。
+/static/frontend/*
+!/static/frontend/index.html
 static/v2ui/dist
 
 # 本地构建产物与运行期目录

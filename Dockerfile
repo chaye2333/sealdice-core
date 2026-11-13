@@ -30,6 +30,14 @@ RUN go mod download
 
 COPY . ./
 
+# go:embed frontend 至少要能匹配到一个文件（.dockerignore 只放行占位页）。
+# 这里再兜一层：任何忽略规则/检出差异都不该让 `go run .` 在镜像里直接失败。
+RUN if [ ! -f static/frontend/index.html ]; then \
+      mkdir -p static/frontend && \
+      printf '%s\n' '<!doctype html><meta charset="utf-8"><title>sealdice-core</title>' \
+        > static/frontend/index.html; \
+    fi
+
 # openapi.json 是新 UI 的契约输入，导不出来就没法编译前端
 RUN go run . --gen-openapi=./ui/openapi.json && test -s ui/openapi.json
 
@@ -74,6 +82,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . ./
+
+# 同阶段 1：go:embed frontend 不能一个文件都没有
+RUN if [ ! -f static/frontend/index.html ]; then \
+      mkdir -p static/frontend && \
+      printf '%s\n' '<!doctype html><meta charset="utf-8"><title>sealdice-core</title>' \
+        > static/frontend/index.html; \
+    fi
 
 # 把新 UI 产物放进 embed 目录（go:embed all:v2ui 要求目录在编译时存在）
 RUN rm -rf static/v2ui/dist && mkdir -p static/v2ui
