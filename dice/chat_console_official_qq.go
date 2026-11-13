@@ -64,7 +64,12 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleLogf(format string, args ...inte
 }
 
 // recordChatConsoleInbound 记录一条收到的官方消息。full 表示该群已授权全量消息。
-func (pa *PlatformAdapterOfficialQQ) recordChatConsoleInbound(msg *Message, kind, targetID, senderOpenID string, full bool) {
+//
+// payload 是官方事件体（*dto.Message 的别名类型），用来补 CQ 码拿不到的信息：
+// message_type（卡片 / 引用 / 聊天记录）、ark_data、msg_elements 以及附件元数据。
+func (pa *PlatformAdapterOfficialQQ) recordChatConsoleInbound(
+	msg *Message, payload *dto.Message, kind, targetID, senderOpenID string, full bool, event *dto.WSPayload,
+) {
 	store := pa.chatConsoleStore()
 	if store == nil || msg == nil || targetID == "" {
 		return
@@ -81,7 +86,9 @@ func (pa *PlatformAdapterOfficialQQ) recordChatConsoleInbound(msg *Message, kind
 		SenderOpenID: senderOpenID,
 		Dir:          chatConsoleDirIn,
 		Source:       chatConsoleSourceUser,
-		Text:         msg.Message,
+		Text:         chatConsoleInboundText(msg.Message, payload, event),
+		Media:        chatConsoleInboundMedia(payload, event),
+		Quote:        chatConsoleInboundQuote(payload),
 		MessageID:    rawID,
 		TS:           msg.Time,
 		FullMessage:  full,
@@ -94,6 +101,215 @@ func (pa *PlatformAdapterOfficialQQ) recordChatConsoleInbound(msg *Message, kind
 		// 群名未知时顺带补一下，失败了也不影响消息记录。
 		pa.refreshChatConsoleGroupInfo(targetID)
 	}
+}
+
+// 官方消息的 message_type 取值（见开放平台 C2C / GROUP_MESSAGE_CREATE 文档）。
+const (
+	chatConsoleMsgTypeText   = 0
+	chatConsoleMsgTypeArk    = 3
+	chatConsoleMsgTypeParts  = 101
+	chatConsoleMsgTypeRecord = 102
+	chatConsoleMsgTypeQuote  = 103
+)
+
+// chatConsoleInboundText 把官方消息补成"人能看懂"的样子：
+// 纯文本原样；ARK 卡片补标题/来源/链接；聊天记录把 msg_elements 拼进来；
+// 语音有 ASR 结果时补一行转写。
+//
+// base 里可能带着附件 CQ 码（dice 侧需要），这里只追加，不删改。
+func chatConsoleInboundText(base string, payload *dto.Message, event *dto.WSPayload) string {
+	text := strings.TrimSpace(base)
+	if payload == nil {
+		return text
+	}
+
+	var blocks []string
+	if payload.MessageType == chatConsoleMsgTypeArk {
+		if card := chatConsoleArkText(payload.ARKData, text); card != "" {
+			blocks = append(blocks, card)
+		}
+	}
+	if len(payload.MsgElements) > 0 && payload.MessageType != chatConsoleMsgTypeQuote {
+		var parts []string
+		for _, el := range payload.MsgElements {
+			if el == nil {
+				continue
+			}
+			if content := strings.TrimSpace(el.Content); content != "" {
+				parts = append(parts, content)
+			}
+		}
+		if len(parts) > 0 {
+			head := "[聊天记录]"
+			if payload.MessageType == chatConsoleMsgTypeParts {
+				head = "[合并消息]"
+			}
+			blocks = append(blocks, head+"\n"+strings.Join(parts, "\n\n"))
+		}
+	}
+	if asr := chatConsoleASRText(event); asr != "" && !strings.Contains(text, asr) {
+		blocks = append(blocks, "[语音转文字] "+asr)
+	}
+
+	if len(blocks) == 0 {
+		return text
+	}
+	if text == "" {
+		return strings.Join(blocks, "\n")
+	}
+	return text + "\n" + strings.Join(blocks, "\n")
+}
+
+// chatConsoleArkText 把结构化卡片渲染成几行可读文本；已出现在正文里的值不重复追加。
+func chatConsoleArkText(ark *dto.ARKData, existing string) string {
+	if ark == nil {
+		return ""
+	}
+	name := strings.TrimSpace(ark.ArkName)
+	if name == "" {
+		name = strings.TrimSpace(ark.ArkType)
+	}
+	if name == "" {
+		name = "卡片"
+	}
+
+	lines := []string{"[卡片消息] " + name}
+	appendLine := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.Contains(existing, value) {
+			return
+		}
+		for _, line := range lines {
+			if strings.Contains(line, value) {
+				return
+			}
+		}
+		lines = append(lines, label+value)
+	}
+
+	prompt := strings.TrimSpace(ark.Prompt)
+	appendLine("摘要: ", prompt)
+	if title := strings.TrimSpace(ark.Fields["title"]); title != prompt {
+		appendLine("标题: ", title)
+	}
+	appendLine("说明: ", ark.Fields["desc"])
+	appendLine("来源: ", ark.Fields["source"])
+	appendLine("链接: ", ark.Fields["jump_url"])
+
+	if len(lines) == 1 {
+		return "" // 只有类型名，没有实际内容就别刷屏
+	}
+	return strings.Join(lines, "\n")
+}
+
+// chatConsoleInboundQuote 还原引用消息（message_type=103）的被引用内容。
+func chatConsoleInboundQuote(payload *dto.Message) *ChatConsoleQuote {
+	if payload == nil || payload.MessageType != chatConsoleMsgTypeQuote {
+		return nil
+	}
+	el := payload.QuotedElement()
+	if el == nil {
+		return nil
+	}
+	text := strings.TrimSpace(el.Content)
+	if text == "" && len(el.Attachments) > 0 {
+		text = "（附件）"
+	}
+	if text == "" {
+		return nil
+	}
+	return &ChatConsoleQuote{
+		Sender: "被引用消息",
+		Text:   text,
+		MsgID:  payload.MessageScene.RefMsgIdx(),
+	}
+}
+
+// chatConsoleInboundMedia 把附件映射成控制台展示用的媒体列表。
+// 语音优先用官方转码后的 WAV 地址（原始 file 是 SILK，浏览器放不出来）。
+func chatConsoleInboundMedia(payload *dto.Message, event *dto.WSPayload) []ChatConsoleMedia {
+	if payload == nil || len(payload.Attachments) == 0 {
+		return nil
+	}
+	raw := chatConsoleRawAttachments(event)
+	rawByName := make(map[string]chatConsoleRawAttachment, len(raw))
+	for _, item := range raw {
+		if item.FileName != "" {
+			rawByName[item.FileName] = item
+		}
+	}
+	rawByIndex := len(raw) == len(payload.Attachments)
+	out := make([]ChatConsoleMedia, 0, len(payload.Attachments))
+	for i, item := range payload.Attachments {
+		if item == nil || item.URL == "" {
+			continue
+		}
+		kind := chatConsoleAttachmentKind(item.ContentType)
+		url := item.URL
+		if kind == "record" {
+			// 优先按文件名对齐（事件体里可能只带语音那一条），其次按下标
+			if voice, ok := rawByName[item.FileName]; ok && voice.VoiceWAVURL != "" {
+				url = voice.VoiceWAVURL
+			} else if rawByIndex && raw[i].VoiceWAVURL != "" {
+				url = raw[i].VoiceWAVURL
+			}
+		}
+		out = append(out, ChatConsoleMedia{Kind: kind, URL: url, Name: item.FileName})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func chatConsoleAttachmentKind(contentType string) string {
+	switch {
+	case strings.HasPrefix(contentType, "image/"):
+		return "image"
+	case strings.HasPrefix(contentType, "voice"):
+		return "record"
+	case strings.HasPrefix(contentType, "video/"):
+		return "video"
+	default:
+		return "file"
+	}
+}
+
+// chatConsoleRawAttachment 是 SDK 没暴露的两个字段：转码后的语音地址与 ASR 结果。
+type chatConsoleRawAttachment struct {
+	FileName     string `json:"filename"`
+	VoiceWAVURL  string `json:"voice_wav_url"`
+	ASRReferText string `json:"asr_refer_text"`
+}
+
+// chatConsoleRawAttachments 从原始事件体里取附件扩展字段（webhook 用 data，ws 用 d）。
+func chatConsoleRawAttachments(event *dto.WSPayload) []chatConsoleRawAttachment {
+	if event == nil || len(event.RawMessage) == 0 {
+		return nil
+	}
+	type attachmentsHolder struct {
+		Attachments []chatConsoleRawAttachment `json:"attachments"`
+	}
+	var wrapper struct {
+		D    attachmentsHolder `json:"d"`
+		Data attachmentsHolder `json:"data"`
+	}
+	if err := json.Unmarshal(event.RawMessage, &wrapper); err != nil {
+		return nil
+	}
+	if len(wrapper.Data.Attachments) > 0 {
+		return wrapper.Data.Attachments
+	}
+	return wrapper.D.Attachments
+}
+
+func chatConsoleASRText(event *dto.WSPayload) string {
+	for _, item := range chatConsoleRawAttachments(event) {
+		if text := strings.TrimSpace(item.ASRReferText); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // recordChatConsoleOutbound 记录一条骰子实际发出的消息（在 API 发送成功之后调用）。

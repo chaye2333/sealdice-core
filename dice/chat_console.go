@@ -165,6 +165,10 @@ type ChatConsoleRecord struct {
 	TS           int64
 	FullMessage  bool              // 该群已授权全量消息
 	Quote        *ChatConsoleQuote // 控制台引用回复的引用信息
+	// Media 是显式给出的附件列表。为空时退回从 Text 里的 CQ 码解析 ——
+	// 入站消息现在能拿到附件元数据（语音还有转码后的 WAV 地址），
+	// 这些信息没法只靠 CQ 码还原。
+	Media []ChatConsoleMedia
 }
 
 // ChatConsoleUsage 单个会话的磁盘占用（SQLite 里按列长度估算）。
@@ -505,6 +509,15 @@ func chatConsoleAvatarURL(appID, openID string) string {
 
 // ---------------- 内部：文本小工具 ----------------
 
+// chatConsoleRecordMedia 决定一条消息最终展示的附件列表：
+// 显式给出的优先（入站消息能拿到附件元数据与语音 WAV 地址），否则解析文本里的 CQ 码。
+func chatConsoleRecordMedia(explicit []ChatConsoleMedia, text string) []ChatConsoleMedia {
+	if len(explicit) > 0 {
+		return explicit
+	}
+	return parseChatConsoleMedia(text)
+}
+
 func parseChatConsoleMedia(text string) []ChatConsoleMedia {
 	if !strings.Contains(text, "[CQ:") {
 		return nil
@@ -609,8 +622,10 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 		SenderName:   rec.SenderName,
 		SenderOpenID: rec.SenderOpenID,
 		Text:         text,
-		Media:        parseChatConsoleMedia(text),
-		Quote:        rec.Quote,
+		// Media 显式给出时优先用它（附件元数据 / 语音 WAV 地址只有它带得动），
+		// 否则退回解析文本里的 CQ 码。
+		Media: chatConsoleRecordMedia(rec.Media, text),
+		Quote: rec.Quote,
 	}
 	if msg.ID == "" {
 		msg.ID = uuid.NewString()

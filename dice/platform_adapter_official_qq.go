@@ -1129,7 +1129,7 @@ func (pa *PlatformAdapterOfficialQQ) GroupAtMessageReceive(event *dto.WSPayload,
 	if data.Author != nil {
 		memberOpenID = data.Author.MemberOpenID
 	}
-	pa.recordChatConsoleInbound(msg, chatConsoleKindGroup, data.GroupOpenID, memberOpenID, false)
+	pa.recordChatConsoleInbound(msg, (*dto.Message)(data), chatConsoleKindGroup, data.GroupOpenID, memberOpenID, false, event)
 	s.Execute(pa.EndPoint, msg, false)
 	return nil
 }
@@ -1186,7 +1186,7 @@ func (pa *PlatformAdapterOfficialQQ) GroupMessageReceive(event *dto.WSPayload, d
 	if data.Author != nil {
 		memberOpenID = data.Author.MemberOpenID
 	}
-	pa.recordChatConsoleInbound(msg, chatConsoleKindGroup, data.GroupOpenID, memberOpenID, true)
+	pa.recordChatConsoleInbound(msg, (*dto.Message)(data), chatConsoleKindGroup, data.GroupOpenID, memberOpenID, true, event)
 	s.Execute(pa.EndPoint, msg, false)
 	return nil
 }
@@ -1240,7 +1240,7 @@ func (pa *PlatformAdapterOfficialQQ) C2CMessageReceiveFromEvent(payload *dto.WSP
 
 	msg := pa.c2cMsgToStdMsg(data)
 	if data.Author != nil {
-		pa.recordChatConsoleInbound(msg, chatConsoleKindC2C, data.Author.UserOpenID, data.Author.UserOpenID, false)
+		pa.recordChatConsoleInbound(msg, (*dto.Message)(data), chatConsoleKindC2C, data.Author.UserOpenID, data.Author.UserOpenID, false, payload)
 	}
 	s.Execute(pa.EndPoint, msg, false)
 	return nil
