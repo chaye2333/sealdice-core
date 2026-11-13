@@ -175,8 +175,10 @@ powershell -File scripts\build-windows.ps1
 产物在 `dist-build\sealdice-core.exe`（脚本会先把管理界面装进 `static/frontend` 再编译）。
 把 exe 放到**固定目录**（不要在系统临时目录）运行，浏览器打开 `http://127.0.0.1:3211` 即可。
 
-> 前端产物是**内嵌进 exe** 的：改了前端（`sealdice-ui`）要重新 `pnpm build` 并同步
-> `static/frontend`，再 `go build`，否则页面还是旧的（浏览器强刷也没用）。
+> 前端产物是**内嵌进 exe** 的：管理界面源码就在本仓库的 `ui/`（上游 #1689 起），
+> 改完前端要先 `pnpm --dir ui run build:embed:prepared`（产物落到 `static/v2ui/dist`），
+> 再 `go build`，否则页面还是旧的（浏览器强刷也没用）。
+> 老的 `sealdice-ui` 子模块已删除，不再是构建链的一环。
 
 ---
 

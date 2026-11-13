@@ -18,7 +18,6 @@ sealdice-core.zip
 
 # 子模块目录：docker build 时无法初始化，直接排除
 sealdice-builtins
-sealdice-ui
 
 # 文档
 docs
