@@ -13,7 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func TestRootRedirectsToNewUIByDefault(t *testing.T) {
+func TestRootRedirectsToOldUIByDefault(t *testing.T) {
 	app := echo.New()
 	registerRootDefaultUI(app)
 
@@ -21,8 +21,8 @@ func TestRootRedirectsToNewUIByDefault(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("root status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
-	if got := resp.Header.Get("Location"); got != v2UIPathPrefix+"/" {
-		t.Fatalf("root Location = %q, want %q", got, v2UIPathPrefix+"/")
+	if got := resp.Header.Get("Location"); got != oldUIPathPrefix+"/" {
+		t.Fatalf("root Location = %q, want %q", got, oldUIPathPrefix+"/")
 	}
 }
 
@@ -57,14 +57,6 @@ func TestRootDefaultUISwitchByQueryAndCookie(t *testing.T) {
 	resp = performRequest(newApp(), req)
 	if resp.Header.Get("Location") != v2UIPathPrefix+"/" {
 		t.Fatalf("cookie=new Location = %q, want %q", resp.Header.Get("Location"), v2UIPathPrefix+"/")
-	}
-
-	// cookie=old：回退到旧版。
-	req = httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: defaultUICookieName, Value: defaultUICookieValueOld})
-	resp = performRequest(newApp(), req)
-	if resp.Header.Get("Location") != oldUIPathPrefix+"/" {
-		t.Fatalf("cookie=old Location = %q, want %q", resp.Header.Get("Location"), oldUIPathPrefix+"/")
 	}
 }
 

@@ -70,3 +70,16 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
   整体 merge 上游后要显式丢掉 `dice/official_qq_name_card.go` / `officialQQUseNameCard`，
   保留 `dice/official_qq_character_roll_markdown.go`。
 - 上游 UI 的 `ui/AGENTS.md` 同样有效（更具体的规则优先）。
+
+## 6. 镜像 / exe 里的两套 UI
+
+- `/old-ui/`：老 UI，**默认入口**（`/` 302 到这里）。源码不在本仓库，构建期从
+  `chaye2333/sealdice-ui` 按 `Dockerfile` 里的 `LEGACY_UI_REF`（commit hash）拉源码、
+  `pnpm run build-only` 现场编译后放进 `static/frontend`。
+  仓库里的 `static/frontend/index.html` 只是占位页，**引用的 assets 并不存在**，
+  所以谁要发版就必须真的把老 UI 编译进去，否则用户打开 `/` 是白页。
+- `/v2ui/`：新 UI，就是本仓库的 `ui/`，编译到 `static/v2ui/dist`。
+  切换方式：`?ui=new` / `?ui=old`（写 cookie `sd_default_ui`，一年有效）。
+- 改动老 UI 后：先在自己的 sealdice-ui 仓库提交，再把新 commit 填进 `LEGACY_UI_REF`
+  （写成 `master` 会永远命中 Docker 层缓存，改动进不了镜像）。
+- 本地 Windows exe 若也要默认老 UI，需要把老 UI 产物放进 `static/frontend`（同理）。
