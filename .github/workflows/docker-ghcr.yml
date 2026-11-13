@@ -153,6 +153,8 @@ jobs:
 
           ASSET=$(grep -oE '(src|href)="[^"]*assets/[^"]+"' /tmp/page.html | head -n1 | sed -E 's/.*="([^"]*)".*/\1/' || true)
           [ -n "$ASSET" ] || fail "首页没有引用 assets 资源，前端不是正式构建产物"
+          # index.html 里的资源是相对路径（./assets/...）；统一去掉前缀再拼 URL
+          ASSET=${ASSET#./}
           case "$ASSET" in
             http*) URL="$ASSET" ;;
             /*)    URL="http://127.0.0.1:13211$ASSET" ;;
