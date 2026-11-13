@@ -23,15 +23,20 @@ const (
 	rootUIDistIndexPath        = "dist/index.html"
 	rootUIPlaceholderIndexPath = "placeholder/index.html"
 
-	// 默认 UI 偏好按浏览器持久化：默认旧版 UI，?ui=new / cookie 可切到新版。
+	// 默认 UI 偏好按浏览器持久化：默认新版 UI，?ui=old / cookie 可回退到旧版。
 	defaultUICookieName     = "sd_default_ui"
 	defaultUICookieValueNew = "new"
 	defaultUICookieValueOld = "old"
 	defaultUICookieMaxAge   = 31536000 // 1 年
 )
 
-// registerRootDefaultUI 处理入口 `/`：默认落旧版 UI，可通过 ?ui=new（并记住）
-// 或之前的 cookie 切到新版 UI。旧版 UI 在 /old-ui/，新版 UI 在 /v2ui/。
+// registerRootDefaultUI 处理入口 `/`：默认落**新版 UI**（`/v2ui/`），
+// 可用 `?ui=old`（并记住）或之前的 cookie 回退到旧版 UI（`/old-ui/`）。
+//
+// 为什么默认新版：本 fork 的管理界面就是仓库内的 ui/，镜像和 exe 里都只有它的
+// 构建产物；老 UI 从上游 sealdice-ui 的 release 下载，我们不再随包分发，
+// `/old-ui/` 只剩一个回退入口（需要时把真实产物放到 frontend_overwrite）。
+// 默认落到旧版只会让用户看到一张空白页。
 func registerRootDefaultUI(router *echo.Echo) {
 	router.Match([]string{http.MethodGet, http.MethodHead}, "/", redirectDefaultUI)
 }
@@ -45,10 +50,10 @@ func redirectDefaultUI(c echo.Context) error {
 		setDefaultUICookie(c, defaultUICookieValueOld)
 		return c.Redirect(http.StatusFound, oldUIPathPrefix+"/")
 	}
-	if cookie, err := c.Cookie(defaultUICookieName); err == nil && cookie.Value == defaultUICookieValueNew {
-		return c.Redirect(http.StatusFound, v2UIPathPrefix+"/")
+	if cookie, err := c.Cookie(defaultUICookieName); err == nil && cookie.Value == defaultUICookieValueOld {
+		return c.Redirect(http.StatusFound, oldUIPathPrefix+"/")
 	}
-	return c.Redirect(http.StatusFound, oldUIPathPrefix+"/")
+	return c.Redirect(http.StatusFound, v2UIPathPrefix+"/")
 }
 
 func setDefaultUICookie(c echo.Context, value string) {
