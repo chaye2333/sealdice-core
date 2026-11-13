@@ -148,15 +148,16 @@ jobs:
           echo "asset size: $(wc -c < /tmp/asset.js) bytes"
 
           # ---------------------------------------------------------------
-          # 关键：确认镜像里是**我们 fork 的那份 UI**，而不是旧缓存里的老板本。
+          # 关键：确认镜像里是**当前仓库的 ui/** 编译出来的界面，而不是占位页。
           #
-          # 背景（真实踩过）：Dockerfile 里 `curl` 前端 tarball 那一层只依赖 UI_REF
-          # 这个 ARG 的值。当年写成 "master" 时该值永远不变 → 层永远命中缓存 →
+          # 背景（真实踩过）：老流程是 `curl` 拉 sealdice-ui fork 的 tarball，那一层只依赖
+          # UI_REF 这个 ARG。当年写成 "master" 时该值永远不变 → 层永远命中缓存 →
           # 之后所有 UI 改动都进不了镜像，而且构建照样成功，极难发现。
-          # 现在 UI_REF 钉成 commit hash，这里再校验新 UI 的特征字符串，
-          # 双保险：漏改 hash 会被这一步直接拦下。
           #
-          # 为什么要拼接**所有** assets/*.js：Vite 会按路由/legacy 拆出多个 chunk，
+          # 现状（上游 #1689 起）：管理界面就是仓库里的 ui/，镜像里现场编译，
+          # 不再有外部 UI 引用，所以这里只校验"本 fork 已移植进新 UI 的设置项确实在"。
+          #
+          # 为什么要拼接**所有** assets/*.js：Vite 会按路由拆出多个 chunk，
           # 设置页的代码不一定在首页第一个 <script> 里。只 grep 第一个文件会两头出错：
           #   · 新字符串落在别的 chunk → 明明打对了却构建失败、不发布；
           #   · 该消失的旧字符串落在别的 chunk → 检查恒过（假绿）。
@@ -178,12 +179,13 @@ jobs:
 
           echo "--- checking the bundled UI really contains our settings ---"
 
-          # 应当存在的：本 fork 新增的设置项
-          # （2026-09-21 起加入拦截页的「出站掩码」与帮助文档页的「图片渲染」）
-          for NEEDLE in identityBindPreferEmailCode identityBindCodeExpireSec logMultiBotDedupWindowSec \
-                        maskEnable imageRenderEnable imageRenderUrl chat-console; do
+          # 应当存在的：已经移植到新 UI 的本 fork 设置项。
+          # 注：拦截页出站掩码（maskEnable）、帮助文档图片渲染（imageRender*）、
+          # 聊天控制台（chat-console）目前还只在旧 UI 里有，移植完成后再把对应 needle 加回来。
+          for NEEDLE in identityBindEnable identityBindPreferEmailCode identityBindCodeExpireSec \
+                        logMultiBotDedupWindowSec officialQQRequestTimeoutSec; do
             if ! grep -q "$NEEDLE" /tmp/all_assets.js; then
-              fail "镜像里的 UI 缺少设置项 $NEEDLE —— 前端可能是旧缓存版本（检查 Dockerfile 的 UI_REF 是否匹配 sealdice-ui fork 的最新 commit）"
+              fail "镜像里的 UI 缺少设置项 $NEEDLE —— 新 UI 编译产物不对或没有嵌入"
             fi
           done
 
@@ -194,6 +196,6 @@ jobs:
             fi
           done
 
-          echo "OK: 前端是 fork 的最新版本（含新设置项、已无废弃选项）"
+          echo "OK: 前端是当前仓库 ui/ 的最新构建（含新设置项、已无废弃选项）"
           echo "OK: 管理界面已正确打包（资源 $ASSET 可用）"
           docker rm -f smktest

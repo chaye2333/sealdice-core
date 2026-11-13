@@ -16,10 +16,6 @@ sealdice-core
 sealdice-core.exe
 sealdice-core.zip
 
-# ui/ 是仓库自带的 Vue 脚手架样例，不是海豹管理界面，镜像里不需要
-# （真正的管理界面由 `go generate ./static/...` 下载，见 Dockerfile 说明）
-ui
-
 # 子模块目录：docker build 时无法初始化，直接排除
 sealdice-builtins
 sealdice-ui
@@ -31,10 +27,18 @@ docs
 # 帮助文档渲染后端：独立 Go module（自带 go.mod），不属于主程序构建，也不进镜像
 helpdoc-render
 
-# 前端产物：镜像里一律由 UI 构建阶段生成。
-# 若把本地那份（可能已过期）带进上下文，`COPY --from=ui-builder ... ./static/frontend/`
-# 是**合并**而不是清空，旧 hash 的 assets 会被残留进镜像。
+# ---- 新 UI（上游 #1689 起管理界面就是仓库里的 ui/）----
+# 注意：这里**不能**排除整个 ui/，构建阶段要用它生成 openapi 客户端并编译前端。
+# 但依赖、构建产物和生成代码必须在镜像里重新生成，不要吃本地的。
+ui/node_modules
+ui/dist
+ui/dev-dist
+ui/openapi.json
+ui/src/api/generated
+
+# 老前端目录与 v2ui 产物：镜像里都由 UI 构建阶段生成
 /static/frontend
+static/v2ui/dist
 
 # 本地构建产物与运行期目录
 dist-build

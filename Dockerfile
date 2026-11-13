@@ -1,81 +1,26 @@
-# 多阶段构建：编译 WebUI（sealdice-ui）→ 编译核心 → 精简运行镜像
-#
-# 构建（在仓库根目录执行）：
-#   docker build -t sealdice-core:local .
+# 多阶段构建：导出 OpenAPI → 编译新 WebUI（仓库内 ui/）→ 编译核心 → 精简运行镜像
 #
 # 三条重要说明：
 #
-# 1) WebUI 不能拿仓库里的 ui/ 目录来构建！
-#    那个 ui/ 是海豹仓库自带的一个 Vue 脚手架样例页（HelloWorld/TheWelcome/counter），
-#    编译出来是 "You've successfully created a project with Vite + Vue 3" 欢迎页，
-#    不是海豹的管理界面。
-#    真正的管理界面由 sealdice-ui 仓库产出，上游约定是放在 static/frontend/，
-#    再被 static/static.go 的 go:embed 打进二进制。
+# 1) 从上游 #1689 起，管理界面就是**仓库里的 ui/**（新 UI）。
+#    它编译后写入 static/v2ui/dist，由 static/static.go 的 `go:embed all:v2ui` 打进二进制；
+#    没有编译过 UI 时，static/v2ui/placeholder/index.html 会作为占位页被嵌入。
+#    老版本的 static/frontend 已废弃（我们只保留一个占位 index.html 供 go:embed 使用）。
 #
-# 2) 默认从「本仓库配套的 sealdice-ui 分支」拉源码现场编译（UI_FROM_SOURCE=1）。
-#    这样镜像里的管理界面就带有我们一起加上的设置项（官方QQ超时/分片上传、身份绑定）。
-#    上游的官方做法是 `go generate ./static/...` 从 sealdice-ui 的 pre-release 下载
-#    zip 产物（见 static/gen/download-fe.go），但它打包的是上游 UI，
-#    没有我们新增的选项；需要那个版本时把 UI_FROM_SOURCE 设为 0 即可。
-#    无论走哪条路，构建期都会校验 static/frontend/index.html 存在，
-#    不会静默塞一个错误的前端进去。
+# 2) 新 UI 的 API 客户端由 ui/openapi.json 生成，而 openapi.json 只能由 Go 二进制导出，
+#    所以顺序必须是：Go 导出 openapi.json → node 生成客户端并编译 UI → Go 再编译最终二进制。
+#    （对应 Taskfile.yml 的 build-with-v2ui 任务）
 #
 # 3) 核心用 CGO_ENABLED=0 编译，SQLite 走纯 Go 实现（见 migrate/db_util.go 的 !cgo 分支），
 #    因此运行镜像不需要 glibc / GCC，镜像更小、跨平台更稳。
-
-# ---------- 阶段 1：编译 WebUI（sealdice-ui） ----------
-FROM node:22-alpine AS ui-builder
-
-# UI_REPO / UI_REF 决定用哪份前端源码。
 #
-# ⚠️ UI_REF 必须钉成**具体的 commit hash**，不能用 "master" 这种分支名！
-#
-# 原因（真实踩过）：Docker 按 ARG 的值做层缓存，而 `curl` 那一层只依赖 UI_REF 的值。
-# 写成 "master" 时这个值永远不变 → 该层永远命中缓存 →
-# **之后推到 fork 的所有 UI 改动都不会进镜像**，而且构建照样"成功"，
-# 极难发现（镜像里的其实是第一次构建时的旧 UI）。
-#
-# 改 UI 之后必须同步更新这里的 hash（见下面的「改 UI 流程」）。
-# CI 里还有一步烟雾测试会校验新 UI 的关键选项确实在镜像里，漏改会被拦下。
-ARG UI_REPO="chaye2333/sealdice-ui"
-ARG UI_REF="84dbca34ba968bcd5736fe24c2e4c79881b452ff"
-# 前端包管理器版本。仓库里的 pnpm-workspace.yaml 用 allowBuilds 控制哪些依赖允许跑
-# postinstall 脚本（esbuild / @tailwindcss/oxide 必须为 true，否则 vite 无法运行），
-# 这是 pnpm 10 的写法，所以固定用 pnpm 10。
-ARG PNPM_VERSION=10
+# 构建（在仓库根目录执行）：
+#   docker build -t sealdice-core:local .
 
-RUN apk add --no-cache curl tar
+# ---------- 阶段 1：导出 openapi.json ----------
+FROM golang:1.25-alpine AS openapi-builder
 
-WORKDIR /uisrc
-
-# 直接取 tarball，省掉完整 git 历史，构建更快
-RUN set -eux; \
-    curl -fsSL "https://codeload.github.com/${UI_REPO}/tar.gz/${UI_REF}" -o ui.tar.gz; \
-    tar -xzf ui.tar.gz --strip-components=1; \
-    rm -f ui.tar.gz; \
-    test -f package.json; \
-    test -f pnpm-lock.yaml
-
-# 不用 corepack：非交互环境下它会弹「是否下载 pnpm」的提示而直接失败，直接用 npm 装指定版本更稳
-RUN npm install -g "pnpm@${PNPM_VERSION}"
-
-RUN pnpm install --frozen-lockfile
-
-# 只编译前端产物，不做 eslint 等额外检查（build-only = type-check + vite build）
-RUN pnpm run build-only && \
-    test -f dist/index.html && \
-    test -d dist/assets && \
-    echo "=== 已编译管理界面 ===" && \
-    ls dist
-
-# ---------- 阶段 2：编译 Go 核心 ----------
-FROM golang:1.25-alpine AS core-builder
-
-ARG VERSION_BUILD_METADATA="+dev"
-# 1 = 使用阶段 1 现场编译的 UI；0 = 用上游 pre-release zip
-ARG UI_FROM_SOURCE=1
-
-RUN apk add --no-cache git ca-certificates tzdata
+RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
 
@@ -85,24 +30,61 @@ RUN go mod download
 
 COPY . ./
 
-# 准备 static/frontend（go:embed 要求该目录在编译时必须存在）
-RUN mkdir -p static/frontend
+# openapi.json 是新 UI 的契约输入，导不出来就没法编译前端
+RUN go run . --gen-openapi=./ui/openapi.json && test -s ui/openapi.json
 
-# 路线 A：用我们自己编译的前端产物
-COPY --from=ui-builder /uisrc/dist/ ./static/frontend/
+# ---------- 阶段 2：编译新 WebUI（仓库内 ui/） ----------
+FROM node:22-alpine AS ui-builder
 
-# 路线 B：拉取上游 sealdice-ui pre-release 产物并解压到 static/frontend
-# 注意：go generate 的工作目录是 static/ 包目录，所以它写入的是 static/frontend
-RUN if [ "$UI_FROM_SOURCE" = "0" ]; then \
-      rm -rf static/frontend && \
-      go generate ./static/... ; \
-    fi
+# 必须与 ui/package.json 的 packageManager 一致：preinstall 会校验 pnpm major
+ARG PNPM_VERSION=10.14.0
 
-# 统一校验：不管走哪条路，前端都必须是真正的构建产物
-RUN test -f static/frontend/index.html && \
-    test -d static/frontend/assets && \
+# esbuild / rolldown 等原生依赖在 alpine 上需要这些工具链
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /uisrc
+
+RUN npm install -g "pnpm@${PNPM_VERSION}"
+
+# 先只拷依赖清单，装完依赖再拷源码，尽量吃到层缓存
+COPY --from=openapi-builder /src/ui/package.json ./package.json
+COPY --from=openapi-builder /src/ui/pnpm-lock.yaml ./pnpm-lock.yaml
+COPY --from=openapi-builder /src/ui/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY --from=openapi-builder /src/ui/scripts ./scripts
+RUN pnpm install --frozen-lockfile
+
+COPY --from=openapi-builder /src/ui/ ./
+
+# 用后端导出的契约生成客户端，再以 embed 模式编译（产物写到 ../static/v2ui/dist）
+RUN pnpm run generate-client && pnpm run build:embed:prepared && \
+    test -f /static/v2ui/dist/index.html && \
+    echo "=== 已编译管理界面（v2ui）===" && \
+    ls /static/v2ui/dist
+
+# ---------- 阶段 3：编译 Go 核心 ----------
+FROM golang:1.25-alpine AS core-builder
+
+ARG VERSION_BUILD_METADATA="+dev"
+
+RUN apk add --no-cache git ca-certificates tzdata
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . ./
+
+# 把新 UI 产物放进 embed 目录（go:embed all:v2ui 要求目录在编译时存在）
+RUN rm -rf static/v2ui/dist && mkdir -p static/v2ui
+COPY --from=ui-builder /static/v2ui/dist ./static/v2ui/dist
+
+# 校验：必须是真正的构建产物，而不是占位页
+RUN test -f static/v2ui/dist/index.html && \
+    test -d static/v2ui/dist/assets && \
+    ! grep -q "placeholder" static/v2ui/dist/index.html && \
     echo "=== 已打包管理界面 ===" && \
-    ls static/frontend
+    ls static/v2ui/dist
 
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 # VERSION_BUILD_METADATA 必须是合法 semver 元数据（带 + 前缀），否则 dice.VERSION 初始化会 panic。
@@ -113,16 +95,11 @@ RUN BUILD_META="${VERSION_BUILD_METADATA:-+$(date -u +%Y%m%d)}" && \
       -o /out/sealdice-core . && \
     /out/sealdice-core --version
 
-# ---------- 阶段 3：运行镜像 ----------
+# ---------- 阶段 4：运行镜像 ----------
 FROM alpine:3.20
 
-# 记录前端来源，方便上线后核对镜像里到底是哪份 UI。
-# 注意这里的默认值必须和阶段 1 保持一致，否则 label 会误导排查。
-ARG UI_REPO="chaye2333/sealdice-ui"
-ARG UI_REF="84dbca34ba968bcd5736fe24c2e4c79881b452ff"
-LABEL org.opencontainers.image.source="https://github.com/${UI_REPO}" \
-      sealdice.ui.repo="${UI_REPO}" \
-      sealdice.ui.ref="${UI_REF}"
+LABEL org.opencontainers.image.source="https://github.com/sealdice/sealdice-core" \
+      sealdice.ui.source="in-repo ui/ (v2ui)"
 
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -g 1000 sealdice && \

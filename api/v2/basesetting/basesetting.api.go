@@ -162,37 +162,47 @@ func (s *Service) buildValue() BaseSettingValueResp {
 		QQEnablePoke:             s.dice.Config.QQEnablePoke,
 		OfficialQQFileSendBase64: s.dice.Config.OfficialQQFileSendBase64,
 		OfficialQQUseMarkdown:    s.dice.Config.OfficialQQUseMarkdown,
-		TextCmdTrustOnly:         s.dice.Config.TextCmdTrustOnly,
-		IgnoreUnaddressedBotCmd:  s.dice.Config.IgnoreUnaddressedBotCmd,
-		AliveNoticeEnable:        s.dice.Config.AliveNoticeEnable,
-		AliveNoticeValue:         s.dice.Config.AliveNoticeValue,
-		LogSizeNoticeEnable:      s.dice.Config.LogSizeNoticeEnable,
-		LogSizeNoticeCount:       s.dice.Config.LogSizeNoticeCount,
-		PlayerNameWrapEnable:     s.dice.Config.PlayerNameWrapEnable,
-		DiceRandomMode:           string(dice.NormalizeDiceRandomMode(s.dice.Config.DiceRandomMode)),
-		OnlyLogCommandInGroup:    s.dice.Config.OnlyLogCommandInGroup,
-		OnlyLogCommandInPrivate:  s.dice.Config.OnlyLogCommandInPrivate,
-		RateLimitEnabled:         s.dice.Config.RateLimitEnabled,
-		PersonalReplenishRate:    s.dice.Config.PersonalReplenishRateStr,
-		PersonalBurst:            s.dice.Config.PersonalBurst,
-		GroupReplenishRate:       s.dice.Config.GroupReplenishRateStr,
-		GroupBurst:               s.dice.Config.GroupBurst,
-		ServeAddress:             s.dice.Parent.ServeAddress,
-		TrayTooltip:              s.dice.Parent.GetTrayTooltip(),
-		RefuseGroupInvite:        s.dice.Config.RefuseGroupInvite,
-		FriendAddComment:         s.dice.Config.FriendAddComment,
-		WorkInQQChannel:          s.dice.Config.WorkInQQChannel,
-		QQChannelAutoOn:          s.dice.Config.QQChannelAutoOn,
-		QQChannelLogMessage:      s.dice.Config.QQChannelLogMessage,
-		DefaultCocRuleIndex:      cocRule,
-		MaxCocCardGen:            maxCard,
-		MaxExecuteTime:           maxExec,
-		MessageDelayRangeStart:   s.dice.Config.MessageDelayRangeStart,
-		MessageDelayRangeEnd:     s.dice.Config.MessageDelayRangeEnd,
-		QuitInactiveThreshold:    s.dice.Config.QuitInactiveThreshold.Hours() / 24,
-		QuitInactiveBatchSize:    s.dice.Config.QuitInactiveBatchSize,
-		QuitInactiveBatchWait:    s.dice.Config.QuitInactiveBatchWait,
-		ExtDefaultSettings:       extDefaultSettings,
+		// fork 新增
+		OfficialQQRequestTimeoutSec:     s.dice.Config.OfficialQQRequestTimeoutSec,
+		OfficialQQChunkedUploadEnable:   s.dice.Config.OfficialQQChunkedUploadEnable,
+		IdentityBindEnable:              s.dice.Config.IdentityBindEnable,
+		IdentityBindUseVerificationCode: s.dice.Config.IdentityBindUseVerificationCode,
+		IdentityBindPreferEmailCode:     s.dice.Config.IdentityBindPreferEmailCode,
+		IdentityBindCodeLength:          s.dice.Config.IdentityBindCodeLength,
+		IdentityBindCodeExpireSec:       s.dice.Config.IdentityBindCodeExpireSec,
+		IdentityBindCooldownSec:         s.dice.Config.IdentityBindCooldownSec,
+		LogMultiBotDedupWindowSec:       s.dice.Config.LogMultiBotDedupWindowSec,
+		TextCmdTrustOnly:                s.dice.Config.TextCmdTrustOnly,
+		IgnoreUnaddressedBotCmd:         s.dice.Config.IgnoreUnaddressedBotCmd,
+		AliveNoticeEnable:               s.dice.Config.AliveNoticeEnable,
+		AliveNoticeValue:                s.dice.Config.AliveNoticeValue,
+		LogSizeNoticeEnable:             s.dice.Config.LogSizeNoticeEnable,
+		LogSizeNoticeCount:              s.dice.Config.LogSizeNoticeCount,
+		PlayerNameWrapEnable:            s.dice.Config.PlayerNameWrapEnable,
+		DiceRandomMode:                  string(dice.NormalizeDiceRandomMode(s.dice.Config.DiceRandomMode)),
+		OnlyLogCommandInGroup:           s.dice.Config.OnlyLogCommandInGroup,
+		OnlyLogCommandInPrivate:         s.dice.Config.OnlyLogCommandInPrivate,
+		RateLimitEnabled:                s.dice.Config.RateLimitEnabled,
+		PersonalReplenishRate:           s.dice.Config.PersonalReplenishRateStr,
+		PersonalBurst:                   s.dice.Config.PersonalBurst,
+		GroupReplenishRate:              s.dice.Config.GroupReplenishRateStr,
+		GroupBurst:                      s.dice.Config.GroupBurst,
+		ServeAddress:                    s.dice.Parent.ServeAddress,
+		TrayTooltip:                     s.dice.Parent.GetTrayTooltip(),
+		RefuseGroupInvite:               s.dice.Config.RefuseGroupInvite,
+		FriendAddComment:                s.dice.Config.FriendAddComment,
+		WorkInQQChannel:                 s.dice.Config.WorkInQQChannel,
+		QQChannelAutoOn:                 s.dice.Config.QQChannelAutoOn,
+		QQChannelLogMessage:             s.dice.Config.QQChannelLogMessage,
+		DefaultCocRuleIndex:             cocRule,
+		MaxCocCardGen:                   maxCard,
+		MaxExecuteTime:                  maxExec,
+		MessageDelayRangeStart:          s.dice.Config.MessageDelayRangeStart,
+		MessageDelayRangeEnd:            s.dice.Config.MessageDelayRangeEnd,
+		QuitInactiveThreshold:           s.dice.Config.QuitInactiveThreshold.Hours() / 24,
+		QuitInactiveBatchSize:           s.dice.Config.QuitInactiveBatchSize,
+		QuitInactiveBatchWait:           s.dice.Config.QuitInactiveBatchWait,
+		ExtDefaultSettings:              extDefaultSettings,
 	}
 }
 
@@ -208,6 +218,16 @@ func (s *Service) applyPatch(patch BaseSettingPatch) error {
 	setIfProvided(&config.QQEnablePoke, patch.QQEnablePoke)
 	setIfProvided(&config.OfficialQQFileSendBase64, patch.OfficialQQFileSendBase64)
 	setIfProvided(&config.OfficialQQUseMarkdown, patch.OfficialQQUseMarkdown)
+	// fork 新增
+	setIfProvided(&config.OfficialQQRequestTimeoutSec, patch.OfficialQQRequestTimeoutSec)
+	setIfProvided(&config.OfficialQQChunkedUploadEnable, patch.OfficialQQChunkedUploadEnable)
+	setIfProvided(&config.IdentityBindEnable, patch.IdentityBindEnable)
+	setIfProvided(&config.IdentityBindUseVerificationCode, patch.IdentityBindUseVerificationCode)
+	setIfProvided(&config.IdentityBindPreferEmailCode, patch.IdentityBindPreferEmailCode)
+	setIfProvided(&config.IdentityBindCodeLength, patch.IdentityBindCodeLength)
+	setIfProvided(&config.IdentityBindCodeExpireSec, patch.IdentityBindCodeExpireSec)
+	setIfProvided(&config.IdentityBindCooldownSec, patch.IdentityBindCooldownSec)
+	setIfProvided(&config.LogMultiBotDedupWindowSec, patch.LogMultiBotDedupWindowSec)
 	setIfProvided(&config.TextCmdTrustOnly, patch.TextCmdTrustOnly)
 	setIfProvided(&config.IgnoreUnaddressedBotCmd, patch.IgnoreUnaddressedBotCmd)
 	setIfProvided(&config.AliveNoticeEnable, patch.AliveNoticeEnable)

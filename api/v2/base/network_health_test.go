@@ -12,7 +12,7 @@ import (
 func TestNetworkHealthReturnsTargetMetadataFromProbe(t *testing.T) {
 	t.Parallel()
 	dm := &dice.DiceManager{}
-	dm.Dice = &dice.Dice{Parent: dm}
+	dm.Dice = []*dice.Dice{{Parent: dm}}
 	svc := NewBaseService(dm)
 	svc.networkHealth = func() networkhealth.Result {
 		return networkhealth.Result{

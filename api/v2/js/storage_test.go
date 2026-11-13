@@ -12,7 +12,8 @@ import (
 func TestDataListResolvesExtensionByScriptName(t *testing.T) {
 	dm := &dice.DiceManager{}
 	d := &dice.Dice{Parent: dm, JsExtRegistry: new(dice.SyncMap[string, *dice.ExtInfo])}
-	dm.Dice = d
+	// 我们这份 fork 还没有 #1836（DiceManager 单实例重构），dm.Dice 仍是切片。
+	dm.Dice = []*dice.Dice{d}
 	d.BaseConfig.DataDir = t.TempDir()
 	script := &dice.JsScriptInfo{Name: "AI骰娘 4", Filename: "./data/default/scripts/chat.js"}
 	d.JsScriptList = []*dice.JsScriptInfo{script}

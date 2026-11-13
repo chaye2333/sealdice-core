@@ -1,26 +1,28 @@
-# 本地构建 Windows 版（含管理界面）的脚本
+# 本地构建 Windows 版（含新管理界面）的脚本
 #
-# 为什么需要它：`static/frontend/index.html` 是**被 git 跟踪的占位页**。
-# 一旦做过 git checkout / stash / rebase / pull，它就会被恢复成占位页，
-# 于是 go build 出来的 exe 里只有 "UI assets are not bundled" 那张提示页
-# （而且编译不会报错，很难发现）。所以每次构建前都重新装一遍 UI。
+# 从上游 #1689 起，管理界面是**仓库里的 ui/**（新 UI），编译产物写入 static/v2ui/dist，
+# 由 static/static.go 的 `go:embed all:v2ui` 打进 exe。老流程（把外部 dist 拷到
+# static/frontend）已废弃——那条路现在只会塞一个占位页进去。
+#
+# 构建顺序必须是（对应 Taskfile.yml 的 build-with-v2ui）：
+#   1. go run . --gen-openapi=./ui/openapi.json   （前端契约只能由 Go 导出）
+#   2. pnpm --dir ui install --frozen-lockfile
+#   3. pnpm --dir ui run generate-client
+#   4. pnpm --dir ui run build:embed:prepared     （产物 → static/v2ui/dist）
+#   5. go build
 #
 # 用法（在仓库根目录）：
 #     pwsh -File scripts\build-windows.ps1
+#     pwsh -File scripts\build-windows.ps1 -SkipUi      # UI 没改动时跳过前三步
+#     pwsh -File scripts\build-windows.ps1 -SkipZip
 #
 # 产物：
 #     dist-build\sealdice-core.exe
 #     dist-build\sealdice-core-<版本>-windows-amd64-<hash>.zip
-#
-# UI 来源优先级：
-#   1. -UiDist <路径> 指定的目录
-#   2. 环境变量 SEALDICE_UI_DIST 指向的目录
-#   3. 默认的 UI fork 克隆：%TEMP%\sealdice-ui-fork\dist
-# 都没有时会明确报错，并提示怎么准备（clone + pnpm build-only）。
 
 [CmdletBinding()]
 param(
-    [string]$UiDist = "",
+    [switch]$SkipUi,
     [switch]$SkipZip
 )
 
@@ -37,46 +39,54 @@ if (Test-Path $goBin) { $env:Path = "$goBin;$env:Path" }
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) { throw "找不到 go，请把 Go 放进 PATH" }
 if (-not $env:CGO_ENABLED) { $env:CGO_ENABLED = "0" }   # 纯 Go sqlite，免 gcc
 
-# ---------- 准备 UI ----------
-if (-not $UiDist) {
-    if ($env:SEALDICE_UI_DIST) { $UiDist = $env:SEALDICE_UI_DIST }
-    elseif (Test-Path (Join-Path $env:TEMP "sealdice-ui-fork\dist")) {
-        $UiDist = Join-Path $env:TEMP "sealdice-ui-fork\dist"
+# ---------- 准备 UI（仓库内 ui/） ----------
+$uiDir = Join-Path $repo "ui"
+$v2uiDist = Join-Path $repo "static\v2ui\dist"
+if (-not (Test-Path $uiDir)) { throw "找不到 ui/ 目录：新 UI 应该就在仓库里（上游 #1689 起）" }
+
+if ($SkipUi) {
+    if (-not (Test-Path (Join-Path $v2uiDist "index.html"))) {
+        throw "-SkipUi 要求 static\v2ui\dist 里已经有编译好的 UI"
     }
-}
-# 仓库里只跟踪占位页 static/frontend/index.html（构建产物已不入库）。
-# 但如果本地已经装过一份真 UI（上次构建留下的、已被 .gitignore 忽略），就沿用它，
-# 这样日常「重新编译一个 Windows 版」不必先折腾 sealdice-ui。
-# 也避免有人图省事直接 go build —— 那样会漏掉下面的版本元数据注入。
-$skipUiInstall = $false
-if (-not $UiDist -or -not (Test-Path $UiDist)) {
-    $currentIndex = Join-Path $repo "static\frontend\index.html"
-    if ((Test-Path $currentIndex) -and ((Get-Content $currentIndex -Raw) -match "assets/index-")) {
-        Write-Host ">> 未指定 -UiDist，沿用 static/frontend 里已有的构建产物（本地文件，未入库）"
-        $skipUiInstall = $true
+    Write-Host ">> 跳过 UI 编译，沿用 static\v2ui\dist"
+} else {
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "找不到 node，请安装 Node ^20.19 或 >=22.12" }
+
+    # 用 ui/package.json 里钉住的 pnpm 版本（preinstall 会校验 major）
+    $pkg = Get-Content (Join-Path $uiDir "package.json") -Raw | ConvertFrom-Json
+    $pm = $pkg.packageManager
+    if (-not $pm) { $pm = "pnpm@10.14.0" }
+    Write-Host ">> 使用包管理器: $pm"
+
+    $pnpm = @("npx", "-y", $pm)
+    function Invoke-Pnpm([string[]]$pnpmArgs) {
+        & $pnpm[0] $pnpm[1] $pnpm[2] @pnpmArgs
+        if ($LASTEXITCODE -ne 0) { throw ("pnpm " + ($pnpmArgs -join ' ') + " 失败") }
+    }
+
+    Write-Host ">> 1/4 导出 OpenAPI 契约 (ui/openapi.json)"
+    & go run . --gen-openapi=./ui/openapi.json
+    if ($LASTEXITCODE -ne 0) { throw "导出 openapi.json 失败" }
+    if (-not (Test-Path (Join-Path $uiDir "openapi.json"))) { throw "ui/openapi.json 没生成" }
+
+    if (-not (Test-Path (Join-Path $uiDir "node_modules"))) {
+        Write-Host ">> 2/4 安装前端依赖（首次会慢）"
+        Invoke-Pnpm @("--dir", "ui", "install", "--frozen-lockfile")
     } else {
-        $hint = "找不到前端构建产物（仓库只带占位页）。请先准备（sealdice-ui 的 fork）：`n" +
-                "    git clone https://github.com/chaye2333/sealdice-ui.git `$env:TEMP\sealdice-ui-fork`n" +
-                "    cd `$env:TEMP\sealdice-ui-fork; pnpm install; pnpm run build-only`n" +
-                "然后用 -UiDist 指定它的 dist 目录，或设 `$env:SEALDICE_UI_DIST。"
-        throw $hint
+        Write-Host ">> 2/4 已有 node_modules，跳过 install"
     }
-}
-if (-not $skipUiInstall) {
-    if (-not (Test-Path (Join-Path $UiDist "index.html"))) { throw "$UiDist 里没有 index.html，不像是构建产物" }
 
-    Write-Host ">> 安装管理界面: $UiDist"
-    Copy-Item (Join-Path $UiDist "*") -Destination (Join-Path $repo "static\frontend") -Recurse -Force
-}
+    Write-Host ">> 3/4 生成 API 客户端"
+    Invoke-Pnpm @("--dir", "ui", "run", "generate-client")
 
-$uiIndex = Get-Content (Join-Path $repo "static\frontend\index.html") -Raw
-if ($uiIndex -match "not bundled in this checkout") {
-    throw "static/frontend/index.html 仍是占位页，UI 没装进去"
+    Write-Host ">> 4/4 编译 UI（embed 模式 → static/v2ui/dist）"
+    Invoke-Pnpm @("--dir", "ui", "run", "build:embed:prepared")
+
+    $index = Join-Path $v2uiDist "index.html"
+    if (-not (Test-Path $index)) { throw "static\v2ui\dist\index.html 不存在，UI 没编出来" }
+    if (-not (Test-Path (Join-Path $v2uiDist "assets"))) { throw "static\v2ui\dist\assets 不存在，UI 产物不完整" }
+    Write-Host ">> UI 就绪"
 }
-if ($uiIndex -notmatch "assets/index-") {
-    throw "static/frontend/index.html 没引用构建后的 assets，UI 可能不完整"
-}
-Write-Host ">> UI 就绪（引用了构建产物）"
 
 # ---------- 构建 ----------
 $hash = (git rev-parse --short=7 HEAD).Trim()
@@ -112,4 +122,4 @@ if (-not $SkipZip) {
 }
 
 Write-Host ">> 完成。冒烟自测：把 exe 放到**非系统临时目录**再运行（临时目录会被程序拒绝启动），"
-Write-Host "   然后打开 http://127.0.0.1:3211 确认是管理界面而不是占位页。"
+Write-Host "   然后打开 http://127.0.0.1:3211 确认是新管理界面而不是占位页。"

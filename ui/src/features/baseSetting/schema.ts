@@ -215,6 +215,16 @@ export const baseSettingSchema = normalizeBaseSettingSchema({
                 hint: '举例：添加 ! 作为指令前缀后，运行 !r 即可骰点。',
               }
             ),
+            field(
+              'log-multibot-dedup-window',
+              'logMultiBotDedupWindowSec',
+              '多 bot 日志去重窗口(秒)',
+              'number',
+              ['日志去重', '双bot', '同群多bot'],
+              {
+                hint: '同一条玩家消息在多少秒内只记一次，5 ＝ 上游原行为。注意：官方群与旧群同时挂 bot 时它并不能跨连接去重，调大反而会把同一人窗口内的重复发言并成一条。',
+              }
+            ),
           ],
         },
       ],
@@ -369,6 +379,86 @@ export const baseSettingSchema = normalizeBaseSettingSchema({
               {
                 hint: '是否自动把发送的所有群聊和频道消息转为 Markdown 类型消息，仅对 QQ 官方机器人有效。',
               }
+            ),
+            field(
+              'officialqq-request-timeout',
+              'officialQQRequestTimeoutSec',
+              '请求超时(秒)',
+              'number',
+              ['官方QQ', '超时', '请求'],
+              {
+                hint: '官方 QQ 单次 OpenAPI 请求的超时时间，默认 60。发送大文件或语音时可适当调大；低于 5 会被抬到 5，高于 600 会被收敛。',
+              }
+            ),
+            field(
+              'officialqq-chunked-upload',
+              'officialQQChunkedUploadEnable',
+              '本地文件分片上传',
+              'boolean',
+              ['官方QQ', '分片上传', '文件名'],
+              {
+                hint: '开启后，本地文件通过分片上传发送，可以保留原文件名；关闭时走 file_data，腾讯侧文件名会变成「未命名」。',
+              }
+            ),
+          ],
+        },
+        {
+          id: 'identity-bind',
+          title: '身份与日志绑定',
+          fields: [
+            field(
+              'identity-bind-enable',
+              'identityBindEnable',
+              '启用身份与日志绑定',
+              'boolean',
+              ['身份绑定', '日志绑定', '官方QQ', '迁移'],
+              {
+                hint: '把 QQ 官方机器人的 OpenID 归一成迁移前的旧 QQ 号/旧群，让老玩家的角色卡与日志在官 bot 里继续可用。关闭后 .bind 不可用。',
+              }
+            ),
+            field(
+              'identity-bind-code',
+              'identityBindUseVerificationCode',
+              '验证码验证归属',
+              'boolean',
+              ['身份绑定', '验证码', '防抢号'],
+              {
+                hint: '开启后必须通过验证码证明旧号归属（默认开启）。只有既没有民间 bot、也没配邮箱、且愿意承担抢号风险时才建议关闭。',
+              }
+            ),
+            field(
+              'identity-bind-prefer-email',
+              'identityBindPreferEmailCode',
+              '优先用邮箱发验证码',
+              'boolean',
+              ['身份绑定', '邮箱', '验证码通道'],
+              {
+                hint: '私聊与邮箱两条通道都可用时谁优先。默认关闭＝私聊优先；没有民间 bot 的纯官 bot 部署建议打开。',
+              }
+            ),
+            field(
+              'identity-bind-code-length',
+              'identityBindCodeLength',
+              '验证码位数',
+              'number',
+              ['身份绑定', '验证码位数'],
+              { hint: '取值范围 4~8，默认 6。' }
+            ),
+            field(
+              'identity-bind-code-expire',
+              'identityBindCodeExpireSec',
+              '验证码有效期(秒)',
+              'number',
+              ['身份绑定', '有效期'],
+              { hint: '取值范围 60~3600，默认 600（10 分钟）。' }
+            ),
+            field(
+              'identity-bind-cooldown',
+              'identityBindCooldownSec',
+              '发起间隔(秒)',
+              'number',
+              ['身份绑定', '冷却', '限频'],
+              { hint: '同一用户两次发起绑定的最小间隔，0 表示不限制，上限 86400。' }
             ),
           ],
         },
