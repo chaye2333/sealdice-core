@@ -180,10 +180,10 @@ jobs:
           echo "--- checking the bundled UI really contains our settings ---"
 
           # 应当存在的：已经移植到新 UI 的本 fork 设置项。
-          # 注：拦截页出站掩码（maskEnable）、帮助文档图片渲染（imageRender*）、
-          # 聊天控制台（chat-console）目前还只在旧 UI 里有，移植完成后再把对应 needle 加回来。
+          # 注：聊天控制台（chat-console）目前还只在旧 UI 里有，移植完成后再把对应 needle 加回来。
           for NEEDLE in identityBindEnable identityBindPreferEmailCode identityBindCodeExpireSec \
-                        logMultiBotDedupWindowSec officialQQRequestTimeoutSec; do
+                        logMultiBotDedupWindowSec officialQQRequestTimeoutSec \
+                        censorMaskEnable imageRenderEnable; do
             if ! grep -q "$NEEDLE" /tmp/all_assets.js; then
               fail "镜像里的 UI 缺少设置项 $NEEDLE —— 新 UI 编译产物不对或没有嵌入"
             fi

@@ -3,11 +3,14 @@ import {
   buildHelpdocItemParams,
   cloneHelpdocAliases,
   convertHelpdocTree,
+  createDefaultHelpdocImageRender,
   getHelpdocTag,
   getHelpdocTextPreview,
   isHelpdocConfigDirty,
+  isHelpdocImageRenderDirty,
   isHelpdocUploadFileAccepted,
   normalizeHelpdocAliases,
+  pickHelpdocImageRender,
   summarizeHelpdocDelete,
 } from './viewModel.js';
 import type { HelpDoc } from '@/api';
@@ -99,4 +102,36 @@ it('帮助文档树与分页模型转换', async () => {
     isHelpdocConfigDirty(aliases, normalizeHelpdocAliases({ default: ['基础'], empty: null }))
   ).toBe(false);
   expect(isHelpdocConfigDirty(cloned, aliases)).toBe(true);
+});
+
+it('图片化渲染配置：缺字段回落默认值，且只在真的变了才算脏', () => {
+  // 后端没返回任何图片渲染字段时（老配置 / 未开启），全部回落默认值
+  expect(pickHelpdocImageRender(undefined)).toEqual(createDefaultHelpdocImageRender());
+  expect(pickHelpdocImageRender({})).toEqual({
+    imageRenderEnable: false,
+    imageRenderMinLength: 0,
+    imageRenderMaskInImage: false,
+    imageRenderUrl: '',
+    imageRenderToken: '',
+    imageRenderTimeoutSec: 0,
+    imageRenderWidth: 0,
+  });
+
+  // 只给一部分字段，其余仍然回落
+  expect(
+    pickHelpdocImageRender({ imageRenderEnable: true, imageRenderUrl: 'http://127.0.0.1:3212/render' })
+  ).toEqual({
+    imageRenderEnable: true,
+    imageRenderMinLength: 0,
+    imageRenderMaskInImage: false,
+    imageRenderUrl: 'http://127.0.0.1:3212/render',
+    imageRenderToken: '',
+    imageRenderTimeoutSec: 0,
+    imageRenderWidth: 0,
+  });
+
+  const initial = createDefaultHelpdocImageRender();
+  expect(isHelpdocImageRenderDirty(createDefaultHelpdocImageRender(), initial)).toBe(false);
+  expect(isHelpdocImageRenderDirty({ ...initial, imageRenderEnable: true }, initial)).toBe(true);
+  expect(isHelpdocImageRenderDirty({ ...initial, imageRenderWidth: 1024 }, initial)).toBe(true);
 });

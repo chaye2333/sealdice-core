@@ -30,6 +30,11 @@ type CensorConfigBody struct {
 	MatchPinyin   bool               `json:"matchPinyin"`
 	FilterRegex   string             `json:"filterRegex"`
 	LevelConfig   CensorLevelConfigs `json:"levelConfig"`
+
+	// fork 新增：出站掩码 —— 骰子**要发出的文本**命中敏感词时，替换成等长掩码。
+	// 只影响骰子的回复，不计数、不拉黑。
+	CensorMaskEnable bool   `json:"censorMaskEnable"`
+	CensorMaskChar   string `json:"censorMaskChar"`
 }
 
 type CensorConfigReq struct {

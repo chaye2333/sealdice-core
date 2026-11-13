@@ -91,6 +91,52 @@
     </n-form>
   </SettingCategoryBox>
 
+  <SettingCategoryBox title="出站掩码" padded>
+    <n-form label-placement="left" label-width="auto">
+      <n-form-item>
+        <template #label>
+          <n-text>启用掩码</n-text>
+          <n-tooltip>
+            <template #trigger>
+              <n-icon>
+                <i-tabler-help-circle />
+              </n-icon>
+            </template>
+            骰子**要发出的文本**命中敏感词时，把命中的词替换成等长掩码（有几个字就重复几次）。<br />
+            掩码只做匹配替换：<strong>不计怒气值、不拉黑、不写命中记录</strong>，
+            与上面的拦截模式互不影响。典型用法是"不想让别人看到这个词，但也不想把整条回复拦掉"。
+          </n-tooltip>
+        </template>
+        <n-checkbox
+          :checked="config.censorMaskEnable"
+          @update:checked="updateConfig({ censorMaskEnable: $event })"
+          >开启</n-checkbox
+        >
+      </n-form-item>
+      <n-form-item>
+        <template #label>
+          <n-text>掩码字符</n-text>
+          <n-tooltip>
+            <template #trigger>
+              <n-icon>
+                <i-tabler-help-circle />
+              </n-icon>
+            </template>
+            命中词有几个字符就重复几次：4 字词 → 「口口口口」。留空则使用默认的「口」。
+          </n-tooltip>
+        </template>
+        <n-input
+          :value="config.censorMaskChar"
+          :disabled="!config.censorMaskEnable"
+          maxlength="4"
+          placeholder="口"
+          class="censor-regex-input"
+          @update:value="updateConfig({ censorMaskChar: $event })"
+        />
+      </n-form-item>
+    </n-form>
+  </SettingCategoryBox>
+
   <SettingCategoryBox title="响应设置" padded>
     <TipBox type="warning">
       <n-text type="warning">

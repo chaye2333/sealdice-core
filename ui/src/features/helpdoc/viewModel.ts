@@ -156,6 +156,58 @@ export function cloneHelpdocAliases(source: Map<string, string[]>) {
   return new Map(Array.from(source.entries(), ([key, value]) => [key, [...value]]));
 }
 
+/**
+ * 帮助文档图片化渲染的配置（fork 新增）。
+ *
+ * 命中敏感词或正文过长时改发一张现场渲染的图片，由骰主自部署的渲染后端出图；
+ * 数值填 0 表示"用后端默认值"（超时 15 秒、宽度 820px）。
+ */
+export type HelpdocImageRenderConfig = {
+  imageRenderEnable: boolean;
+  imageRenderMinLength: number;
+  imageRenderMaskInImage: boolean;
+  imageRenderUrl: string;
+  imageRenderToken: string;
+  imageRenderTimeoutSec: number;
+  imageRenderWidth: number;
+};
+
+export function createDefaultHelpdocImageRender(): HelpdocImageRenderConfig {
+  return {
+    imageRenderEnable: false,
+    imageRenderMinLength: 0,
+    imageRenderMaskInImage: false,
+    imageRenderUrl: '',
+    imageRenderToken: '',
+    imageRenderTimeoutSec: 0,
+    imageRenderWidth: 0,
+  };
+}
+
+/** 从接口返回的配置里挑出图片渲染相关字段（缺字段时回落默认值）。 */
+export function pickHelpdocImageRender(
+  source: Partial<HelpdocImageRenderConfig> | null | undefined
+): HelpdocImageRenderConfig {
+  const defaults = createDefaultHelpdocImageRender();
+  if (!source) return defaults;
+  return {
+    imageRenderEnable: source.imageRenderEnable ?? defaults.imageRenderEnable,
+    imageRenderMinLength: source.imageRenderMinLength ?? defaults.imageRenderMinLength,
+    imageRenderMaskInImage: source.imageRenderMaskInImage ?? defaults.imageRenderMaskInImage,
+    imageRenderUrl: source.imageRenderUrl ?? defaults.imageRenderUrl,
+    imageRenderToken: source.imageRenderToken ?? defaults.imageRenderToken,
+    imageRenderTimeoutSec: source.imageRenderTimeoutSec ?? defaults.imageRenderTimeoutSec,
+    imageRenderWidth: source.imageRenderWidth ?? defaults.imageRenderWidth,
+  };
+}
+
+export function isHelpdocImageRenderDirty(
+  current: HelpdocImageRenderConfig,
+  initial: HelpdocImageRenderConfig
+): boolean {
+  return JSON.stringify(current) !== JSON.stringify(initial);
+}
+
 export type HelpdocItemRow = Pick<
   HelpTextVo,
   'id' | 'group' | 'from' | 'title' | 'content' | 'packageName'

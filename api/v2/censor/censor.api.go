@@ -107,6 +107,9 @@ func (s *Service) GetConfig(_ context.Context, _ *request.Empty) (*response.Item
 			Warning: buildLevelConfig(censorcore.Warning, config.CensorThresholds, config.CensorHandlers, config.CensorScores),
 			Danger:  buildLevelConfig(censorcore.Danger, config.CensorThresholds, config.CensorHandlers, config.CensorScores),
 		},
+		// fork 新增：出站掩码
+		CensorMaskEnable: config.CensorMaskEnable,
+		CensorMaskChar:   config.CensorMaskChar,
 	}), nil
 }
 
@@ -128,6 +131,14 @@ func (s *Service) SetConfig(_ context.Context, req *CensorConfigReq) (*response.
 	s.dice.Config.CensorCaseSensitive = body.CaseSensitive
 	s.dice.Config.CensorMatchPinyin = body.MatchPinyin
 	s.dice.Config.CensorFilterRegexStr = body.FilterRegex
+
+	// fork 新增：出站掩码。掩码字符留空时回落到默认「口」，避免打出空字符串。
+	s.dice.Config.CensorMaskEnable = body.CensorMaskEnable
+	maskChar := strings.TrimSpace(body.CensorMaskChar)
+	if maskChar == "" {
+		maskChar = dice.DefaultCensorMaskChar
+	}
+	s.dice.Config.CensorMaskChar = maskChar
 
 	applyLevelConfig(&s.dice.Config, censorcore.Notice, body.LevelConfig.Notice)
 	applyLevelConfig(&s.dice.Config, censorcore.Caution, body.LevelConfig.Caution)

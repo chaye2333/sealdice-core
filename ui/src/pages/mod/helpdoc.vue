@@ -53,6 +53,7 @@
 
     <HelpdocConfigDialog
       v-model:show="configDialogVisible"
+      v-model:image-render="currentImageRender"
       :groups="docGroups"
       :aliases="currentAliases"
       :saving="saveConfigMutation.isPending.value"
@@ -94,8 +95,12 @@ import {
   getHelpdocItemGroupOptions,
   buildHelpdocConfigPayload,
   cloneHelpdocAliases,
+  createDefaultHelpdocImageRender,
   isHelpdocConfigDirty,
+  isHelpdocImageRenderDirty,
   normalizeHelpdocAliases,
+  pickHelpdocImageRender,
+  type HelpdocImageRenderConfig,
   getHelpdocTextPreview,
   getHelpdocTextTooltip,
   summarizeHelpdocDelete,
@@ -138,7 +143,7 @@ const treeQuery = useQuery({
 const configQuery = useQuery({
   ...getSdApiV2HelpdocConfigOptions(),
   enabled: hasAccessToken,
-  select: data => data.item.aliases ?? {},
+  select: data => data.item,
 });
 const itemsQuery = useQuery(
   computed(() => ({
@@ -157,17 +162,25 @@ const itemTotal = computed(() => itemsQuery.data.value?.total ?? 0);
 
 const currentAliases = ref(new Map<string, string[]>());
 const initialAliases = ref(new Map<string, string[]>());
-const configDirty = computed(() =>
-  isHelpdocConfigDirty(currentAliases.value, initialAliases.value)
+// fork 新增：帮助文档图片化渲染
+const currentImageRender = ref<HelpdocImageRenderConfig>(createDefaultHelpdocImageRender());
+const initialImageRender = ref<HelpdocImageRenderConfig>(createDefaultHelpdocImageRender());
+const configDirty = computed(
+  () =>
+    isHelpdocConfigDirty(currentAliases.value, initialAliases.value) ||
+    isHelpdocImageRenderDirty(currentImageRender.value, initialImageRender.value)
 );
 let configReady = false;
 watch(
   configQuery.data,
-  aliases => {
+  config => {
     if (configReady && configDirty.value) return;
-    const normalized = normalizeHelpdocAliases(aliases ?? {});
+    const normalized = normalizeHelpdocAliases(config?.aliases ?? {});
     currentAliases.value = cloneHelpdocAliases(normalized);
     initialAliases.value = cloneHelpdocAliases(normalized);
+    const imageRender = pickHelpdocImageRender(config);
+    currentImageRender.value = imageRender;
+    initialImageRender.value = { ...imageRender };
     configReady = true;
   },
   { immediate: true }
@@ -250,19 +263,21 @@ const deleteMutation = useMutation({
 const saveConfigMutation = useMutation({
   mutationFn: async () => {
     const snapshot = buildHelpdocConfigPayload(cloneHelpdocAliases(currentAliases.value));
+    const imageRender = { ...currentImageRender.value };
     const { data } = await postSdApiV2HelpdocConfig({
-      body: { aliases: snapshot },
+      body: { aliases: snapshot, ...imageRender },
       throwOnError: true,
     });
-    return { item: data.item, snapshot };
+    return { item: data.item, snapshot, imageRender };
   },
-  onSuccess: async ({ item, snapshot }) => {
+  onSuccess: async ({ item, snapshot, imageRender }) => {
     if (!item.success) {
       message.error(item.err || '保存设置失败');
       return;
     }
     message.success('保存设置成功');
     initialAliases.value = normalizeHelpdocAliases(snapshot);
+    initialImageRender.value = imageRender;
     configDialogVisible.value = false;
     await queryClient.invalidateQueries({ queryKey: getSdApiV2HelpdocConfigQueryKey() });
   },
@@ -277,6 +292,7 @@ useUnsavedChanges('helpdoc-config', {
   canSave: configDirty,
   discard: () => {
     currentAliases.value = cloneHelpdocAliases(initialAliases.value);
+    currentImageRender.value = { ...initialImageRender.value };
   },
   confirmMessage: '帮助文档设置还有修改，确定要忽略？',
 });

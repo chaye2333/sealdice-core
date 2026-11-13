@@ -31,6 +31,9 @@ export function createDefaultCensorConfig(): CensorConfigBody {
       warning: { threshold: 0, handlers: [], score: 0 },
       danger: { threshold: 0, handlers: [], score: 0 },
     },
+    // fork 新增：出站掩码默认关闭，与上游行为一致
+    censorMaskEnable: false,
+    censorMaskChar: '口',
   };
 }
 
@@ -40,6 +43,8 @@ export function cloneCensorConfig(config: CensorConfigBody): CensorConfigBody {
     caseSensitive: config.caseSensitive,
     matchPinyin: config.matchPinyin,
     filterRegex: config.filterRegex,
+    censorMaskEnable: config.censorMaskEnable ?? false,
+    censorMaskChar: config.censorMaskChar ?? '口',
     levelConfig: {
       notice: {
         ...config.levelConfig.notice,

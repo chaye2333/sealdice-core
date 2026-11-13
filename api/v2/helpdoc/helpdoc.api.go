@@ -125,11 +125,21 @@ func (s *Service) GetConfig(_ context.Context, _ *request.Empty) (*response.Item
 	if s.dm.IsHelpReloading {
 		return nil, huma.Error409Conflict("帮助文档正在重新装载")
 	}
-	aliases := map[string][]string{}
-	if s.dm.Help != nil && s.dm.Help.Config != nil && s.dm.Help.Config.Aliases != nil {
-		aliases = s.dm.Help.Config.Aliases
+	resp := ConfigResp{Aliases: map[string][]string{}}
+	if s.dm.Help != nil && s.dm.Help.Config != nil {
+		if s.dm.Help.Config.Aliases != nil {
+			resp.Aliases = s.dm.Help.Config.Aliases
+		}
+		// fork 新增：帮助文档图片化渲染
+		resp.ImageRenderEnable = s.dm.Help.Config.ImageRenderEnable
+		resp.ImageRenderMinLength = s.dm.Help.Config.ImageRenderMinLength
+		resp.ImageRenderMaskInImage = s.dm.Help.Config.ImageRenderMaskInImage
+		resp.ImageRenderURL = s.dm.Help.Config.ImageRenderURL
+		resp.ImageRenderToken = s.dm.Help.Config.ImageRenderToken
+		resp.ImageRenderTimeoutSec = s.dm.Help.Config.ImageRenderTimeoutSec
+		resp.ImageRenderWidth = s.dm.Help.Config.ImageRenderWidth
 	}
-	return response.NewItemResponse(ConfigResp{Aliases: aliases}), nil
+	return response.NewItemResponse(resp), nil
 }
 
 func (s *Service) SetConfig(_ context.Context, req *ConfigReq) (*response.ItemResponse[SimpleResp], error) {
@@ -146,7 +156,20 @@ func (s *Service) SetConfig(_ context.Context, req *ConfigReq) (*response.ItemRe
 	if aliases == nil {
 		aliases = map[string][]string{}
 	}
-	if err := s.dm.Help.SaveHelpConfig(&dice.HelpConfig{Aliases: aliases}); err != nil {
+	body := req.Body
+	// fork 新增：帮助文档图片化渲染。URL 去掉首尾空白；其余数值保持 0 表示"用默认值"，
+	// 具体默认值（15 秒 / 820px）由 dice 层兜底。
+	cfg := &dice.HelpConfig{
+		Aliases:                aliases,
+		ImageRenderEnable:      body.ImageRenderEnable,
+		ImageRenderMinLength:   body.ImageRenderMinLength,
+		ImageRenderMaskInImage: body.ImageRenderMaskInImage,
+		ImageRenderURL:         strings.TrimSpace(body.ImageRenderURL),
+		ImageRenderToken:       strings.TrimSpace(body.ImageRenderToken),
+		ImageRenderTimeoutSec:  body.ImageRenderTimeoutSec,
+		ImageRenderWidth:       body.ImageRenderWidth,
+	}
+	if err := s.dm.Help.SaveHelpConfig(cfg); err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	return response.NewItemResponse(SimpleResp{Success: true}), nil
