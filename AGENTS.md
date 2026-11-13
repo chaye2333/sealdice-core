@@ -56,6 +56,7 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 | 增量缓存骗人 | `vue-tsc --build` 命中旧 `ui/node_modules/.tmp/*.tsbuildinfo` 会直接跳过，把真实 TS 错误藏起来（聊天控制台的 TS7006 就是这么漏过的） | 提交前删掉 `.tsbuildinfo` 再跑一遍 |
 | 模板内联箭头函数 | `@select="key => f(key)"` 报 TS7006 隐式 any | 显式标注：`@select="(key: string \\| number) => f(String(key))"` |
 | PowerShell 5.1 | `>` 重定向写出 UTF-16；`git checkout --theirs` 是整文件级 | 用 `git checkout <rev> -- <path>` 取单文件；冲突按 hunk 解决 |
+| 中文关键词搜索假阴性 | `Get-Content`/`Select-String` 在 5.1 上按 **GBK** 解码 UTF-8 源码，搜「掩码」之类中文恒为 0 命中（曾据此误判"老 UI 没有出站掩码"） | 搜仓库内容一律用 `git grep -n「关键词」`（按字节匹配，不解码）；`read` 工具的 grep 默认可信 |
 
 ## 4. 跑完必看的收尾项
 
