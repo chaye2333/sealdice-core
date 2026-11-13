@@ -703,8 +703,12 @@ func (s *ChatConsoleStore) Append(rec ChatConsoleRecord) (*ChatConsoleMessage, e
 	s.pruneIfNeeded()
 	s.invalidateUsageLocked()
 
+	// 实时推送出去的那份消息也要带上头像地址。
+	// 读历史（Messages/Search）时会用会话的 AppID 现算，但 SSE 推送走的是这里，
+	// 之前没算 → 页面靠 SSE 收到的新消息永远只有「名字首字」，刷新后才出现头像。
 	convCopy := *conv
 	msgCopy := msg
+	msgCopy.AvatarURL = chatConsoleAvatarURL(conv.AppID, msg.SenderOpenID)
 	s.publish(ChatConsoleEvent{Type: "message", Conversation: &convCopy, Message: &msgCopy})
 	return &msgCopy, nil
 }

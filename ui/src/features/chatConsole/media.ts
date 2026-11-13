@@ -80,3 +80,29 @@ export function chatConsoleAvatarFallback(name: string | undefined): string {
   if (!trimmed) return '?';
   return Array.from(trimmed)[0] ?? '?';
 }
+
+/**
+ * 兜底头像的底色：按名字取一个稳定的颜色。
+ *
+ * 官方 QQ 只给 group_openid，群头像根本拼不出来（见后端 chatConsoleRowToConv 的注释），
+ * 所以群会话注定是首字占位。给它一个稳定的彩色背景，至少一眼能区分，
+ * 不像「全都加载失败了」的一片灰。
+ */
+export function chatConsoleAvatarColor(name: string | undefined): string {
+  const palette = [
+    '#5b8ff9',
+    '#61ddaa',
+    '#f6bd16',
+    '#e86452',
+    '#7262fd',
+    '#78d3f8',
+    '#9661bc',
+    '#f6903d',
+  ];
+  const text = name?.trim() ?? '';
+  let hash = 0;
+  for (const char of text) {
+    hash = (hash * 31 + (char.codePointAt(0) ?? 0)) % 100000;
+  }
+  return palette[hash % palette.length] ?? palette[0];
+}

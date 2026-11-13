@@ -86,6 +86,7 @@
                         round
                         :size="26"
                         :src="conversationAvatarSrc(conv)"
+                        :color="chatConsoleAvatarColor(conversationLabel(conv))"
                       >
                         {{ chatConsoleAvatarFallback(conversationLabel(conv)) }}
                       </n-avatar>
@@ -211,7 +212,12 @@
                 :class="item.dir === 'out' ? 'out' : 'in'"
               >
                 <n-flex align="center" size="small" :wrap="false" class="msg-meta">
-                  <n-avatar round :size="20" :src="senderAvatarSrc(item)">
+                  <n-avatar
+                    round
+                    :size="20"
+                    :src="senderAvatarSrc(item)"
+                    :color="chatConsoleAvatarColor(item.senderName)"
+                  >
                     {{ chatConsoleAvatarFallback(item.senderName) }}
                   </n-avatar>
                   <n-text depth="3">{{ item.senderName }} · {{ formatChatConsoleTime(item.ts) }}</n-text>
@@ -466,6 +472,8 @@
         </n-flex>
         <n-text depth="3" class="info-note">
           群资料只有官方 QQ 的「白名单机器人」才拿得到；拿不到时这里只显示已知信息。
+          官方接口不提供群头像（只给 group_openid），所以群会话显示的彩色首字是正常的，
+          单个成员的头像则会按 openid 取回。
         </n-text>
       </n-flex>
       <template #footer>
@@ -515,6 +523,7 @@ import {
   sortChatConsoleConversations,
 } from '@/features/chatConsole/viewModel';
 import {
+  chatConsoleAvatarColor,
   chatConsoleAvatarFallback,
   chatConsoleMediaLabel,
   chatConsoleMediaURL,

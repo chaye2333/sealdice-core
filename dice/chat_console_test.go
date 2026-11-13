@@ -560,6 +560,19 @@ func TestChatConsolePinnedAndAvatar(t *testing.T) {
 		t.Fatalf("unexpected message avatar: %+v", msgs)
 	}
 
+	// 实时推送（SSE）出去的那份消息也必须带头像：
+	// 页面靠实时通道收新消息，之前没算头像 → 只有「名字首字」，刷新后才正常。
+	pushed, err := s.Append(ChatConsoleRecord{
+		Kind: chatConsoleKindGroup, TargetID: "G1", AppID: "10001",
+		SenderOpenID: "MEMBER2", SenderName: "茶叶", Text: "实时消息", MessageID: "m-live",
+	})
+	if err != nil || pushed == nil {
+		t.Fatalf("append live message: %v", err)
+	}
+	if want := "https://thirdqq.qlogo.cn/qqapp/10001/MEMBER2/0"; pushed.AvatarURL != want {
+		t.Fatalf("pushed message avatar = %q, want %q", pushed.AvatarURL, want)
+	}
+
 	// 置顶后排到最前面
 	pinned, err := s.SetPinned("group:G1", true)
 	if err != nil || pinned == nil || !pinned.Pinned {
