@@ -4,6 +4,7 @@ import {
   chatConsoleMediaLabel,
   chatConsoleMediaURL,
   isChatConsoleImage,
+  isChatConsoleSafeLink,
 } from './media';
 
 describe('聊天控制台媒体', () => {
@@ -34,5 +35,16 @@ describe('聊天控制台媒体', () => {
     expect(chatConsoleAvatarFallback('调查员甲')).toBe('调');
     expect(chatConsoleAvatarFallback('   ')).toBe('?');
     expect(chatConsoleAvatarFallback(undefined)).toBe('?');
+  });
+
+  it('卡片链接只放行 http/https（挡住 javascript: 之类的伪协议）', () => {
+    expect(isChatConsoleSafeLink('https://example.com/a')).toBe(true);
+    expect(isChatConsoleSafeLink('HTTP://example.com/a')).toBe(true);
+    expect(isChatConsoleSafeLink('javascript:alert(1)')).toBe(false);
+    expect(isChatConsoleSafeLink(' JavaScript:alert(1)')).toBe(false);
+    expect(isChatConsoleSafeLink('data:text/html,<script>alert(1)</script>')).toBe(false);
+    expect(isChatConsoleSafeLink('//evil.example.com/a')).toBe(false);
+    expect(isChatConsoleSafeLink('')).toBe(false);
+    expect(isChatConsoleSafeLink(undefined)).toBe(false);
   });
 });

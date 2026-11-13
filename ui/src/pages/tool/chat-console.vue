@@ -103,7 +103,7 @@
                       <n-dropdown
                         trigger="click"
                         :options="convMenuOptions"
-                        @select="key => onConvMenu(key, conv)"
+                        @select="(key: string | number) => onConvMenu(String(key), conv)"
                       >
                         <n-button size="tiny" quaternary @click.stop>
                           <template #icon>
@@ -232,7 +232,7 @@
                             {{ item.card.arkName }}
                           </n-text>
                           <a
-                            v-if="item.card.url"
+                            v-if="isChatConsoleSafeLink(item.card.url)"
                             :href="item.card.url"
                             target="_blank"
                             rel="noreferrer"
@@ -285,7 +285,7 @@
                     v-if="canMute(item)"
                     trigger="click"
                     :options="muteOptions"
-                    @select="seconds => mute(item, Number(seconds))"
+                    @select="(seconds: string | number) => mute(item, Number(seconds))"
                   >
                     <n-button size="tiny" quaternary>禁言</n-button>
                   </n-dropdown>
@@ -382,6 +382,7 @@ import {
   chatConsoleMediaLabel,
   chatConsoleMediaURL,
   isChatConsoleImage,
+  isChatConsoleSafeLink,
 } from '@/features/chatConsole/media';
 import { useChatConsoleStream } from '@/features/chatConsole/useChatConsoleStream';
 import { useAuthStore } from '@/features/auth/store';

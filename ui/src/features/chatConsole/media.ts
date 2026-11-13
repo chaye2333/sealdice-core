@@ -22,6 +22,17 @@ export function chatConsoleAvatarURL(raw: string | undefined, token: string): st
   return chatConsoleMediaURL(raw, token);
 }
 
+/**
+ * 卡片链接只允许 http/https：`jump_url` 的内容由群里的对方决定，
+ * 直接当 `<a href>` 渲染可能被塞进 `javascript:` 之类的伪协议。
+ * 后端入库时已经拦了一道，这里对历史数据再兜一次底。
+ */
+export function isChatConsoleSafeLink(raw: string | undefined): boolean {
+  const url = raw?.trim();
+  if (!url) return false;
+  return /^https?:\/\//i.test(url);
+}
+
 export function isChatConsoleImage(kind: string | undefined): boolean {
   return kind === 'image';
 }

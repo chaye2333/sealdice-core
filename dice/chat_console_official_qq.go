@@ -213,6 +213,25 @@ func chatConsoleInboundMsgIdx(payload *dto.Message) string {
 	return strings.TrimSpace(payload.MessageScene.MsgIdx())
 }
 
+// chatConsoleSafeLink 只放行 http/https 链接。卡片的 jump_url 来自对端，
+// 前端会把它渲染成可点击的 <a href>，javascript:/data: 之类的伪协议必须挡在入库前。
+func chatConsoleSafeLink(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return raw
+	default:
+		return ""
+	}
+}
+
 // chatConsoleInboundCard 还原结构化卡片（message_type=3）的原始字段，
 // 供前端渲染成可点的链接卡片；文本里那份可读摘要仍然保留，用于搜索与纯文本场景。
 func chatConsoleInboundCard(payload *dto.Message) *ChatConsoleCard {
@@ -226,8 +245,8 @@ func chatConsoleInboundCard(payload *dto.Message) *ChatConsoleCard {
 		Title:   strings.TrimSpace(ark.Fields["title"]),
 		Desc:    strings.TrimSpace(ark.Fields["desc"]),
 		Source:  strings.TrimSpace(ark.Fields["source"]),
-		URL:     strings.TrimSpace(ark.Fields["jump_url"]),
-		Preview: strings.TrimSpace(ark.Fields["preview"]),
+		URL:     chatConsoleSafeLink(ark.Fields["jump_url"]),
+		Preview: chatConsoleSafeLink(ark.Fields["preview"]),
 	}
 	if card.Title == "" {
 		card.Title = strings.TrimSpace(ark.Prompt)

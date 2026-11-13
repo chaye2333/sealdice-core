@@ -198,6 +198,45 @@ func TestChatConsoleInboundCard(t *testing.T) {
 	}
 }
 
+// TestChatConsoleInboundCardDropsUnsafeLinks 卡片链接由对端决定，
+// 前端会直接当 <a href> 渲染，所以入库前只放行 http/https。
+func TestChatConsoleInboundCardDropsUnsafeLinks(t *testing.T) {
+	for _, bad := range []string{
+		"javascript:alert(document.cookie)",
+		" JavaScript:alert(1)",
+		"data:text/html,<script>alert(1)</script>",
+		"vbscript:msgbox(1)",
+		"//evil.example.com/a",
+	} {
+		card := chatConsoleInboundCard(&dto.Message{
+			MessageType: 3,
+			ARKData: &dto.ARKData{
+				ArkName: "小程序",
+				Fields:  map[string]string{"title": "标题", "jump_url": bad, "preview": bad},
+			},
+		})
+		if card == nil {
+			t.Fatalf("%q: card should survive as text-only card", bad)
+		}
+		if card.URL != "" {
+			t.Fatalf("%q: url = %q, want dropped", bad, card.URL)
+		}
+		if card.Preview != "" {
+			t.Fatalf("%q: preview = %q, want dropped", bad, card.Preview)
+		}
+	}
+
+	// 正常链接保持原样，大小写协议也认
+	for _, good := range []string{"https://example.com/a", "HTTP://example.com/a"} {
+		card := chatConsoleInboundCard(&dto.Message{
+			ARKData: &dto.ARKData{Fields: map[string]string{"title": "标题", "jump_url": good}},
+		})
+		if card == nil || card.URL != good {
+			t.Fatalf("%q: card = %#v", good, card)
+		}
+	}
+}
+
 // TestChatConsoleQuoteUsesMsgIdx 锁定引用出站的取值规则：
 // 引用**用户消息**必须用 message_scene.ext 的 msg_idx（REFIDX_…），
 // 不能用 ROBOT1.0_ 开头的消息 id。
