@@ -35,23 +35,24 @@ const (
 )
 
 // ---------- 日志输出的兜底包装 ----------
+// 名字必须带 f 后缀：这三个函数收 format+args，goprintffuncname 会强制要求。
 
-// identityBindInfo 写一条普通日志。d / d.Logger 可能为 nil（极简实例、部分测试）。
-func identityBindInfo(d *Dice, format string, args ...any) {
+// identityBindInfof 写一条普通日志。d / d.Logger 可能为 nil（极简实例、部分测试）。
+func identityBindInfof(d *Dice, format string, args ...any) {
 	if d != nil && d.Logger != nil {
 		d.Logger.Infof(format, args...)
 	}
 }
 
-// identityBindWarn 写一条警告日志。用于「绑定成立，但结果可疑」这类情况。
-func identityBindWarn(d *Dice, format string, args ...any) {
+// identityBindWarnf 写一条警告日志。用于「绑定成立，但结果可疑」这类情况。
+func identityBindWarnf(d *Dice, format string, args ...any) {
 	if d != nil && d.Logger != nil {
 		d.Logger.Warnf(format, args...)
 	}
 }
 
-// identityBindError 写一条错误日志。用于数据库不可用、落盘失败这类真正的故障。
-func identityBindError(d *Dice, format string, args ...any) {
+// identityBindErrorf 写一条错误日志。用于数据库不可用、落盘失败这类真正的故障。
+func identityBindErrorf(d *Dice, format string, args ...any) {
 	if d != nil && d.Logger != nil {
 		d.Logger.Errorf(format, args...)
 	}
@@ -95,7 +96,7 @@ func identityBindLogGroupNames(d *Dice, groupID string, names []string) string {
 	if limit > identityBindLogPreviewLimit {
 		limit = identityBindLogPreviewLimit
 	}
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		if i > 0 {
 			b.WriteString(" / ")
 		}
@@ -252,11 +253,11 @@ func identityBindLogShareReportForSuccess(d *Dice, c *identityBindCodeChallenge)
 func identityBindReportLogShare(d *Dice, prefix string, summary *identityBindLogShareSummary) {
 	switch {
 	case summary.HasError():
-		identityBindError(d, "%s 日志接续异常: %s", prefix, summary.LogText(d))
+		identityBindErrorf(d, "%s 日志接续异常: %s", prefix, summary.LogText(d))
 	case summary.HasProblem():
-		identityBindWarn(d, "%s 日志接续提醒: %s", prefix, summary.LogText(d))
+		identityBindWarnf(d, "%s 日志接续提醒: %s", prefix, summary.LogText(d))
 	default:
-		identityBindInfo(d, "%s 日志接续: %s", prefix, summary.LogText(d))
+		identityBindInfof(d, "%s 日志接续: %s", prefix, summary.LogText(d))
 	}
 }
 
@@ -283,7 +284,7 @@ func identityBindLogCandidates(d *Dice, groupID string) []string {
 		Distinct().
 		Pluck("group_id", &ids).Error
 	if err != nil {
-		identityBindWarn(d, "群绑定日志排查失败: 旧群=%s err=%v", groupID, err)
+		identityBindWarnf(d, "群绑定日志排查失败: 旧群=%s err=%v", groupID, err)
 		return nil
 	}
 	sort.Strings(ids)

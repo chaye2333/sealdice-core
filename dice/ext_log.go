@@ -616,12 +616,12 @@ func RegisterBuiltinExtLog(self *Dice) {
 					}
 					if groupID != requestedGroupID {
 						// 这条只在「确实读了绑定旧群」时打，避免普通 .log list 刷日志。
-						identityBindInfo(ctx.Dice, "日志列表: 请求群=%s 已改读绑定旧群=%s 条数=%d",
+						identityBindInfof(ctx.Dice, "日志列表: 请求群=%s 已改读绑定旧群=%s 条数=%d",
 							requestedGroupID, groupID, len(index.entries))
 					}
 				} else {
 					// 以前这里只回给用户，后台一点痕迹都没有，"loglist 显示无"根本无从排查。
-					identityBindError(ctx.Dice, "日志列表读取失败: 请求群=%s 实际读取群=%s err=%v",
+					identityBindErrorf(ctx.Dice, "日志列表读取失败: 请求群=%s 实际读取群=%s err=%v",
 						requestedGroupID, groupID, err)
 					text.WriteString("获取记录出错: ")
 					text.WriteString(err.Error())

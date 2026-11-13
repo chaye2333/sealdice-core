@@ -1321,7 +1321,7 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	}
 	if existing, ok := identityBindStoreOf(d).find(d, oldID); ok {
 		identityBindFinishChallenge(matchedKey, "确认时该旧身份已被绑定")
-		identityBindWarn(d, "身份绑定确认失败: %s 已被绑定到 %s 认证人=%s",
+		identityBindWarnf(d, "身份绑定确认失败: %s 已被绑定到 %s 认证人=%s",
 			oldID, identityBindRecordEndpointID(existing), msg.Sender.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"绑定失败：%s 已经被绑定到 %s 了，请先解除那边的绑定。",
@@ -1330,7 +1330,7 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	}
 	if existing, ok := identityBindStoreOf(d).find(d, newID); ok {
 		identityBindFinishChallenge(matchedKey, "确认时发起者已有绑定")
-		identityBindWarn(d, "身份绑定确认失败: %s 已绑定 %s 认证人=%s",
+		identityBindWarnf(d, "身份绑定确认失败: %s 已绑定 %s 认证人=%s",
 			newID, identityBindRecordOldID(existing), msg.Sender.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"绑定失败：当前身份已经绑定了 %s，请先发送 `.unbind`。",
@@ -1339,7 +1339,7 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 	}
 	if err := identityBindStoreOf(d).put(d, record); err != nil {
 		identityBindCodeUpdate(matchedKey, func(c *identityBindCodeChallenge) { c.Attempts++ })
-		identityBindError(d, "身份绑定保存失败: 类型=%s 发起者=%s 旧侧=%s err=%v",
+		identityBindErrorf(d, "身份绑定保存失败: 类型=%s 发起者=%s 旧侧=%s err=%v",
 			matched.Action, matched.New.UserID, oldID, err)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf("绑定保存失败: %v", err))
 		return true
@@ -1396,7 +1396,7 @@ func identityBindTryConsumeCode(ctx *MsgContext, msg *Message, text string) bool
 				matched.New.GroupID, matched.Old.GroupID), NoticeTypeGroup)
 		}
 	} else {
-		identityBindInfo(d, "身份绑定成功[个人]: 官方身份=%s 旧QQ=%s 确认人=%s",
+		identityBindInfof(d, "身份绑定成功[个人]: 官方身份=%s 旧QQ=%s 确认人=%s",
 			matched.New.UserID, matched.Old.UserID, msg.Sender.UserID)
 		identityBindReplyPerson(ctx, msg.Sender.UserID, fmt.Sprintf(
 			"验证通过！你的官方身份 %s 现在与旧 QQ 号 %s 共用同一份数据。",
