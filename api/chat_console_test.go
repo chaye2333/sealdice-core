@@ -423,3 +423,30 @@ func TestChatConsoleMediaWhitelist(t *testing.T) {
 		}
 	}
 }
+
+// TestChatConsoleAcceptsQueryToken 锁定 SSE 与媒体代理的鉴权方式。
+//
+// `EventSource` 不能带请求头，`<img>` 也不能，所以前端只能把令牌拼进查询串
+// （`/chat-console/events?token=` 与 `/chat-console/media?url=&token=`）。
+// 这里保证 `?token=` 与 `token` 头等价，否则实时推送和头像会直接 403。
+func TestChatConsoleAcceptsQueryToken(t *testing.T) {
+	e, token := chatConsoleTestEnv(t)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/sd-api/chat-console/conversations?token="+token,
+		nil,
+	)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query token status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 无令牌时仍然要拒绝
+	bad := httptest.NewRecorder()
+	e.ServeHTTP(bad, httptest.NewRequest(http.MethodGet, "/sd-api/chat-console/conversations", nil))
+	if bad.Code != http.StatusForbidden {
+		t.Fatalf("no token status = %d, want 403", bad.Code)
+	}
+}
