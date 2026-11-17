@@ -1,13 +1,8 @@
-import { useAuthStore } from '@/features/auth/store';
-import { appPinia } from '@/pinia';
-import { client } from './generated/client.gen';
+import { requestV1, type V1RequestMethod, type V1RequestOptions } from './v1Request';
 
 /**
  * 聊天控制台的接口还是 v1（`/sd-api/chat-console/*`，echo 风格），没有进 OpenAPI，
  * 所以这里手工封装，复用同一个 axios 实例（401 清理、错误归一化都走既有拦截器）。
- *
- * ⚠️ 鉴权注意：v1 的 `doAuth` 读的是 **`token` 头**（或 `?token=` 查询参数），
- * 不是 `Authorization: Bearer`。所以这里两个头都带上：前者给 v1，后者给统一拦截器。
  */
 
 export type ChatConsoleKind = 'group' | 'c2c';
@@ -99,33 +94,11 @@ export type ChatConsoleEvent = {
   message?: ChatConsoleMessage;
 };
 
-type Envelope = { result?: boolean; err?: string };
-
-function authHeaders(): Record<string, string> {
-  const token = useAuthStore(appPinia).token;
-  if (!token) return {};
-  // v1 认 token 头；Authorization 让统一拦截器把它当成正常登录请求处理
-  return { token, Authorization: `Bearer ${token}` };
-}
-
-async function requestJson<T>(
-  method: 'get' | 'post',
+const requestJson = <T>(
+  method: V1RequestMethod,
   url: string,
-  options: { params?: Record<string, unknown>; body?: unknown; formData?: FormData } = {}
-): Promise<T> {
-  const response = await client.instance.request<Envelope & T>({
-    method,
-    url,
-    params: options.params,
-    data: options.formData ?? options.body,
-    headers: authHeaders(),
-  });
-  const data = response.data as (Envelope & T) | undefined;
-  if (!data || data.result === false) {
-    throw new Error(data?.err || '聊天控制台请求失败');
-  }
-  return data;
-}
+  options: V1RequestOptions = {}
+): Promise<T> => requestV1<T>(method, url, { ...options, fallbackError: '聊天控制台请求失败' });
 
 export async function fetchChatConsoleConversations(): Promise<ChatConsoleConversation[]> {
   const data = await requestJson<{ conversations?: ChatConsoleConversation[] }>(

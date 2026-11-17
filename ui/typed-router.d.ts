@@ -157,6 +157,13 @@ declare module 'vue-router/auto-routes' {
       Record<never, never>,
       | never
     >,
+    '/tool/md-image': RouteRecordInfo<
+      '/tool/md-image',
+      '/tool/md-image',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
     '/tool/profile': RouteRecordInfo<
       '/tool/profile',
       '/tool/profile',
@@ -296,6 +303,12 @@ declare module 'vue-router/auto-routes' {
     'src/pages/tool/chat-console.vue': {
       routes:
         | '/tool/chat-console'
+      views:
+        | never
+    }
+    'src/pages/tool/md-image.vue': {
+      routes:
+        | '/tool/md-image'
       views:
         | never
     }

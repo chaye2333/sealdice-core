@@ -148,6 +148,13 @@ export const appNavigation: NavigationItem[] = [
         layout: 'workspace',
       },
       {
+        label: 'MD 图片管理',
+        title: 'MD 图片管理',
+        path: '/tool/md-image',
+        icon: 'md-image',
+        layout: 'wide',
+      },
+      {
         label: '资源管理',
         title: '资源管理',
         path: '/tool/resource',

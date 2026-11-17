@@ -108,6 +108,7 @@ require (
 	github.com/klauspost/compress v1.18.7
 	github.com/sixafter/aes-ctr-drbg v1.16.0
 	github.com/tus/tusd/v2 v2.10.1
+	golang.org/x/image v0.41.0
 )
 
 require (
@@ -219,7 +220,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.21.0 // indirect
-	golang.org/x/image v0.41.0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/term v0.45.0 // indirect

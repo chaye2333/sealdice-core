@@ -766,6 +766,11 @@ func BindV1(e *echo.Echo, _myDice *dice.DiceManager) {
 	e.POST(prefix+"/chat-console/group-info", chatConsoleRefreshInfo)
 	e.GET(prefix+"/chat-console/events", chatConsoleEvents)
 
+	// 官方 QQ Markdown 图片素材（/v2/media-images）
+	e.GET(prefix+"/official-qq/media-images", officialQQMediaImagesGet)
+	e.POST(prefix+"/official-qq/media-images", officialQQMediaImagesUpload)
+	e.DELETE(prefix+"/official-qq/media-images/:imageId", officialQQMediaImagesDelete)
+
 	e.GET(prefix+"/store/backend/list", storeBackendList)
 	e.POST(prefix+"/store/backend/add", storeAddBackend)
 	e.POST(prefix+"/store/backend/enable", storeEnableBackend)

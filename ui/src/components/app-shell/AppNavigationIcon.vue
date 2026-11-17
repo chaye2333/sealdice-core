@@ -20,6 +20,7 @@
   <i-tabler-tool v-else-if="name === 'tools'" />
   <i-tabler-command v-else-if="name === 'test'" />
   <i-tabler-photo v-else-if="name === 'resource'" />
+  <i-tabler-markdown v-else-if="name === 'md-image'" />
   <i-tabler-activity v-else-if="name === 'profile'" />
   <i-tabler-info-circle v-else-if="name === 'star'" />
   <i-tabler-menu-2 v-else />
