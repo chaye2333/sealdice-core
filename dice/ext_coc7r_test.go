@@ -2,6 +2,7 @@
 package dice
 
 import (
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -572,7 +573,7 @@ func TestCoc7RTakeFiveViaEn(t *testing.T) {
 
 	before := skillValue(t, runCmd(t, d, ep, adapter, ".st show 射击:手枪"), "射击:手枪")
 	grown := false
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		runCmd(t, d, ep, adapter, ".en 射击:手枪+5")
 		if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 射击:手枪"), "射击:手枪"); v > before {
 			grown = true
@@ -597,7 +598,7 @@ func TestCoc7RShockBlocksSanityLoss(t *testing.T) {
 	runCmd(t, d, ep, adapter, ".st 意志99 智力99 理智90")
 
 	shocked := false
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		got := runCmd(t, d, ep, adapter, ".sc 5/5")
 		if strings.Contains(got, "陷入 Shock") {
 			shocked = true
@@ -624,5 +625,65 @@ func TestCoc7RShockBlocksSanityLoss(t *testing.T) {
 	resumed := runCmd(t, d, ep, adapter, ".sc 5/5")
 	if !strings.Contains(resumed, "（-5）") {
 		t.Fatalf("解除 Shock 后应恢复扣理智: %q", resumed)
+	}
+}
+
+// .sc 必须写入指令信息，否则跑团日志的骰点简报里看不到 coc7r 的理智检定。
+// 这里用 --ci 取出真实回复里的 JSON，再按日志从数据库读回的形状喂给简报函数。
+func TestCoc7RScCommandInfoFeedsLogBrief(t *testing.T) {
+	d, ep, adapter, cleanup := newExecuteNewTestDice(t)
+	t.Cleanup(cleanup)
+	prepareC7RTestDB(t, d)
+
+	runCmd(t, d, ep, adapter, ".set coc7r")
+	runCmd(t, d, ep, adapter, ".st 意志50 智力50 理智50")
+
+	got := runCmd(t, d, ep, adapter, ".sc 0/1000 --ci")
+	idx := strings.LastIndex(got, "\n")
+	if idx < 0 {
+		t.Fatalf("--ci 回复里没有指令信息: %q", got)
+	}
+	var info map[string]any
+	if err := json.Unmarshal([]byte(got[idx+1:]), &info); err != nil {
+		t.Fatalf("--ci 输出的不是指令信息 JSON: %q (%v)", got, err)
+	}
+	if info["cmd"] != "sc" || info["rule"] != "coc7r" {
+		t.Fatalf("指令信息规则/指令名异常: %#v", info)
+	}
+	items, ok := info["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("指令信息 items 异常: %#v", info["items"])
+	}
+	item, _ := items[0].(map[string]any)
+	for _, key := range []string{"rank", "sanOld", "sanNew", "exprs"} {
+		if _, exists := item[key]; !exists {
+			t.Fatalf("指令信息缺少字段 %q: %#v", key, item)
+		}
+	}
+
+	group, exists := d.ImSession.ServiceAtNew.Load("QQ-Group:c7r")
+	if !exists {
+		t.Fatal("群信息未创建")
+	}
+	mctx := &MsgContext{Dice: d, Group: group, EndPoint: ep}
+	brief := LogRollBriefByPC(mctx, []*model.LogOneItem{{CommandInfo: info}}, true, "")
+	if !strings.Contains(brief, "理智") {
+		t.Fatalf("骰点简报未统计 coc7r 的理智检定: %q", brief)
+	}
+	if !strings.Contains(brief, "成功: 理智") && !strings.Contains(brief, "失败: 理智") {
+		t.Fatalf("骰点简报未统计理智成败: %q", brief)
+	}
+}
+
+func TestLogRuleIsCoc(t *testing.T) {
+	for rule, want := range map[string]bool{
+		"coc7":  true,
+		"coc7r": true,
+		"dnd5e": false,
+		"":      false,
+	} {
+		if got := logRuleIsCoc(rule); got != want {
+			t.Fatalf("logRuleIsCoc(%q) = %v, want %v", rule, got, want)
+		}
 	}
 }

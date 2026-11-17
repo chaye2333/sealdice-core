@@ -1623,7 +1623,7 @@ func LogRollBriefByPCV2(ctx *MsgContext, items []string, showAll bool, name stri
 			}
 			continue
 		}
-		if info.Get("rule").String() == "coc7" {
+		if logRuleIsCoc(info.Get("rule").String()) {
 			switch info.Get("cmd").String() {
 			case "ra":
 				ok2 := info.Get("items").IsArray()
@@ -1818,6 +1818,12 @@ func LogRollBriefByPCV2(ctx *MsgContext, items []string, showAll bool, name stri
 	return strings.TrimSpace(texts.String())
 }
 
+// logRuleIsCoc 判断指令信息是否来自 COC 系规则。
+// coc7r（守秘人伴侣）复用 coc7 的 .sc 统计字段，只在规则名上区分。
+func logRuleIsCoc(rule string) bool {
+	return rule == "coc7" || rule == "coc7r"
+}
+
 // LogRollBriefByPC 根据log生成骰点简报
 func LogRollBriefByPC(ctx *MsgContext, items []*model.LogOneItem, showAll bool, name string) string {
 	pcInfo := map[string]map[string]int{}
@@ -1858,7 +1864,7 @@ func LogRollBriefByPC(ctx *MsgContext, items []*model.LogOneItem, showAll bool, 
 				}
 				continue
 			}
-			if info["rule"] == "coc7" {
+			if logRuleIsCoc(fmt.Sprintf("%v", info["rule"])) {
 				switch info["cmd"] {
 				case "ra":
 					items, ok2 := info["items"].([]interface{})
@@ -2102,7 +2108,7 @@ func LogRollBriefDetail(items []*model.LogOneItem) []string {
 				}
 				continue
 			}
-			if info["rule"] == "coc7" {
+			if logRuleIsCoc(fmt.Sprintf("%v", info["rule"])) {
 				switch info["cmd"] {
 				case "ra":
 					items, ok2 := info["items"].([]interface{})

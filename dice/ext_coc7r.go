@@ -2,6 +2,7 @@ package dice
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -146,11 +147,11 @@ func c7rLoadRules(d *Dice, groupID string) coc7rRules {
 
 func c7rSaveRules(d *Dice, groupID string, rules coc7rRules) error {
 	if d == nil || groupID == "" {
-		return fmt.Errorf("缺少群信息")
+		return errors.New("缺少群信息")
 	}
 	ext := d.ExtFind(c7rExtName, false)
 	if ext == nil {
-		return fmt.Errorf("coc7r 扩展未加载")
+		return errors.New("coc7r 扩展未加载")
 	}
 	raw, err := json.Marshal(rules)
 	if err != nil {
@@ -326,7 +327,7 @@ type c7rLossResult struct {
 	loss int64 // 实际扣除
 }
 
-func c7rEvalLoss(ctx *MsgContext, expr string, fumble bool, half bool, cap int64) (c7rLossResult, error) {
+func c7rEvalLoss(ctx *MsgContext, expr string, fumble bool, half bool, maxLoss int64) (c7rLossResult, error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		expr = "0"
@@ -341,8 +342,8 @@ func c7rEvalLoss(ctx *MsgContext, expr string, fumble bool, half bool, cap int64
 	if half {
 		v /= 2
 	}
-	if cap > 0 && v > cap {
-		v = cap
+	if maxLoss > 0 && v > maxLoss {
+		v = maxLoss
 	}
 	return c7rLossResult{loss: v}, nil
 }
@@ -442,6 +443,23 @@ func cmdScCoc7R(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResul
 	}
 	VarSetValueInt64(mctx, "理智", sanNew)
 
+	// 指令信息供跑团日志/骰点简报统计，字段与 coc7 的 .sc 保持一致
+	ctx.CommandInfo = map[string]any{
+		"cmd":     "sc",
+		"rule":    c7rExtName,
+		"pcName":  mctx.Player.Name,
+		"cocRule": mctx.Group.CocRuleIndex,
+		"items": []any{
+			map[string]any{
+				"outcome": d100,
+				"exprs":   []string{"1d100", succExpr, failExpr},
+				"rank":    rank,
+				"sanOld":  san,
+				"sanNew":  sanNew,
+			},
+		},
+	}
+
 	var b strings.Builder
 	verdict := "成功"
 	switch {
@@ -468,7 +486,7 @@ func cmdScCoc7R(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResul
 		} else if loss >= 5 {
 			b.WriteString(DiceFormatTmpl(mctx, "COC:提示_临时疯狂") + "\n")
 		}
-		ReplyToSender(mctx, msg, strings.TrimRight(b.String(), "\n"))
+		c7rReplySc(ctx, mctx, msg, cmdArgs, b.String())
 		if mctx.Player.AutoSetNameTemplate != "" {
 			_, _ = SetPlayerGroupCardByTemplate(mctx, mctx.Player.AutoSetNameTemplate)
 		}
@@ -499,11 +517,8 @@ func cmdScCoc7R(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResul
 	// 单次损失达标 → INT 检定决定是否 Shock
 	shocked := false
 	if loss >= shockThreshold {
-		intRoll, intDetail := c7rRollD100WithDice(mctx, 0, 0)
+		intRoll, _ := c7rRollD100WithDice(mctx, 0, 0)
 		intSuccess := intRoll <= intel
-		if intDetail != "" {
-			intDetail = "（" + intDetail + "）"
-		}
 		if intSuccess {
 			shocked = true
 			rounds := c7rRollDie(mctx, 10)
@@ -549,11 +564,24 @@ func cmdScCoc7R(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResul
 
 	c7rSaveState(mctx.Dice, stateKey, st)
 
-	ReplyToSender(mctx, msg, strings.TrimRight(b.String(), "\n"))
+	c7rReplySc(ctx, mctx, msg, cmdArgs, b.String())
 	if mctx.Player.AutoSetNameTemplate != "" {
 		_, _ = SetPlayerGroupCardByTemplate(mctx, mctx.Player.AutoSetNameTemplate)
 	}
 	return CmdExecuteResult{Matched: true, Solved: true}
+}
+
+// c7rReplySc 发送理智检定的最终回复。
+// .sc 的回复不挂 QQ 官方状态栏（与 coc7 一致）；带 --ci 时附上指令信息。
+func c7rReplySc(ctx, mctx *MsgContext, msg *Message, cmdArgs *CmdArgs, text string) {
+	text = strings.TrimRight(text, "\n")
+	if cmdArgs.GetKwarg("ci") != nil && ctx.CommandInfo != nil {
+		if info, err := json.Marshal(ctx.CommandInfo); err == nil {
+			text += "\n" + string(info)
+		}
+	}
+	clearOfficialQQStatusBarPending(mctx)
+	ReplyToSender(mctx, msg, text)
 }
 
 // c7rInitiativeText 圆桌式先攻：偶数向左手边，奇数向右手边。
@@ -867,7 +895,7 @@ func RegisterBuiltinExtCoc7R(self *Dice) {
 	helpSc := strings.Join([]string{
 		".sc <成功损失>/<失败损失> // 例：.sc 0/1D6",
 		".sc b 0/1 // 奖励骰（b2、b3 为多颗）；惩罚骰用 p、p2",
-		"  --cap N   单次损失上限（用于“习惯恐惧”房规）",
+		"  --cap=N   单次损失上限（用于“习惯恐惧”房规）",
 		"  --half    损失减半",
 		"  --mythos  本次冲击来自神话（需开启 mythos 可选规则）",
 	}, "\n")
@@ -877,18 +905,14 @@ func RegisterBuiltinExtCoc7R(self *Dice) {
 		ShortHelp:     helpSc,
 		Help:          "理智检定（守秘人伴侣版）:\n" + helpSc,
 		AllowDelegate: true,
-		Solve: func(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
-			return cmdScCoc7R(ctx, msg, cmdArgs)
-		},
+		Solve:         cmdScCoc7R,
 	}
 
 	cmdHub := &CmdItemInfo{
 		Name:      "c7r",
 		ShortHelp: ".c7r help|rule|status|ri|migrate|reset // coc7r 规则辅助",
 		Help:      c7rHelpText(),
-		Solve: func(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
-			return cmdC7RHub(ctx, msg, cmdArgs)
-		},
+		Solve:     cmdC7RHub,
 	}
 
 	theExt := &ExtInfo{
