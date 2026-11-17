@@ -728,7 +728,7 @@ func TestChatConsoleGroupProfile(t *testing.T) {
 	}
 
 	// 没连官方接口时，手动刷新要给出可读的错误而不是崩
-	if _, err := RefreshChatConsoleGroupInfo(nil, "group:G9"); err == nil {
+	if _, err := RefreshChatConsoleConversationInfo(nil, "group:G9"); err == nil {
 		t.Fatalf("nil dice should return an error")
 	}
 }

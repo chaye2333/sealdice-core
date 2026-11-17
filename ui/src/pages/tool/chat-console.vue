@@ -128,6 +128,14 @@
                     >
                       仅 @ 消息
                     </n-tag>
+                    <n-tag
+                      v-if="conv.kind === 'c2c' && conv.allowProactiveMsg === false"
+                      size="small"
+                      :bordered="false"
+                      type="warning"
+                    >
+                      仅被动
+                    </n-tag>
                     <n-tag v-if="conv.memberCount" size="small" :bordered="false">
                       {{ conv.memberCount }} 人
                     </n-tag>
@@ -177,13 +185,13 @@
                   资料
                 </n-button>
                 <n-button
-                  v-if="selectedConversation?.kind === 'group' && !isMobile"
+                  v-if="selectedConversation && !isMobile"
                   size="tiny"
                   secondary
                   :loading="refreshingInfo"
-                  @click="refreshGroupInfo"
+                  @click="refreshConversationInfo"
                 >
-                  刷新群资料
+                  {{ selectedConversation.kind === 'group' ? '刷新群资料' : '刷新用户资料' }}
                 </n-button>
                 <n-dropdown
                   v-if="selectedConversation && isMobile"
@@ -409,7 +417,14 @@
                   发送
                 </n-button>
               </n-flex>
-              <n-text depth="3" class="composer-note">
+              <n-text
+                v-if="selectedConversation?.kind === 'c2c' && selectedConversation?.allowProactiveMsg === false"
+                depth="3"
+                class="composer-note"
+              >
+                该用户未开启主动推送：只能在他发消息后的被动窗口内回复，主动发送可能被官方拒绝。
+              </n-text>
+              <n-text v-else depth="3" class="composer-note">
                 私聊主动消息有官方限额；正文支持 [CQ:at,qq=openid] / [CQ:reply,id=msgid]，
                 官方 QQ 的 @ 与引用会转成平台格式。
               </n-text>
@@ -511,6 +526,10 @@
           <n-text depth="3" class="info-label">成员数</n-text>
           <n-text>{{ selectedConversation.memberCount }}</n-text>
         </n-flex>
+        <n-flex v-if="selectedConversation.kind === 'c2c'" size="small" :wrap="false">
+          <n-text depth="3" class="info-label">主动推送</n-text>
+          <n-text>{{ allowProactiveText(selectedConversation) }}</n-text>
+        </n-flex>
         <n-flex size="small" :wrap="false">
           <n-text depth="3" class="info-label">消息范围</n-text>
           <n-text>
@@ -530,13 +549,17 @@
           <n-text class="info-memo">{{ selectedConversation.fingerMemo }}</n-text>
         </n-flex>
         <n-text depth="3" class="info-note">
-          群资料只有官方 QQ 的「白名单机器人」才拿得到；拿不到时这里只显示已知信息。
-          官方接口不提供群头像（只给 group_openid），所以群会话显示的彩色首字是正常的，
-          单个成员的头像则会按 openid 取回。
+          群资料只有官方 QQ 的「白名单机器人」才拿得到；私聊资料来自
+          /v2/users/{openid}/info，没有好友关系时会查不到。
+          官方接口不提供群头像（只给 group_openid），所以群会话显示的彩色首字是正常的；
+          私聊头像和成员头像按 AppID + openid 拼 thirdqq.qlogo.cn 地址。
         </n-text>
       </n-flex>
       <template #footer>
-        <n-flex justify="end">
+        <n-flex justify="space-between" align="center">
+          <n-button size="small" secondary :loading="refreshingInfo" @click="refreshConversationInfo">
+            刷新资料
+          </n-button>
           <n-button size="small" @click="infoVisible = false">关闭</n-button>
         </n-flex>
       </template>
@@ -562,7 +585,7 @@ import {
   pinChatConsoleConversation,
   purgeChatConsole,
   recallChatConsoleMessage,
-  refreshChatConsoleGroupInfo,
+  refreshChatConsoleInfo,
   renameChatConsoleConversation,
   saveChatConsoleRetention,
   searchChatConsole,
@@ -665,15 +688,15 @@ let searchTimer: number | undefined;
 
 const convMenuOptions = [
   { label: '重命名', key: 'rename' },
-  { label: '刷新群资料', key: 'group-info' },
+  { label: '刷新资料', key: 'group-info' },
   { label: '置顶 / 取消置顶', key: 'pin' },
 ];
 
 /** 窄屏聊天头部只留「资料」，其余操作收进「···」菜单。 */
 const chatMenuOptions = computed(() => {
   const options = [{ label: '复制会话 ID', key: 'copy' }];
-  if (selectedConversation.value?.kind === 'group') {
-    options.push({ label: '刷新群资料', key: 'group-info' });
+  if (selectedConversation.value) {
+    options.push({ label: '刷新资料', key: 'group-info' });
   }
   return options;
 });
@@ -683,7 +706,7 @@ function onChatMenu(key: string) {
     void copyConversationID();
     return;
   }
-  if (key === 'group-info') void refreshGroupInfo();
+  if (key === 'group-info') void refreshConversationInfo();
 }
 
 const muteOptions = [
@@ -1014,7 +1037,7 @@ function onConvMenu(key: string, conv: ChatConsoleConversation) {
     return;
   }
   if (key === 'group-info') {
-    void refreshGroupInfoOf(conv);
+    void refreshConversationInfoOf(conv);
     return;
   }
   renameKey.value = conv.key;
@@ -1022,26 +1045,23 @@ function onConvMenu(key: string, conv: ChatConsoleConversation) {
   renameVisible.value = true;
 }
 
-async function refreshGroupInfoOf(conv: ChatConsoleConversation) {
-  if (conv.kind !== 'group') {
-    message.warning('只有群会话能刷新群资料');
-    return;
-  }
+/** 刷新会话资料：群聊查群名/简介/标签，私聊查用户名与 allow_proactive_msg。 */
+async function refreshConversationInfoOf(conv: ChatConsoleConversation) {
   refreshingInfo.value = true;
   try {
-    const updated = await refreshChatConsoleGroupInfo(conv.key);
+    const updated = await refreshChatConsoleInfo(conv.key);
     if (updated) upsertConversation(updated);
-    message.success('群资料已刷新');
+    message.success(conv.kind === 'group' ? '群资料已刷新' : '用户资料已刷新');
   } catch (error) {
-    notifyError(error, message, '刷新群资料失败');
+    notifyError(error, message, conv.kind === 'group' ? '刷新群资料失败' : '刷新用户资料失败');
   } finally {
     refreshingInfo.value = false;
   }
 }
 
-async function refreshGroupInfo() {
+async function refreshConversationInfo() {
   if (!selectedConversation.value) return;
-  await refreshGroupInfoOf(selectedConversation.value);
+  await refreshConversationInfoOf(selectedConversation.value);
 }
 
 async function submitRename() {
@@ -1131,6 +1151,12 @@ async function purgeAllConversations() {
   } finally {
     purgingAll.value = false;
   }
+}
+
+/** 私聊的「是否允许主动推送」文案。 */
+function allowProactiveText(conv: ChatConsoleConversation): string {
+  if (conv.allowProactiveMsg === undefined) return '未知（点「刷新资料」查询）';
+  return conv.allowProactiveMsg ? '允许' : '不允许（只能被动回复）';
 }
 
 /** 字节数转成好读的单位。 */

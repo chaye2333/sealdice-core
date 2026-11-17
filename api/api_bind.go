@@ -763,7 +763,7 @@ func BindV1(e *echo.Echo, _myDice *dice.DiceManager) {
 	e.POST(prefix+"/chat-console/pin", chatConsolePin)
 	e.GET(prefix+"/chat-console/media", chatConsoleMedia)
 	e.GET(prefix+"/chat-console/search", chatConsoleSearch)
-	e.POST(prefix+"/chat-console/group-info", chatConsoleGroupInfo)
+	e.POST(prefix+"/chat-console/group-info", chatConsoleRefreshInfo)
 	e.GET(prefix+"/chat-console/events", chatConsoleEvents)
 
 	e.GET(prefix+"/store/backend/list", storeBackendList)

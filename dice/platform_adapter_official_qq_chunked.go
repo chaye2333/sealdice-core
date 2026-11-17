@@ -404,9 +404,13 @@ func (pa *PlatformAdapterOfficialQQ) officialQQAPIBaseURL() string {
 func (pa *PlatformAdapterOfficialQQ) officialQQAPIRequest(
 	qctx context.Context, method, apiPath string, body any,
 ) ([]byte, error) {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
+	var payload []byte
+	if body != nil {
+		var err error
+		payload, err = json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	req, err := http.NewRequestWithContext(qctx, method,

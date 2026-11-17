@@ -10,6 +10,7 @@ package api
 //	POST /sd-api/chat-console/mute                 禁言 / 解禁群成员
 //	POST /sd-api/chat-console/read                 标记已读
 //	POST /sd-api/chat-console/rename               手动改会话名
+//	POST /sd-api/chat-console/group-info           刷新会话资料（群资料 / 私聊用户资料）
 //	GET  /sd-api/chat-console/events               SSE 实时推送
 //
 // 所有接口沿用 WebUI 的 AccessToken 鉴权（token 头或 token 查询参数）。
@@ -73,8 +74,9 @@ type chatConsolePinReq struct {
 	Pinned bool   `json:"pinned"`
 }
 
-// chatConsoleGroupInfo 立刻查一次官方群资料（简介 / 分类 / 标签 / 人数）。
-func chatConsoleGroupInfo(c echo.Context) error {
+// chatConsoleRefreshInfo 立刻查一次官方会话资料：
+// 群聊拉群名 / 简介 / 分类 / 标签 / 人数，私聊拉用户名 / 是否允许主动推送。
+func chatConsoleRefreshInfo(c echo.Context) error {
 	if !doAuth(c) {
 		return c.NoContent(http.StatusForbidden)
 	}
@@ -85,7 +87,7 @@ func chatConsoleGroupInfo(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Key) == "" {
 		return Error(&c, "请求格式错误", Response{})
 	}
-	conv, err := dice.RefreshChatConsoleGroupInfo(myDice, req.Key)
+	conv, err := dice.RefreshChatConsoleConversationInfo(myDice, req.Key)
 	if err != nil {
 		return Error(&c, err.Error(), Response{})
 	}

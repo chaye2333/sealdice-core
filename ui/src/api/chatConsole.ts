@@ -26,6 +26,8 @@ export type ChatConsoleConversation = {
   fingerMemo?: string;
   classText?: string;
   tags?: string[];
+  /** 官方用户资料里的 allow_proactive_msg（只有私聊有值；undefined = 还没查过）。 */
+  allowProactiveMsg?: boolean;
   fullMessage: boolean;
   pinned: boolean;
   lastTs: number;
@@ -205,7 +207,11 @@ export async function renameChatConsoleConversation(
   return data.conversation;
 }
 
-export async function refreshChatConsoleGroupInfo(
+/**
+ * 立刻向官方接口拉一次会话资料：群聊是群名/简介/标签，私聊是用户名与
+ * allow_proactive_msg。路径沿用 /group-info，语义已经扩成通用。
+ */
+export async function refreshChatConsoleInfo(
   key: string
 ): Promise<ChatConsoleConversation | undefined> {
   const data = await requestJson<{ conversation?: ChatConsoleConversation }>(

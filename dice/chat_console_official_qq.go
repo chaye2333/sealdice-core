@@ -99,9 +99,13 @@ func (pa *PlatformAdapterOfficialQQ) recordChatConsoleInbound(
 		pa.chatConsoleLogf("official qq 聊天控制台记录消息失败: %v", err)
 		return
 	}
-	if kind == chatConsoleKindGroup {
+	switch kind {
+	case chatConsoleKindGroup:
 		// 群名未知时顺带补一下，失败了也不影响消息记录。
 		pa.refreshChatConsoleGroupInfo(targetID)
+	case chatConsoleKindC2C:
+		// 私聊用户资料（用户名 / 是否允许主动推送）顺带补一次，10 分钟节流。
+		pa.refreshChatConsoleUserInfo(targetID)
 	}
 }
 
@@ -432,7 +436,7 @@ func (pa *PlatformAdapterOfficialQQ) refreshChatConsoleGroupInfo(groupOpenID str
 			return
 		}
 	}
-	if !pa.allowChatConsoleInfoFetch(groupOpenID) {
+	if !pa.allowChatConsoleInfoFetch(chatConsoleInfoThrottleKey(chatConsoleKindGroup, groupOpenID)) {
 		return
 	}
 	go func() {
@@ -450,31 +454,36 @@ func (pa *PlatformAdapterOfficialQQ) refreshChatConsoleGroupInfo(groupOpenID str
 	}()
 }
 
-func (pa *PlatformAdapterOfficialQQ) allowChatConsoleInfoFetch(groupOpenID string) bool {
+// chatConsoleInfoThrottleKey 把群 / 用户 openid 放进同一张节流表，避免两种 ID 撞车。
+func chatConsoleInfoThrottleKey(kind, targetID string) string {
+	return kind + ":" + targetID
+}
+
+func (pa *PlatformAdapterOfficialQQ) allowChatConsoleInfoFetch(key string) bool {
 	pa.consoleInfoMu.Lock()
 	defer pa.consoleInfoMu.Unlock()
 	if pa.consoleInfoAt == nil {
 		pa.consoleInfoAt = map[string]time.Time{}
 	}
 	now := time.Now()
-	if at, ok := pa.consoleInfoAt[groupOpenID]; ok && now.Sub(at) < chatConsoleInfoThrottle {
+	if at, ok := pa.consoleInfoAt[key]; ok && now.Sub(at) < chatConsoleInfoThrottle {
 		return false
 	}
-	pa.consoleInfoAt[groupOpenID] = now
+	pa.consoleInfoAt[key] = now
 	return true
 }
 
 // fetchChatConsoleGroupInfo 通过 OpenAPI 透传接口查询群信息（SDK 没封装 /v2/groups/{id}/info）。
 // 该接口是白名单机器人才能用的（错误码 11253），拿不到时不报错、只是没有简介/标签这些字段。
 func (pa *PlatformAdapterOfficialQQ) fetchChatConsoleGroupInfo(groupOpenID string) (*ChatConsoleGroupInfo, error) {
-	if pa.Api == nil {
+	if pa.tokenSource == nil || strings.TrimSpace(pa.AppID) == "" {
 		return nil, errors.New("官方 QQ 机器人尚未连接")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	body, err := pa.Api.Transport(ctx, http.MethodGet,
-		qqconstant.APIDomain+"/v2/groups/"+url.PathEscape(groupOpenID)+"/info", nil)
+	body, err := pa.officialQQAPIRequest(ctx, http.MethodGet,
+		"/v2/groups/"+url.PathEscape(groupOpenID)+"/info", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -502,13 +511,74 @@ func (pa *PlatformAdapterOfficialQQ) fetchChatConsoleGroupInfo(groupOpenID strin
 	return info, nil
 }
 
+// fetchChatConsoleUserInfo 通过 OpenAPI 查询私聊用户资料（/v2/users/{user_openid}/info）。
+// 只有和机器人有好友关系的用户能查（错误码 40184001），群成员不在这个接口范围内。
+// 返回值里的 avatar 是带签名的临时地址，这里不用，头像仍用 AppID + openid 拼 qlogo。
+func (pa *PlatformAdapterOfficialQQ) fetchChatConsoleUserInfo(userOpenID string) (*ChatConsoleUserInfo, error) {
+	if pa.tokenSource == nil || strings.TrimSpace(pa.AppID) == "" {
+		return nil, errors.New("官方 QQ 机器人尚未连接")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	body, err := pa.officialQQAPIRequest(ctx, http.MethodGet,
+		"/v2/users/"+url.PathEscape(userOpenID)+"/info", nil)
+	if err != nil {
+		// 40184001：用户与机器人没有好友关系，接口本来就不给资料
+		if strings.Contains(err.Error(), "40184001") {
+			return nil, errors.New("该用户与机器人没有好友关系，官方接口查不到资料")
+		}
+		return nil, err
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	info := &ChatConsoleUserInfo{
+		Name:        chatConsoleFirstString(payload, "username", "nickname"),
+		UnionOpenID: chatConsoleFirstString(payload, "union_openid"),
+	}
+	if allow, ok := payload["allow_proactive_msg"].(bool); ok {
+		info.AllowProactiveMsg = &allow
+	}
+	if info.Name == "" && info.UnionOpenID == "" && info.AllowProactiveMsg == nil {
+		return nil, errors.New("用户信息接口没有返回可用字段")
+	}
+	return info, nil
+}
+
+// refreshChatConsoleUserInfo 在后台补一次私聊用户资料（受 10 分钟节流保护）。
+func (pa *PlatformAdapterOfficialQQ) refreshChatConsoleUserInfo(userOpenID string) {
+	store := pa.chatConsoleStore()
+	if store == nil || userOpenID == "" {
+		return
+	}
+	key := chatConsoleKey(chatConsoleKindC2C, userOpenID)
+	if store.Conversation(key) == nil {
+		return
+	}
+	if !pa.allowChatConsoleInfoFetch(chatConsoleInfoThrottleKey(chatConsoleKindC2C, userOpenID)) {
+		return
+	}
+	go func() {
+		info, err := pa.fetchChatConsoleUserInfo(userOpenID)
+		if err != nil {
+			// 没有好友关系（40184001）很常见，只记 debug，别刷日志
+			pa.chatConsoleLogf("official qq 获取用户信息失败(%s): %v", userOpenID, err)
+			return
+		}
+		store.SetUserInfo(key, *info)
+	}()
+}
+
 // chatConsoleManualInfoInterval 手动刷新的最小间隔：前端连点 / 多人同时点时不至于打满官方配额（30 QPM）。
 const chatConsoleManualInfoInterval = 3 * time.Second
 
-// RefreshChatConsoleGroupInfo 立刻向官方接口拉一次群资料（骰主在控制台点「刷新」时用）。
-// 和后台的节流版本不同：这是用户显式触发，不吃 chatConsoleInfoThrottle 的 10 分钟限制，
+// RefreshChatConsoleConversationInfo 立刻向官方接口拉一次会话资料：
+// 群聊查 /v2/groups/{id}/info，私聊查 /v2/users/{openid}/info。
+// 这是骰主在控制台显式触发的操作，不吃 chatConsoleInfoThrottle 的 10 分钟限制，
 // 只挡 3 秒内的重复请求，避免前端连点把官方配额打满。
-func RefreshChatConsoleGroupInfo(d *Dice, key string) (*ChatConsoleConversation, error) {
+func RefreshChatConsoleConversationInfo(d *Dice, key string) (*ChatConsoleConversation, error) {
 	if d == nil {
 		return nil, errors.New("骰子还没初始化")
 	}
@@ -520,8 +590,8 @@ func RefreshChatConsoleGroupInfo(d *Dice, key string) (*ChatConsoleConversation,
 	if conv == nil {
 		return nil, errors.New("会话不存在")
 	}
-	if conv.Kind != chatConsoleKindGroup {
-		return nil, errors.New("只有群聊才能查群资料")
+	if conv.Kind != chatConsoleKindGroup && conv.Kind != chatConsoleKindC2C {
+		return nil, errors.New("未知的会话类型")
 	}
 	var pa *PlatformAdapterOfficialQQ
 	if d.ImSession != nil {
@@ -543,31 +613,44 @@ func RefreshChatConsoleGroupInfo(d *Dice, key string) (*ChatConsoleConversation,
 		}
 	}
 	if pa == nil {
-		return nil, errors.New("找不到对应的官方 QQ 机器人，只有官方 QQ 群能查群资料")
+		return nil, errors.New("找不到对应的官方 QQ 机器人，只有官方 QQ 会话能查资料")
 	}
+
 	// 3 秒内刚查过就直接返回缓存，别把官方配额打满
+	throttleKey := chatConsoleInfoThrottleKey(conv.Kind, conv.TargetID)
 	pa.consoleInfoMu.Lock()
-	last, hasLast := pa.consoleInfoAt[conv.TargetID]
+	last, hasLast := pa.consoleInfoAt[throttleKey]
 	tooSoon := hasLast && time.Since(last) < chatConsoleManualInfoInterval
 	pa.consoleInfoMu.Unlock()
 	if tooSoon {
 		return conv, nil
 	}
-	info, err := pa.fetchChatConsoleGroupInfo(conv.TargetID)
-	if err != nil {
-		return nil, err
+
+	switch conv.Kind {
+	case chatConsoleKindGroup:
+		info, err := pa.fetchChatConsoleGroupInfo(conv.TargetID)
+		if err != nil {
+			return nil, err
+		}
+		store.SetGroupInfo(key, *info)
+		if info.Name != "" {
+			setOfficialQQGroupName(d, formatDiceIDOfficialQQGroupOpenID(pa.UIN, conv.TargetID), info.Name)
+		}
+	case chatConsoleKindC2C:
+		info, err := pa.fetchChatConsoleUserInfo(conv.TargetID)
+		if err != nil {
+			return nil, err
+		}
+		store.SetUserInfo(key, *info)
 	}
+
 	pa.consoleInfoMu.Lock()
 	if pa.consoleInfoAt == nil {
 		pa.consoleInfoAt = map[string]time.Time{}
 	}
-	pa.consoleInfoAt[conv.TargetID] = time.Now()
+	pa.consoleInfoAt[throttleKey] = time.Now()
 	pa.consoleInfoMu.Unlock()
 
-	store.SetGroupInfo(key, *info)
-	if info.Name != "" {
-		setOfficialQQGroupName(d, formatDiceIDOfficialQQGroupOpenID(pa.UIN, conv.TargetID), info.Name)
-	}
 	if updated := store.Conversation(key); updated != nil {
 		return updated, nil
 	}
@@ -1006,7 +1089,7 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleAppendOutgoing(kind, targetID, t
 	if store == nil {
 		return nil, errors.New("聊天控制台未初始化")
 	}
-	return store.Append(ChatConsoleRecord{
+	msg, err := store.Append(ChatConsoleRecord{
 		Kind:       kind,
 		TargetID:   targetID,
 		UIN:        pa.UIN,
@@ -1021,6 +1104,11 @@ func (pa *PlatformAdapterOfficialQQ) chatConsoleAppendOutgoing(kind, targetID, t
 		TS:         time.Now().Unix(),
 		Quote:      quote,
 	})
+	// 私聊会话可能是机器人先开口建出来的（没有入站消息），顺手补一次用户资料。
+	if err == nil && kind == chatConsoleKindC2C {
+		pa.refreshChatConsoleUserInfo(targetID)
+	}
+	return msg, err
 }
 
 // SendChatConsoleMedia 以机器人身份发送图片 / 语音 / 视频 / 文件。

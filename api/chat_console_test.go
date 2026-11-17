@@ -58,7 +58,7 @@ func chatConsoleTestEnv(t *testing.T) (*echo.Echo, string) {
 	e.POST("/sd-api/chat-console/pin", chatConsolePin)
 	e.GET("/sd-api/chat-console/media", chatConsoleMedia)
 	e.GET("/sd-api/chat-console/search", chatConsoleSearch)
-	e.POST("/sd-api/chat-console/group-info", chatConsoleGroupInfo)
+	e.POST("/sd-api/chat-console/group-info", chatConsoleRefreshInfo)
 	return e, token
 }
 

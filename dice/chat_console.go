@@ -128,6 +128,15 @@ type ChatConsoleGroupInfo struct {
 	Tags        []string
 }
 
+// ChatConsoleUserInfo 官方 /v2/users/{user_openid}/info 返回的用户资料。
+// 头像不用接口返回的签名地址，仍用 AppID + openid 拼 qlogo（更稳定、不会过期）。
+type ChatConsoleUserInfo struct {
+	Name        string // username
+	UnionOpenID string // union_openid：跨应用用户 ID，暂时只记录备用
+	// AllowProactiveMsg 是 allow_proactive_msg：该用户是否接受机器人主动推送。
+	AllowProactiveMsg *bool
+}
+
 // ChatConsoleConversation 会话元信息。Name 可能是官方返回的群名，也可能是
 // UI 上自动生成的占位名（NameManual 标记是否为骰主手动改名）。
 type ChatConsoleConversation struct {
@@ -146,6 +155,8 @@ type ChatConsoleConversation struct {
 	FingerMemo string   `json:"fingerMemo,omitempty"` // 群简介
 	ClassText  string   `json:"classText,omitempty"`  // 群分类
 	Tags       []string `json:"tags,omitempty"`       // 群标签
+	// AllowProactiveMsg 官方用户资料里的 allow_proactive_msg（只有私聊有值）。
+	AllowProactiveMsg *bool `json:"allowProactiveMsg,omitempty"`
 	// FullMessage 表示该群已在官方群设置里授权"获取全部群消息"。
 	// 目前只能靠"是否收到过非 @ 群消息"推断，未授权时 UI 需提示。
 	FullMessage bool `json:"fullMessage"`
@@ -224,11 +235,13 @@ type chatConsoleConversationRow struct {
 	ClassText   string `gorm:"column:class_text"`
 	Tags        string `gorm:"column:tags"` // JSON 数组
 	FullMessage bool   `gorm:"column:full_message;not null;default:false"`
-	Pinned      bool   `gorm:"column:pinned;not null;default:false"`
-	LastTS      int64  `gorm:"column:last_ts;not null;default:0"`
-	LastText    string `gorm:"column:last_text"`
-	Unread      int    `gorm:"column:unread;not null;default:0"`
-	UpdatedAt   int64  `gorm:"column:updated_at;not null;default:0"`
+	// AllowProactiveMsg 只有私聊用户会有；NULL 表示还没查过用户资料。
+	AllowProactiveMsg *bool  `gorm:"column:allow_proactive_msg"`
+	Pinned            bool   `gorm:"column:pinned;not null;default:false"`
+	LastTS            int64  `gorm:"column:last_ts;not null;default:0"`
+	LastText          string `gorm:"column:last_text"`
+	Unread            int    `gorm:"column:unread;not null;default:0"`
+	UpdatedAt         int64  `gorm:"column:updated_at;not null;default:0"`
 }
 
 func (chatConsoleConversationRow) TableName() string { return "chat_console_conversations" }
@@ -487,46 +500,48 @@ func chatConsoleConvToRow(conv *ChatConsoleConversation) chatConsoleConversation
 		}
 	}
 	return chatConsoleConversationRow{
-		Key:         conv.Key,
-		Kind:        conv.Kind,
-		TargetID:    conv.TargetID,
-		UIN:         conv.UIN,
-		EndpointID:  conv.EndpointID,
-		AppID:       conv.AppID,
-		Name:        conv.Name,
-		NameManual:  conv.NameManual,
-		MemberCount: conv.MemberCount,
-		FingerMemo:  conv.FingerMemo,
-		ClassText:   conv.ClassText,
-		Tags:        tags,
-		FullMessage: conv.FullMessage,
-		Pinned:      conv.Pinned,
-		LastTS:      conv.LastTS,
-		LastText:    conv.LastText,
-		Unread:      conv.Unread,
-		UpdatedAt:   conv.UpdatedAt,
+		Key:               conv.Key,
+		Kind:              conv.Kind,
+		TargetID:          conv.TargetID,
+		UIN:               conv.UIN,
+		EndpointID:        conv.EndpointID,
+		AppID:             conv.AppID,
+		Name:              conv.Name,
+		NameManual:        conv.NameManual,
+		MemberCount:       conv.MemberCount,
+		FingerMemo:        conv.FingerMemo,
+		ClassText:         conv.ClassText,
+		Tags:              tags,
+		AllowProactiveMsg: conv.AllowProactiveMsg,
+		FullMessage:       conv.FullMessage,
+		Pinned:            conv.Pinned,
+		LastTS:            conv.LastTS,
+		LastText:          conv.LastText,
+		Unread:            conv.Unread,
+		UpdatedAt:         conv.UpdatedAt,
 	}
 }
 
 func chatConsoleRowToConv(row chatConsoleConversationRow) *ChatConsoleConversation {
 	conv := &ChatConsoleConversation{
-		Key:         row.Key,
-		Kind:        row.Kind,
-		TargetID:    row.TargetID,
-		UIN:         row.UIN,
-		EndpointID:  row.EndpointID,
-		AppID:       row.AppID,
-		Name:        row.Name,
-		NameManual:  row.NameManual,
-		MemberCount: row.MemberCount,
-		FingerMemo:  row.FingerMemo,
-		ClassText:   row.ClassText,
-		FullMessage: row.FullMessage,
-		Pinned:      row.Pinned,
-		LastTS:      row.LastTS,
-		LastText:    row.LastText,
-		Unread:      row.Unread,
-		UpdatedAt:   row.UpdatedAt,
+		Key:               row.Key,
+		Kind:              row.Kind,
+		TargetID:          row.TargetID,
+		UIN:               row.UIN,
+		EndpointID:        row.EndpointID,
+		AppID:             row.AppID,
+		Name:              row.Name,
+		NameManual:        row.NameManual,
+		MemberCount:       row.MemberCount,
+		FingerMemo:        row.FingerMemo,
+		ClassText:         row.ClassText,
+		AllowProactiveMsg: row.AllowProactiveMsg,
+		FullMessage:       row.FullMessage,
+		Pinned:            row.Pinned,
+		LastTS:            row.LastTS,
+		LastText:          row.LastText,
+		Unread:            row.Unread,
+		UpdatedAt:         row.UpdatedAt,
 	}
 	if row.Tags != "" {
 		_ = json.Unmarshal([]byte(row.Tags), &conv.Tags)
@@ -1173,6 +1188,42 @@ func (s *ChatConsoleStore) SetGroupInfo(key string, info ChatConsoleGroupInfo) *
 		"finger_memo":  conv.FingerMemo,
 		"class_text":   conv.ClassText,
 		"tags":         tags,
+	})
+	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
+	return conv
+}
+
+// SetUserInfo 写入官方返回的用户资料（用户名 / 是否允许主动推送）。
+// 手动改过名的会话不会被用户名覆盖。
+func (s *ChatConsoleStore) SetUserInfo(key string, info ChatConsoleUserInfo) *ChatConsoleConversation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.openLocked(); err != nil {
+		return nil
+	}
+	var row chatConsoleConversationRow
+	if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
+		return nil
+	}
+	conv := chatConsoleRowToConv(row)
+	changed := false
+	if info.Name != "" && !conv.NameManual && conv.Name != info.Name {
+		conv.Name = info.Name
+		changed = true
+	}
+	if info.AllowProactiveMsg != nil {
+		if conv.AllowProactiveMsg == nil || *conv.AllowProactiveMsg != *info.AllowProactiveMsg {
+			allow := *info.AllowProactiveMsg
+			conv.AllowProactiveMsg = &allow
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	s.db.Model(&chatConsoleConversationRow{}).Where("key = ?", key).Updates(map[string]interface{}{
+		"name":                conv.Name,
+		"allow_proactive_msg": conv.AllowProactiveMsg,
 	})
 	defer s.publish(ChatConsoleEvent{Type: "conversation", Conversation: conv})
 	return conv
