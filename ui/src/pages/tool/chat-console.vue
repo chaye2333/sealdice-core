@@ -422,7 +422,7 @@
                 depth="3"
                 class="composer-note"
               >
-                该用户未开启主动推送：只能在他发消息后的被动窗口内回复，主动发送可能被官方拒绝。
+                该用户未开启主动推送：只能在他发消息后的 60 分钟内回复（每条消息最多 4 次），主动发送会失败。
               </n-text>
               <n-text v-else depth="3" class="composer-note">
                 私聊主动消息有官方限额；正文支持 [CQ:at,qq=openid] / [CQ:reply,id=msgid]，
@@ -527,7 +527,7 @@
           <n-text>{{ selectedConversation.memberCount }}</n-text>
         </n-flex>
         <n-flex v-if="selectedConversation.kind === 'c2c'" size="small" :wrap="false">
-          <n-text depth="3" class="info-label">主动推送</n-text>
+          <n-text depth="3" class="info-label">接收主动推送</n-text>
           <n-text>{{ allowProactiveText(selectedConversation) }}</n-text>
         </n-flex>
         <n-flex size="small" :wrap="false">
@@ -550,7 +550,7 @@
         </n-flex>
         <n-text depth="3" class="info-note">
           群资料只有官方 QQ 的「白名单机器人」才拿得到；私聊资料来自
-          /v2/users/{openid}/info，没有好友关系时会查不到。
+          /v2/users/{openid}/info，需要用户与机器人有好友关系，否则返回 40184001。
           官方接口不提供群头像（只给 group_openid），所以群会话显示的彩色首字是正常的；
           私聊头像和成员头像按 AppID + openid 拼 thirdqq.qlogo.cn 地址。
         </n-text>
