@@ -375,6 +375,8 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 		Solve: func(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResult {
 			n := cmdArgs.GetArgN(1)
 			suffix := "\nCOC7规则扩展已自动开启"
+			// coc7r（守秘人伴侣）只是 coc7 的变体规则，切房规时不能把群拉回七版
+			keepCoc7R := ctx.Group.System == c7rExtName
 			setRuleByName(ctx, "coc7")
 
 			switch n {
@@ -460,7 +462,11 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 			}
 
 			ctx.Group.ExtActive(ctx.Dice.ExtFind("coc7", false))
-			ctx.Group.System = "coc7"
+			if keepCoc7R {
+				ctx.Group.System = c7rExtName
+			} else {
+				ctx.Group.System = "coc7"
+			}
 			ctx.Group.MarkDirty(ctx.Dice)
 			return CmdExecuteResult{Matched: true, Solved: true}
 		},
@@ -696,7 +702,8 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 
 			// .en [技能名称]([技能值])+(([失败成长值]/)[成功成长值])
 			// FIXME: 实在是被正则绕晕了，把多组和每组的正则分开了
-			re := regexp.MustCompile(`([a-zA-Z_\p{Han}]+)\s*(\d+)?\s*(\+\s*([-+\ddD]+\s*/)?\s*([-+\ddD]+))?[^|]*?`)
+			// 技能名允许带冒号：否则 .en 射击:手枪+5 会被拆成「射击」和「手枪」两组
+			re := regexp.MustCompile(`([a-zA-Z_\p{Han}:：]+)\s*(\d+)?\s*(\+\s*([-+\ddD]+\s*/)?\s*([-+\ddD]+))?[^|]*?`)
 			// 支持多组技能成长
 			skills := re.FindAllString(cmdArgs.CleanArgs, -1)
 

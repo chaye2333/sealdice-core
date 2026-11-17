@@ -186,7 +186,7 @@ func c7rAttrInt(ctx *MsgContext, tmpl *GameSystemTemplate, name string) int64 {
 
 // c7rCurrentSan 读取当前理智；角色卡还没写理智时，按规则书以意志值初始化。
 func c7rCurrentSan(ctx *MsgContext, tmpl *GameSystemTemplate) int64 {
-	if ctx == nil || tmpl == nil {
+	if ctx == nil || ctx.Dice == nil || tmpl == nil {
 		return 0
 	}
 	key := tmpl.GetAlias("理智")
@@ -910,7 +910,7 @@ func RegisterBuiltinExtCoc7R(self *Dice) {
 
 	cmdHub := &CmdItemInfo{
 		Name:      "c7r",
-		ShortHelp: ".c7r help|rule|status|ri|migrate|reset // coc7r 规则辅助",
+		ShortHelp: ".c7r help|rule|status|ri|shock|migrate|reset|recover // coc7r 规则辅助",
 		Help:      c7rHelpText(),
 		Solve:     cmdC7RHub,
 	}

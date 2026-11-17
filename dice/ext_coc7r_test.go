@@ -675,6 +675,70 @@ func TestCoc7RScCommandInfoFeedsLogBrief(t *testing.T) {
 	}
 }
 
+// .en 的外层切分正则也要吃冒号：.en 射击:手枪+5 只能算一个技能，
+// 不能拆成「射击」和「手枪」两组，更不能顺带把基础技能射击也成长一次。
+func TestCoc7REnKeepsColonSkillInOneGroup(t *testing.T) {
+	d, ep, adapter, cleanup := newExecuteNewTestDice(t)
+	t.Cleanup(cleanup)
+	prepareC7RTestDB(t, d)
+
+	runCmd(t, d, ep, adapter, ".set coc7r")
+	runCmd(t, d, ep, adapter, ".st 射击10 射击:手枪20")
+
+	grown := false
+	for range 20 {
+		got := runCmd(t, d, ep, adapter, ".en 射击:手枪+5")
+		if strings.Contains(got, "2项技能") || strings.Contains(got, "2 项技能") {
+			t.Fatalf(".en 射击:手枪+5 被拆成了多个技能: %q", got)
+		}
+		if !strings.Contains(got, "射击:手枪") {
+			t.Fatalf(".en 没有处理 射击:手枪: %q", got)
+		}
+		if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 射击:手枪"), "射击:手枪"); v > 20 {
+			grown = true
+			break
+		}
+	}
+	if !grown {
+		t.Fatal(".en 射击:手枪+5 连续二十次都没成长")
+	}
+	if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 射击:手枪"), "射击:手枪"); v != 25 {
+		t.Fatalf("取五后 射击:手枪 = %d, want 25", v)
+	}
+	if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 射击"), "射击"); v != 10 {
+		t.Fatalf(".en 射击:手枪+5 顺带把基础技能射击改成了 %d", v)
+	}
+}
+
+// .setcoc 切房规不能把 coc7r 群拉回七版；房规序号仍要正常写入。
+func TestCoc7RSetcocKeepsRule(t *testing.T) {
+	d, ep, adapter, cleanup := newExecuteNewTestDice(t)
+	t.Cleanup(cleanup)
+	prepareC7RTestDB(t, d)
+
+	runCmd(t, d, ep, adapter, ".set coc7r")
+	runCmd(t, d, ep, adapter, ".st 意志50 智力50 理智50")
+
+	if got := runCmd(t, d, ep, adapter, ".setcoc 2"); !strings.Contains(got, "房规") {
+		t.Fatalf(".setcoc 输出异常: %q", got)
+	}
+	group, ok := d.ImSession.ServiceAtNew.Load("QQ-Group:c7r")
+	if !ok {
+		t.Fatal("群信息未创建")
+	}
+	if group.System != "coc7r" {
+		t.Fatalf(".setcoc 把规则改成了 %q，应为 coc7r", group.System)
+	}
+	if group.CocRuleIndex != 2 {
+		t.Fatalf("CocRuleIndex = %d, want 2", group.CocRuleIndex)
+	}
+
+	got := runCmd(t, d, ep, adapter, ".sc 5/5")
+	if !strings.Contains(got, "不自觉反应") {
+		t.Fatalf(".setcoc 后 .sc 不再走 coc7r 流程: %q", got)
+	}
+}
+
 func TestLogRuleIsCoc(t *testing.T) {
 	for rule, want := range map[string]bool{
 		"coc7":  true,
