@@ -49,7 +49,7 @@ $v2uiDist = Join-Path $repo "static\v2ui\dist"
 $legacyDist = Join-Path $repo "static\frontend"
 # 老 UI 源码钉死在 Dockerfile 里同一个 commit；改老 UI 后两处一起改
 $legacyRepo = "chaye2333/sealdice-ui"
-$legacyRef = "84dbca34ba968bcd5736fe24c2e4c79881b452ff"
+$legacyRef = "cc52c1642113e97dfef4becf770504e6e4e2a991"
 if (-not (Test-Path $uiDir)) { throw "找不到 ui/ 目录：新 UI 应该就在仓库里（上游 #1689 起）" }
 
 if ($SkipUi) {

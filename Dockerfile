@@ -86,7 +86,7 @@ RUN pnpm run generate-client && pnpm run build:embed:prepared && \
 FROM node:22-alpine AS legacy-ui-builder
 
 ARG LEGACY_UI_REPO="chaye2333/sealdice-ui"
-ARG LEGACY_UI_REF="84dbca34ba968bcd5736fe24c2e4c79881b452ff"
+ARG LEGACY_UI_REF="cc52c1642113e97dfef4becf770504e6e4e2a991"
 ARG LEGACY_PNPM_VERSION=10
 
 RUN apk add --no-cache curl tar
