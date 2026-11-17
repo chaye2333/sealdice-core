@@ -1086,7 +1086,8 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 
 	helpSc := ".sc <成功时掉san>/<失败时掉san> // 对理智进行一次D100检定，根据结果扣除理智\n" +
 		".sc <失败时掉san> //同上，简易写法 \n" +
-		".sc [b|p] [<成功时掉san>/]<失败时掉san> // 加上奖惩骰"
+		".sc [b|p] [<成功时掉san>/]<失败时掉san> // 加上奖惩骰\n" +
+		"守秘人伴侣（coc7r）群另支持 --cap=N、--half、--mythos，详见 .c7r help"
 	cmdSc := &CmdItemInfo{
 		Name:          "sc",
 		ShortHelp:     helpSc,
