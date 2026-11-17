@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/alexmullins/zip"
 	"github.com/labstack/echo/v4"
@@ -45,6 +46,15 @@ func doAuth(c echo.Context) bool {
 	token := c.Request().Header.Get("token") //nolint:canonicalheader // private header
 	if token == "" {
 		token = c.QueryParam("token")
+	}
+	// 有些反向代理会丢掉自定义的 token 头，但保留标准 Authorization；
+	// v2 接口本来就认 Bearer，这里给 v1 也补上同一条路。
+	if token == "" {
+		auth := strings.TrimSpace(c.Request().Header.Get("Authorization"))
+		if strings.HasPrefix(auth, "Bearer ") {
+			auth = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		}
+		token = auth
 	}
 	if token == "" {
 		return false

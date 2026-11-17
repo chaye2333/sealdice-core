@@ -145,10 +145,11 @@ func (f *mediaFakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.completeBody = payload
 		f.mu.Unlock()
+		// 平台实际会把数字写成字符串，这里按真实形状返回
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"image_id":    "img_1",
 			"url":         "qqbot-media://image/v1/token123",
-			"ttl":         7776000,
+			"ttl":         "7776000",
 			"preview_url": "https://example.myqcloud.com/preview.png",
 		})
 	case r.URL.Path == "/v2/media-images" && r.Method == http.MethodGet:
@@ -162,12 +163,12 @@ func (f *mediaFakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 					"url":         "qqbot-media://image/v1/token123",
 					"file_name":   "kline.png",
 					"preview_url": "https://example.myqcloud.com/preview.png",
-					"created_at":  1792051409,
-					"expires_at":  1792656210,
+					"created_at":  "1792051409",
+					"expires_at":  "1792656210",
 				},
 			},
 			"next_cursor": "cursor-2",
-			"total":       1,
+			"total":       "1",
 		})
 	case strings.HasSuffix(r.URL.Path, "/delete"):
 		f.mu.Lock()
@@ -249,6 +250,10 @@ func TestOfficialQQMediaImageListAndDelete(t *testing.T) {
 	}
 	if list.Images[0].Width != 800 || list.Images[0].Height != 400 || list.Images[0].FileName != "kline.png" {
 		t.Fatalf("meta not merged: %+v", list.Images[0])
+	}
+	// 字符串数字也要能解析出来（平台实际返回 "1" / "1792051409" 这种）
+	if list.Images[0].CreatedAt != 1792051409 || list.Images[0].ExpiresAt != 1792656210 {
+		t.Fatalf("timestamps not parsed: %+v", list.Images[0])
 	}
 	fake.mu.Lock()
 	cursor := fake.listCursor

@@ -404,6 +404,26 @@ func (pa *PlatformAdapterOfficialQQ) officialQQAPIBaseURL() string {
 func (pa *PlatformAdapterOfficialQQ) officialQQAPIRequest(
 	qctx context.Context, method, apiPath string, body any,
 ) ([]byte, error) {
+	respBody, err := pa.officialQQAPIRequestOnce(qctx, method, apiPath, body)
+	if err == nil {
+		return respBody, nil
+	}
+	// 401/403（或业务码 11244 = token 过期）多半是缓存 token 失效：
+	// SDK 自己会强制刷新后重试一次，这里手写的请求也照做，避免把 403 直接甩给界面。
+	msg := err.Error()
+	if strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403") ||
+		strings.Contains(msg, "11244") {
+		if refreshable, ok := pa.tokenSource.(interface{ Invalidate() }); ok {
+			refreshable.Invalidate()
+			return pa.officialQQAPIRequestOnce(qctx, method, apiPath, body)
+		}
+	}
+	return nil, err
+}
+
+func (pa *PlatformAdapterOfficialQQ) officialQQAPIRequestOnce(
+	qctx context.Context, method, apiPath string, body any,
+) ([]byte, error) {
 	var payload []byte
 	if body != nil {
 		var err error
@@ -420,6 +440,8 @@ func (pa *PlatformAdapterOfficialQQ) officialQQAPIRequest(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Union-Appid", pa.AppID)
+	// 与 SDK 一样带一个明确的 User-Agent，别用 Go 默认的 Go-http-client。
+	req.Header.Set("User-Agent", "SealDice/"+VERSION.String())
 	if pa.tokenSource != nil {
 		if token, tokenErr := pa.tokenSource.Token(); tokenErr == nil && token != nil {
 			scheme := token.TokenType

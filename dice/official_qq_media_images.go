@@ -30,6 +30,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -267,10 +268,10 @@ func (pa *PlatformAdapterOfficialQQ) UploadOfficialQQMediaImage(fileName string,
 		return nil, err
 	}
 	var complete struct {
-		ImageID    string `json:"image_id"`
-		URL        string `json:"url"`
-		TTL        uint32 `json:"ttl"`
-		PreviewURL string `json:"preview_url"`
+		ImageID    string          `json:"image_id"`
+		URL        string          `json:"url"`
+		TTL        json.RawMessage `json:"ttl"`
+		PreviewURL string          `json:"preview_url"`
 	}
 	if err = json.Unmarshal(body, &complete); err != nil {
 		return nil, fmt.Errorf("解析上传结果失败: %w", err)
@@ -292,8 +293,8 @@ func (pa *PlatformAdapterOfficialQQ) UploadOfficialQQMediaImage(fileName string,
 		CreatedAt:  now,
 		PreviewURL: complete.PreviewURL,
 	}
-	if complete.TTL > 0 {
-		image.ExpiresAt = now + int64(complete.TTL)
+	if ttl := officialQQJSONInt64(complete.TTL); ttl > 0 {
+		image.ExpiresAt = now + ttl
 	}
 	officialQQMediaMetaSet(
 		pa.officialQQMediaMetaPath(),
@@ -321,15 +322,15 @@ func (pa *PlatformAdapterOfficialQQ) ListOfficialQQMediaImages(cursor string) (*
 	}
 	var payload struct {
 		Images []struct {
-			ImageID    string `json:"image_id"`
-			URL        string `json:"url"`
-			FileName   string `json:"file_name"`
-			PreviewURL string `json:"preview_url"`
-			CreatedAt  int64  `json:"created_at"`
-			ExpiresAt  int64  `json:"expires_at"`
+			ImageID    string          `json:"image_id"`
+			URL        string          `json:"url"`
+			FileName   string          `json:"file_name"`
+			PreviewURL string          `json:"preview_url"`
+			CreatedAt  json.RawMessage `json:"created_at"`
+			ExpiresAt  json.RawMessage `json:"expires_at"`
 		} `json:"images"`
-		NextCursor string `json:"next_cursor"`
-		Total      uint64 `json:"total"`
+		NextCursor string          `json:"next_cursor"`
+		Total      json.RawMessage `json:"total"`
 	}
 	if err = json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("解析图片列表失败: %w", err)
@@ -338,7 +339,7 @@ func (pa *PlatformAdapterOfficialQQ) ListOfficialQQMediaImages(cursor string) (*
 	metaFile := pa.officialQQMediaMetaPath()
 	list := &OfficialQQMediaImageList{
 		Images:     make([]OfficialQQMediaImage, 0, len(payload.Images)),
-		Total:      payload.Total,
+		Total:      officialQQJSONUint64(payload.Total),
 		NextCursor: payload.NextCursor,
 	}
 	for _, item := range payload.Images {
@@ -349,8 +350,8 @@ func (pa *PlatformAdapterOfficialQQ) ListOfficialQQMediaImages(cursor string) (*
 			ImageID:    item.ImageID,
 			URL:        item.URL,
 			FileName:   item.FileName,
-			CreatedAt:  item.CreatedAt,
-			ExpiresAt:  item.ExpiresAt,
+			CreatedAt:  officialQQJSONInt64(item.CreatedAt),
+			ExpiresAt:  officialQQJSONInt64(item.ExpiresAt),
 			PreviewURL: item.PreviewURL,
 		}
 		if meta, ok := officialQQMediaMetaGet(metaFile, officialQQMediaMetaKey(pa.AppID, item.ImageID)); ok {
@@ -381,6 +382,41 @@ func (pa *PlatformAdapterOfficialQQ) DeleteOfficialQQMediaImage(imageID string) 
 	}
 	officialQQMediaMetaDelete(pa.officialQQMediaMetaPath(), officialQQMediaMetaKey(pa.AppID, imageID))
 	return nil
+}
+
+// officialQQJSONInt64 兼容平台把数字写成字符串的情况。
+// 实测 /v2/media-images 的 total、created_at、expires_at、ttl 都可能返回 "123" 这种字符串。
+func officialQQJSONInt64(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var num json.Number
+	if err := json.Unmarshal(raw, &num); err == nil {
+		if v, ierr := num.Int64(); ierr == nil {
+			return v
+		}
+		if f, ferr := num.Float64(); ferr == nil {
+			return int64(f)
+		}
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		str = strings.TrimSpace(str)
+		if v, perr := strconv.ParseInt(str, 10, 64); perr == nil {
+			return v
+		}
+		if f, ferr := strconv.ParseFloat(str, 64); ferr == nil {
+			return int64(f)
+		}
+	}
+	return 0
+}
+
+func officialQQJSONUint64(raw json.RawMessage) uint64 {
+	if v := officialQQJSONInt64(raw); v > 0 {
+		return uint64(v)
+	}
+	return 0
 }
 
 // TranslateOfficialQQMediaImageError 把官方错误码翻成便于界面展示的中文。

@@ -115,6 +115,16 @@ it('列出素材并通过「复制 Markdown」自动带宽高', async () => {
   );
 });
 
+it('没拿到登录 token 时不请求，解锁后自动加载', async () => {
+  useAuthStore(appPinia).clearAccessToken();
+  mountPage();
+  await vi.waitFor(() => expect(wrapper!.text()).toContain('还没有上传图片'));
+  expect(api.fetchOfficialQQMediaImages).not.toHaveBeenCalled();
+
+  useAuthStore(appPinia).setAccessToken('md-image-test');
+  await vi.waitFor(() => expect(api.fetchOfficialQQMediaImages).toHaveBeenCalled());
+});
+
 it('没有图片时给出空状态', async () => {
   api.fetchOfficialQQMediaImages.mockResolvedValueOnce({
     bots: [],

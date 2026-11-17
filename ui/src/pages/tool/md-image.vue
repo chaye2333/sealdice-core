@@ -128,7 +128,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import dayjs from 'dayjs';
 import { useMessage } from 'naive-ui';
 import PageHeader from '@/components/shared/PageHeader.vue';
@@ -137,7 +137,6 @@ import TipBox from '@/components/shared/TipBox.vue';
 import { useAuthStore } from '@/features/auth/store';
 import { appPinia } from '@/pinia';
 import { copyText } from '@/features/clipboard/copyText';
-import { notifyError } from '@/features/feedback/notifyError';
 import { chatConsoleMediaURL } from '@/features/chatConsole/media';
 import { useTestMode } from '@/features/testMode/state';
 import {
@@ -184,6 +183,13 @@ const uploadDisabledReason = computed(() => {
   return '';
 });
 
+/** 把 axios 错误翻成可读文案：403 基本都是没登录/登录过期。 */
+function describeError(error: unknown, fallback: string): string {
+  const status = (error as { response?: { status?: number } } | null)?.response?.status;
+  if (status === 403) return '未登录或登录已过期：请刷新页面重新登录后再试';
+  return error instanceof Error ? error.message : fallback;
+}
+
 function formatTs(ts: number | undefined): string {
   return ts ? dayjs.unix(ts).format('YYYY-MM-DD HH:mm') : '—';
 }
@@ -229,8 +235,9 @@ async function reload(reset = true) {
       total.value = list.total;
     }
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '加载图片列表失败';
-    if (!images.value.length) notifyError(error, message, '加载图片列表失败');
+    const text = describeError(error, '加载图片列表失败');
+    errorText.value = text;
+    if (!images.value.length) message.error(text);
   } finally {
     loading.value = false;
     loaded.value = true;
@@ -250,7 +257,7 @@ async function loadMore() {
     nextCursor.value = list.nextCursor;
     total.value = list.total;
   } catch (error) {
-    notifyError(error, message, '加载更多图片失败');
+    message.error(describeError(error, '加载更多图片失败'));
   } finally {
     loadingMore.value = false;
   }
@@ -295,7 +302,7 @@ async function onFilesPicked(event: Event) {
     total.value += 1;
     message.success('上传成功，已自动记住图片宽高');
   } catch (error) {
-    notifyError(error, message, '上传图片失败');
+    message.error(describeError(error, '上传图片失败'));
   } finally {
     uploading.value = false;
   }
@@ -317,7 +324,7 @@ async function copyMarkdown(item: OfficialQQMediaImage) {
       message.warning('没拿到图片宽高，已复制不带尺寸的引用（可刷新后重试）');
     }
   } catch (error) {
-    notifyError(error, message, '复制失败');
+    message.error(describeError(error, '复制失败'));
   }
 }
 
@@ -329,12 +336,18 @@ async function remove(item: OfficialQQMediaImage) {
     total.value = Math.max(0, total.value - 1);
     message.success('已删除');
   } catch (error) {
-    notifyError(error, message, '删除图片失败');
+    message.error(describeError(error, '删除图片失败'));
   }
 }
 
 onMounted(() => {
-  void reload();
+  // 新 UI 的解锁弹窗是覆盖层，页面可能在拿到 token 之前就挂载了；
+  // 没有 token 先别请求，等解锁后再加载，避免一进来就弹 403。
+  if (token.value) void reload();
+});
+
+watch(token, value => {
+  if (value) void reload();
 });
 </script>
 
