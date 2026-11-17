@@ -214,7 +214,8 @@ function renderTrgCommandText(commandInfo: unknown): string {
   const pcName = stringValue(info.pcName);
   const items = arrayValue(info.items);
 
-  if (rule === 'coc7') {
+  // coc7r（守秘人伴侣）的指令信息字段与 coc7 一致，直接复用
+  if (rule === 'coc7' || rule === 'coc7r') {
     switch (cmd) {
       case 'ra':
         return items
@@ -239,7 +240,8 @@ function renderTrgCommandText(commandInfo: unknown): string {
       case 'sc':
         return `<dice>:${items
           .map(item => {
-            const exprs = arrayValue(item.exprs).map(value => String(value));
+            // exprs 是字符串数组，不能走 arrayValue（那个只保留对象元素）
+            const exprs = stringArrayValue(item.exprs);
             const expr = exprs[0] ?? '';
             return `(${pcName}的${expr},${readDiceNum(expr)},${stringValue(item.sanOld)},${stringValue(item.outcome) || stringValue(item.checkVal)})`;
           })
@@ -289,6 +291,10 @@ function arrayValue(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value)
     ? value.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
     : [];
+}
+
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(stringValue) : [];
 }
 
 function stringValue(value: unknown): string {
