@@ -41,6 +41,21 @@ export function mergeChatConsoleMessages(
   return merged.sort((a, b) => a.ts - b.ts || a.id.localeCompare(b.id));
 }
 
+/** 聊天控制台的栏位：窄屏一次只看一栏，宽屏左右并列。 */
+export type ChatConsolePane = 'list' | 'chat';
+
+/**
+ * 窄屏（手机）先把会话列表铺满，选中会话后切到聊天内容，顶部返回按钮回到列表；
+ * 宽屏保持左右分栏，两栏同时可见。
+ */
+export function chatConsolePaneVisibility(
+  isMobile: boolean,
+  pane: ChatConsolePane
+): { list: boolean; chat: boolean } {
+  if (!isMobile) return { list: true, chat: true };
+  return { list: pane === 'list', chat: pane === 'chat' };
+}
+
 /** 会话列表排序：置顶优先，其次按最后消息时间倒序。 */
 export function sortChatConsoleConversations(
   conversations: readonly ChatConsoleConversation[]

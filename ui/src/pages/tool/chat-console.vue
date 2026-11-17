@@ -1,9 +1,9 @@
 <template>
-  <main class="chat-console-page sd-page-flow">
+  <main ref="pageRoot" class="chat-console-page sd-page-flow" :class="{ 'is-mobile': isMobile }">
     <PageHeader title="聊天控制台" />
 
     <n-grid :cols="isMobile ? 1 : 24" :x-gap="12" :y-gap="12" responsive="screen">
-      <n-gi :span="isMobile ? 1 : 7">
+      <n-gi v-if="paneVisible.list" :span="isMobile ? 1 : 7">
         <n-card :bordered="false" class="conv-card">
           <template #header>
             <n-flex align="center" justify="space-between" :wrap="false">
@@ -139,19 +139,34 @@
         </n-card>
       </n-gi>
 
-      <n-gi :span="isMobile ? 1 : 17">
+      <n-gi v-if="paneVisible.chat" :span="isMobile ? 1 : 17">
         <n-card :bordered="false" class="chat-card">
           <template #header>
             <n-flex align="center" justify="space-between" :wrap="false">
-              <n-text strong>
-                {{ selectedConversation ? conversationLabel(selectedConversation) : '未选择会话' }}
-              </n-text>
+              <n-flex align="center" size="small" :wrap="false" class="chat-head-title">
+                <n-button
+                  v-if="isMobile"
+                  class="back-to-list"
+                  size="tiny"
+                  quaternary
+                  title="返回会话列表"
+                  aria-label="返回会话列表"
+                  @click="backToList"
+                >
+                  <template #icon>
+                    <i-tabler-arrow-left />
+                  </template>
+                </n-button>
+                <n-text strong class="chat-title">
+                  {{ selectedConversation ? conversationLabel(selectedConversation) : '未选择会话' }}
+                </n-text>
+              </n-flex>
               <n-flex align="center" size="small" :wrap="false">
-                <n-text v-if="selectedConversation" depth="3" class="chat-key">
+                <n-text v-if="selectedConversation && !isMobile" depth="3" class="chat-key">
                   {{ selectedConversation.key }}
                 </n-text>
                 <n-button
-                  v-if="selectedConversation"
+                  v-if="selectedConversation && !isMobile"
                   size="tiny"
                   secondary
                   @click="copyConversationID"
@@ -162,7 +177,7 @@
                   资料
                 </n-button>
                 <n-button
-                  v-if="selectedConversation?.kind === 'group'"
+                  v-if="selectedConversation?.kind === 'group' && !isMobile"
                   size="tiny"
                   secondary
                   :loading="refreshingInfo"
@@ -170,6 +185,18 @@
                 >
                   刷新群资料
                 </n-button>
+                <n-dropdown
+                  v-if="selectedConversation && isMobile"
+                  trigger="click"
+                  :options="chatMenuOptions"
+                  @select="(key: string | number) => onChatMenu(String(key))"
+                >
+                  <n-button size="tiny" quaternary title="更多操作" aria-label="更多操作">
+                    <template #icon>
+                      <i-tabler-dots />
+                    </template>
+                  </n-button>
+                </n-dropdown>
               </n-flex>
             </n-flex>
           </template>
@@ -550,11 +577,13 @@ import {
   type ChatConsoleStorage,
 } from '@/api/chatConsole';
 import {
+  chatConsolePaneVisibility,
   conversationLabel,
   formatChatConsoleTime,
   mergeChatConsoleMessages,
   patchChatConsoleConversations,
   sortChatConsoleConversations,
+  type ChatConsolePane,
 } from '@/features/chatConsole/viewModel';
 import {
   chatConsoleMediaLabel,
@@ -598,6 +627,13 @@ const quoteTarget = ref<ChatConsoleMessage | null>(null);
 const mentions = ref<ChatConsoleMention[]>([]);
 const messagePane = ref<HTMLElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
+const pageRoot = ref<HTMLElement | null>(null);
+
+/**
+ * 窄屏一次只看一栏：先看会话列表，选中会话后切到聊天内容，
+ * 顶部返回按钮回到列表（与旧 UI 的「点进会话再返回」一致）。
+ */
+const mobilePane = ref<ChatConsolePane>('list');
 
 const searchQuery = ref('');
 const searching = ref(false);
@@ -633,6 +669,23 @@ const convMenuOptions = [
   { label: '置顶 / 取消置顶', key: 'pin' },
 ];
 
+/** 窄屏聊天头部只留「资料」，其余操作收进「···」菜单。 */
+const chatMenuOptions = computed(() => {
+  const options = [{ label: '复制会话 ID', key: 'copy' }];
+  if (selectedConversation.value?.kind === 'group') {
+    options.push({ label: '刷新群资料', key: 'group-info' });
+  }
+  return options;
+});
+
+function onChatMenu(key: string) {
+  if (key === 'copy') {
+    void copyConversationID();
+    return;
+  }
+  if (key === 'group-info') void refreshGroupInfo();
+}
+
 const muteOptions = [
   { label: '禁言 10 分钟', key: '600' },
   { label: '禁言 1 小时', key: '3600' },
@@ -643,6 +696,7 @@ const muteOptions = [
 const selectedConversation = computed(
   () => conversations.value.find(item => item.key === selectedKey.value) ?? null
 );
+const paneVisible = computed(() => chatConsolePaneVisibility(isMobile.value, mobilePane.value));
 const canSend = computed(
   () =>
     !!selectedKey.value &&
@@ -783,9 +837,24 @@ function stopMessagePolling() {
   }
 }
 
+/** 窄屏：从聊天内容回到会话列表。 */
+function backToList() {
+  mobilePane.value = 'list';
+  scrollPageToTop();
+}
+
+/** 切栏后把页面滚到顶部，别让用户停在原来的滚动位置。 */
+function scrollPageToTop() {
+  void nextTick(() => {
+    pageRoot.value?.scrollIntoView?.({ block: 'start' });
+  });
+}
+
 async function selectConversation(conv: ChatConsoleConversation) {
   if (!conv?.key) return;
   selectedKey.value = conv.key;
+  mobilePane.value = 'chat';
+  if (isMobile.value) scrollPageToTop();
   quoteTarget.value = null;
   // 换会话就清空 @ 目标：openid 只在本群有意义
   mentions.value = [];
@@ -1377,6 +1446,26 @@ onUnmounted(() => {
 
 .composer-hint {
   font-size: 0.8rem;
+}
+
+.chat-head-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.back-to-list {
+  flex: none;
+}
+
+/* 窄屏一次只显示一栏，聊天区可以给得高一些 */
+.is-mobile .msg-scroll {
+  max-height: 58vh;
 }
 
 .chat-key {

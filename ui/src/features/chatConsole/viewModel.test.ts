@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatConsoleConversation, ChatConsoleMessage } from '@/api/chatConsole';
 import {
+  chatConsolePaneVisibility,
   conversationLabel,
   mergeChatConsoleMessages,
   patchChatConsoleConversations,
@@ -66,6 +67,13 @@ describe('聊天控制台视图模型', () => {
       conv({ key: 'new', lastTs: 20 }),
     ]);
     expect(sorted.map(item => item.key)).toEqual(['pinned-old', 'new', 'old']);
+  });
+
+  it('窄屏一次只显示一栏，宽屏两栏并列', () => {
+    expect(chatConsolePaneVisibility(true, 'list')).toEqual({ list: true, chat: false });
+    expect(chatConsolePaneVisibility(true, 'chat')).toEqual({ list: false, chat: true });
+    expect(chatConsolePaneVisibility(false, 'list')).toEqual({ list: true, chat: true });
+    expect(chatConsolePaneVisibility(false, 'chat')).toEqual({ list: true, chat: true });
   });
 
   it('轮询刷新时保留本地未读数', () => {
