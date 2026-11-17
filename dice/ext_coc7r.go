@@ -165,6 +165,19 @@ func c7rIsGroupOnRule(ctx *MsgContext) bool {
 	return ctx != nil && ctx.Group != nil && ctx.Group.System == c7rExtName
 }
 
+// c7rSkillCannotGrow 判断技能能否通过成长检定提升。
+// 守秘人伴侣沿用七版规则：克苏鲁神话与信用评级不靠成长提升。
+func c7rSkillCannotGrow(tmpl *GameSystemTemplate, name string) bool {
+	if tmpl == nil {
+		return false
+	}
+	switch tmpl.GetAlias(name) {
+	case "克苏鲁神话", "信用评级":
+		return true
+	}
+	return false
+}
+
 // c7rAttrInt 读取角色卡上的整数值，读不到时返回 0。
 func c7rAttrInt(ctx *MsgContext, tmpl *GameSystemTemplate, name string) int64 {
 	if ctx == nil || tmpl == nil {
@@ -324,7 +337,8 @@ func c7rRollD100WithDice(ctx *MsgContext, bonus, penalty int) (int64, string) {
 
 // c7rLossResult 解析并结算理智损失表达式。
 type c7rLossResult struct {
-	loss int64 // 实际扣除
+	loss    int64 // 实际扣除
+	lossOri int64 // 调整（--half / --cap）前的值
 }
 
 func c7rEvalLoss(ctx *MsgContext, expr string, fumble bool, half bool, maxLoss int64) (c7rLossResult, error) {
@@ -339,13 +353,14 @@ func c7rEvalLoss(ctx *MsgContext, expr string, fumble bool, half bool, maxLoss i
 	if v < 0 {
 		v = 0
 	}
+	lossOri := v
 	if half {
 		v /= 2
 	}
 	if maxLoss > 0 && v > maxLoss {
 		v = maxLoss
 	}
-	return c7rLossResult{loss: v}, nil
+	return c7rLossResult{loss: v, lossOri: lossOri}, nil
 }
 
 // c7rCanModifyTarget 只有本人或骰主可以改动他人的角色卡。
@@ -460,33 +475,51 @@ func cmdScCoc7R(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResul
 		},
 	}
 
-	var b strings.Builder
-	verdict := "成功"
-	switch {
-	case fumble:
-		verdict = "大失败"
-	case !success:
-		verdict = "失败"
-	}
+	// 与 coc7 的 .sc 一致：先按约定填好 $t 变量，再渲染「COC:理智检定」，
+	// 这样自定义文本模板对 coc7r 同样生效；coc7r 自己的提示接在模板后面。
+	VarSetValueStr(mctx, "$t检定表达式文本", "1d100")
+	detailWrap := ""
 	if diceDetail != "" {
-		fmt.Fprintf(&b, "%s 的理智检定：D100=%d/%d %s（%s）\n", mctx.Player.Name, d100, san, verdict, diceDetail)
-	} else {
-		fmt.Fprintf(&b, "%s 的理智检定：D100=%d/%d %s\n", mctx.Player.Name, d100, san, verdict)
+		detailWrap = ", (" + diceDetail + ")"
 	}
-	if loss > 0 {
-		fmt.Fprintf(&b, "理智 %d → %d（-%d）\n", san, sanNew, loss)
-	} else {
-		fmt.Fprintf(&b, "理智 %d → %d（无损失）\n", san, sanNew)
+	VarSetValueStr(mctx, "$t检定计算过程", detailWrap)
+	VarSetValueInt64(mctx, "$tD100", d100)
+	VarSetValueInt64(mctx, "$t骰子出目", d100)
+	VarSetValueInt64(mctx, "$t检定结果", d100)
+	VarSetValueInt64(mctx, "$t判定值", san)
+	VarSetValueStr(mctx, "$t判定结果", GetResultText(mctx, rank, false))
+	VarSetValueStr(mctx, "$t判定结果_简短", GetResultText(mctx, rank, true))
+	VarSetValueInt64(mctx, "$tSuccessRank", int64(rank))
+	VarSetValueInt64(mctx, "$t旧值", san)
+	SetTempVars(mctx, mctx.Player.Name)
+	VarSetValueStr(mctx, "$t结果文本", DiceFormatTmpl(mctx, "COC:理智检定_单项结果文本"))
+	VarSetValueInt64(mctx, "$t新值", sanNew)
+	VarSetValueStr(mctx, "$t表达式文本", lossExpr)
+	VarSetValueInt64(mctx, "$t表达式值", loss)
+	VarSetValueInt64(mctx, "$t表达式原始值", res.lossOri)
+	VarSetValueInt64(mctx, "$t表达式调整值", loss)
+	VarSetValueStr(mctx, "$t提示_角色疯狂", "")
+	switch rank {
+	case -2:
+		VarSetValueStr(mctx, "$t附加语", DiceFormatTmpl(mctx, "COC:理智检定_附加语_大失败"))
+	case -1:
+		VarSetValueStr(mctx, "$t附加语", DiceFormatTmpl(mctx, "COC:理智检定_附加语_失败"))
+	case 1, 2, 3:
+		VarSetValueStr(mctx, "$t附加语", DiceFormatTmpl(mctx, "COC:理智检定_附加语_成功"))
+	case 4:
+		VarSetValueStr(mctx, "$t附加语", DiceFormatTmpl(mctx, "COC:理智检定_附加语_大成功"))
+	default:
+		VarSetValueStr(mctx, "$t附加语", "")
 	}
 
 	// sanity 关闭时回到七版流程：只结算损失并给出疯狂提示，不记账、不判 Shock/Changed/Lost
 	if !rules.Sanity {
 		if sanNew == 0 {
-			b.WriteString(DiceFormatTmpl(mctx, "COC:提示_永久疯狂") + "\n")
+			VarSetValueStr(mctx, "$t提示_角色疯狂", DiceFormatTmpl(mctx, "COC:提示_永久疯狂")+"\n")
 		} else if loss >= 5 {
-			b.WriteString(DiceFormatTmpl(mctx, "COC:提示_临时疯狂") + "\n")
+			VarSetValueStr(mctx, "$t提示_角色疯狂", DiceFormatTmpl(mctx, "COC:提示_临时疯狂")+"\n")
 		}
-		c7rReplySc(ctx, mctx, msg, cmdArgs, b.String())
+		c7rReplySc(ctx, mctx, msg, cmdArgs, DiceFormatTmpl(mctx, "COC:理智检定"))
 		if mctx.Player.AutoSetNameTemplate != "" {
 			_, _ = SetPlayerGroupCardByTemplate(mctx, mctx.Player.AutoSetNameTemplate)
 		}
@@ -494,6 +527,7 @@ func cmdScCoc7R(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResul
 	}
 
 	st.ChapterLoss += loss
+	var b strings.Builder
 
 	changedThreshold := pow / 5
 	if changedThreshold < 1 {
@@ -564,7 +598,11 @@ func cmdScCoc7R(ctx *MsgContext, msg *Message, cmdArgs *CmdArgs) CmdExecuteResul
 
 	c7rSaveState(mctx.Dice, stateKey, st)
 
-	c7rReplySc(ctx, mctx, msg, cmdArgs, b.String())
+	text := DiceFormatTmpl(mctx, "COC:理智检定")
+	if extra := strings.TrimSpace(b.String()); extra != "" {
+		text = strings.TrimRight(text, "\n") + "\n" + extra
+	}
+	c7rReplySc(ctx, mctx, msg, cmdArgs, text)
 	if mctx.Player.AutoSetNameTemplate != "" {
 		_, _ = SetPlayerGroupCardByTemplate(mctx, mctx.Player.AutoSetNameTemplate)
 	}
@@ -892,22 +930,6 @@ func c7rMigrateLegacy(ctx *MsgContext, cmdArgs *CmdArgs) string {
 
 // RegisterBuiltinExtCoc7R 注册 coc7r 扩展。
 func RegisterBuiltinExtCoc7R(self *Dice) {
-	helpSc := strings.Join([]string{
-		".sc <成功损失>/<失败损失> // 例：.sc 0/1D6",
-		".sc b 0/1 // 奖励骰（b2、b3 为多颗）；惩罚骰用 p、p2",
-		"  --cap=N   单次损失上限（用于“习惯恐惧”房规）",
-		"  --half    损失减半",
-		"  --mythos  本次冲击来自神话（需开启 mythos 可选规则）",
-	}, "\n")
-
-	cmdSc := &CmdItemInfo{
-		Name:          "sc",
-		ShortHelp:     helpSc,
-		Help:          "理智检定（守秘人伴侣版）:\n" + helpSc,
-		AllowDelegate: true,
-		Solve:         cmdScCoc7R,
-	}
-
 	cmdHub := &CmdItemInfo{
 		Name:      "c7r",
 		ShortHelp: ".c7r help|rule|status|ri|shock|migrate|reset|recover // coc7r 规则辅助",
@@ -928,9 +950,10 @@ func RegisterBuiltinExtCoc7R(self *Dice) {
 		GetDescText: GetExtensionDesc,
 		CmdMap: CmdMapCls{
 			"c7r": cmdHub,
-			// .sc 的入口在 coc7 扩展里按 group.System 分流；这里保留一份，
-			// 以便 coc7 扩展被单独关闭时 coc7r 群仍可用。
-			"sc": cmdSc,
+			// .sc 只由 coc7 扩展注册，其入口按 group.System 分流到 coc7r 版本。
+			// 这里不再重复注册：否则 .help 会收录两条同名指令，而运行时
+			// 命中的仍是 coc7 那一份。.set coc7r 会把 coc7 作为关联扩展一起
+			// 打开，所以 coc7r 群一定有 .sc；.sc 的额外参数见 .c7r help。
 		},
 	}
 	self.RegisterExtension(theExt)

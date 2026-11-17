@@ -728,6 +728,7 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 			FormatMismatch := errors.New("format mismatch")
 			SkillNotEntered := errors.New("skill not entered")
 			SkillTypeError := errors.New("skill value type error")
+			SkillCannotGrow := errors.New("skill cannot grow")
 			SuccessExprFormatError := errors.New("success expr format error")
 			FailExprFormatError := errors.New("fail expr format error")
 			// 技能名允许带冒号，否则 射击:手枪 这类专精技能会被截成「射击」
@@ -752,6 +753,14 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 				varValueStr := m[2] // 技能值 - 字符串
 				successExpr := m[6] // 成功的加值表达式
 				failExpr := m[5]    // 失败的加值表达式
+
+				// 守秘人伴侣：克苏鲁神话与信用评级不能靠成长检定提升
+				if mctx.Group != nil && mctx.Group.System == c7rExtName && c7rSkillCannotGrow(tmpl, varName) {
+					checkResult.varName = varName
+					checkResult.valid = false
+					checkResult.invalidReason = SkillCannotGrow
+					return checkResult
+				}
 
 				var varValue int64
 				checkResult.varName = varName
@@ -898,6 +907,8 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 						ReplyToSender(mctx, msg, DiceFormatTmpl(mctx, "COC:技能成长_错误的成功成长值"))
 					case errors.Is(checkResult.invalidReason, FailExprFormatError):
 						ReplyToSender(mctx, msg, DiceFormatTmpl(mctx, "COC:技能成长_错误的失败成长值"))
+					case errors.Is(checkResult.invalidReason, SkillCannotGrow):
+						ReplyToSender(mctx, msg, DiceFormatTmpl(mctx, "COC:技能成长_不能成长"))
 					}
 				}
 			} else {
@@ -950,6 +961,8 @@ func RegisterBuiltinExtCoc7(self *Dice) {
 							temp += DiceFormatTmpl(mctx, "COC:技能成长_错误的成功成长值_无前缀")
 						case errors.Is(checkResult.invalidReason, FailExprFormatError):
 							temp += DiceFormatTmpl(mctx, "COC:技能成长_错误的失败成长值_无前缀")
+						case errors.Is(checkResult.invalidReason, SkillCannotGrow):
+							temp += DiceFormatTmpl(mctx, "COC:技能成长_不能成长_无前缀")
 						}
 						checkResultStrs = append(checkResultStrs, temp)
 					}

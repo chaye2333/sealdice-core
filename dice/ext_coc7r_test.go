@@ -288,10 +288,13 @@ func TestCoc7RSanityCapKwarg(t *testing.T) {
 	runCmd(t, d, ep, adapter, ".set coc7r")
 	runCmd(t, d, ep, adapter, ".st 意志50 理智50")
 
-	// 习惯恐惧：单次最多扣 2 点
+	// 习惯恐惧：单次最多扣 2 点。模板里会显示「扣除6=6➯2点」
 	got := runCmd(t, d, ep, adapter, ".sc 6/6 --cap=2")
-	if !strings.Contains(got, "-2") {
+	if !strings.Contains(got, "➯2") || !strings.Contains(got, "扣除6=6") {
 		t.Fatalf("--cap 未生效: %q", got)
+	}
+	if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 理智"), "理智"); v != 48 {
+		t.Fatalf("--cap 后理智 = %d, want 48", v)
 	}
 }
 
@@ -622,9 +625,11 @@ func TestCoc7RShockBlocksSanityLoss(t *testing.T) {
 	if got := runCmd(t, d, ep, adapter, ".c7r shock clear"); !strings.Contains(got, "已解除") {
 		t.Fatalf(".c7r shock clear 输出异常: %q", got)
 	}
-	resumed := runCmd(t, d, ep, adapter, ".sc 5/5")
-	if !strings.Contains(resumed, "（-5）") {
-		t.Fatalf("解除 Shock 后应恢复扣理智: %q", resumed)
+	if resumed := runCmd(t, d, ep, adapter, ".sc 5/5"); !strings.Contains(resumed, "理智变化") {
+		t.Fatalf("解除 Shock 后应恢复正常理智检定: %q", resumed)
+	}
+	if sanResumed := skillValue(t, runCmd(t, d, ep, adapter, ".st show 理智"), "理智"); sanResumed != sanAfter-5 {
+		t.Fatalf("解除 Shock 后应恢复扣 5 点理智: %d → %d", sanAfter, sanResumed)
 	}
 }
 
@@ -707,6 +712,89 @@ func TestCoc7REnKeepsColonSkillInOneGroup(t *testing.T) {
 	}
 	if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 射击"), "射击"); v != 10 {
 		t.Fatalf(".en 射击:手枪+5 顺带把基础技能射击改成了 %d", v)
+	}
+}
+
+// .sc 只由 coc7 扩展注册（coc7r 版本由它按群规则分流），
+// 否则帮助索引里会出现两条同名 .sc。
+func TestCoc7RScCommandRegisteredOnce(t *testing.T) {
+	d, _, _, cleanup := newExecuteNewTestDice(t)
+	t.Cleanup(cleanup)
+
+	var owners []string
+	for _, ext := range d.ExtList {
+		if ext == nil {
+			continue
+		}
+		if _, exists := ext.CmdMap["sc"]; exists {
+			owners = append(owners, ext.Name)
+		}
+	}
+	if len(owners) != 1 || owners[0] != "coc7" {
+		t.Fatalf(".sc 被这些扩展注册: %v，应只由 coc7 注册", owners)
+	}
+}
+
+// coc7r 的 .sc 走 COC:理智检定 文本模板，自定义模板同样生效。
+func TestCoc7RScUsesCustomTextTemplate(t *testing.T) {
+	d, ep, adapter, cleanup := newExecuteNewTestDice(t)
+	t.Cleanup(cleanup)
+	prepareC7RTestDB(t, d)
+
+	d.TextMapRaw["COC"]["理智检定"] = []TextTemplateItem{
+		{"【自定义理智检定】{$t玩家} {$t旧值}➯{$t新值}", 1},
+	}
+	d.GenerateTextMap()
+
+	runCmd(t, d, ep, adapter, ".set coc7r")
+	runCmd(t, d, ep, adapter, ".st 意志50 智力50 理智50")
+
+	got := runCmd(t, d, ep, adapter, ".sc 5/5")
+	if !strings.Contains(got, "【自定义理智检定】") {
+		t.Fatalf("自定义文本模板未生效: %q", got)
+	}
+	if strings.Contains(got, "未知项") {
+		t.Fatalf("模板变量未填好: %q", got)
+	}
+	// 模板管正文，coc7r 自己的提示仍然接在后面
+	if !strings.Contains(got, "不自觉反应") {
+		t.Fatalf("自定义模板后 coc7r 提示丢失: %q", got)
+	}
+}
+
+// 守秘人伴侣：克苏鲁神话与信用评级不能靠成长检定提升；切回七版不受影响。
+func TestCoc7RGrowthRestriction(t *testing.T) {
+	d, ep, adapter, cleanup := newExecuteNewTestDice(t)
+	t.Cleanup(cleanup)
+	prepareC7RTestDB(t, d)
+
+	runCmd(t, d, ep, adapter, ".set coc7r")
+	runCmd(t, d, ep, adapter, ".st 克苏鲁神话20 信用评级50")
+
+	for _, skill := range []string{"克苏鲁神话", "信用评级"} {
+		if got := runCmd(t, d, ep, adapter, ".en "+skill); !strings.Contains(got, "不能通过成长检定提升") {
+			t.Fatalf("coc7r 下 %s 应拒绝成长: %q", skill, got)
+		}
+	}
+	if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 克苏鲁神话"), "克苏鲁神话"); v != 20 {
+		t.Fatalf("克苏鲁神话被成长成 %d", v)
+	}
+	if v := skillValue(t, runCmd(t, d, ep, adapter, ".st show 信用评级"), "信用评级"); v != 50 {
+		t.Fatalf("信用评级被成长成 %d", v)
+	}
+
+	// 批量成长里一条被拒、一条照常结算
+	got := runCmd(t, d, ep, adapter, ".en 克苏鲁神话|侦查")
+	if !strings.Contains(got, "不能通过成长检定提升") || !strings.Contains(got, "侦查") {
+		t.Fatalf("批量成长的拒绝信息缺失: %q", got)
+	}
+
+	// 切回七版后这条限制不再生效
+	runCmd(t, d, ep, adapter, ".set coc7")
+	runCmd(t, d, ep, adapter, ".st fmt")
+	runCmd(t, d, ep, adapter, ".st 克苏鲁神话20")
+	if got = runCmd(t, d, ep, adapter, ".en 克苏鲁神话"); strings.Contains(got, "不能通过成长检定提升") {
+		t.Fatalf("coc7 不应受 coc7r 的成长限制: %q", got)
 	}
 }
 
