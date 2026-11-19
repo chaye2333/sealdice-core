@@ -769,7 +769,7 @@ func identityBindDeliverPendingCodes(d *Dice) {
 				return false
 			}
 			body := fmt.Sprintf(
-				"【鲸娘与豹】身份绑定验证码\n\n"+
+				"【鲸鱼与豹】身份绑定验证码\n\n"+
 					"有人正在 QQ 官方机器人上把身份绑定到你这个号（%s）。\n"+
 					"如果**是你本人**在操作，请把下面的验证码私聊发给我：\n\n"+
 					"    %s\n\n"+

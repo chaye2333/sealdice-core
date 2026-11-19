@@ -31,7 +31,7 @@ func TestHelpFirstLineIsHardcodedAndIndependentFromDiceName(t *testing.T) {
 
 	reply := waitGroupMessage(t, env)
 	firstLine, _, _ := strings.Cut(reply, "\n")
-	if !strings.HasPrefix(firstLine, "鲸娘与豹 ") {
+	if !strings.HasPrefix(firstLine, "鲸鱼与豹 ") {
 		t.Fatalf(".help 第一行应为固定的标题，实际为 %q", firstLine)
 	}
 	if !strings.Contains(firstLine, VERSION.String()) {
