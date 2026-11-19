@@ -678,6 +678,9 @@ func (pa *PlatformAdapterOfficialQQ) makeHandlers() []interface{} {
 			event.GroupMemberAddEventHandler(pa.GroupMemberAddReceive),
 			// 群成员退群
 			event.GroupMemberRemoveEventHandler(pa.GroupMemberRemoveReceive),
+			// 单聊「主动消息」推送开关
+			event.C2CMsgReceiveEventHandler(pa.C2CMsgReceiveReceive),
+			event.C2CMsgRejectEventHandler(pa.C2CMsgRejectReceive),
 		)
 	}
 
@@ -1293,6 +1296,16 @@ func (pa *PlatformAdapterOfficialQQ) GroupMemberAddReceive(event *dto.WSPayload,
 
 		log.Infof("official qq: 机器人加入群 %s", groupID)
 
+		// 通知骰主：机器人被谁拉进了哪个群
+		pa.officialQQNoticeContext().Notice(
+			officialQQBotJoinedGroupNoticeText(
+				officialQQGroupNameForNotice(s, s.Parent.Parent, groupID),
+				groupID,
+				data.OpMemberOpenID,
+			),
+			NoticeTypeGroup,
+		)
+
 		// 发送入群致辞
 		go func() {
 			time.Sleep(2 * time.Second)
@@ -1316,11 +1329,8 @@ func (pa *PlatformAdapterOfficialQQ) GroupMemberAddReceive(event *dto.WSPayload,
 			GroupID:     groupID,
 			Sender: SenderBase{
 				UserID:   userID,
-				Nickname: "用户",
+				Nickname: officialQQOpenIDNickname(data.MemberOpenID),
 			},
-		}
-		if len(data.MemberOpenID) >= 4 {
-			msg.Sender.Nickname = "用户" + data.MemberOpenID[len(data.MemberOpenID)-4:]
 		}
 
 		pa.EndPoint.Session.OnGroupMemberJoined(ctx, msg)
@@ -1350,6 +1360,18 @@ func (pa *PlatformAdapterOfficialQQ) GroupMemberRemoveReceive(event *dto.WSPaylo
 			group.DiceIDExistsMap.Delete(pa.EndPoint.UserID)
 			group.MarkDirty(s.Parent)
 		}
+
+		// 通知骰主：机器人被谁移出了哪个群。群对象已经没关系了，
+		// 群名只能靠缓存，所以要把清理结果一并说明，免得骰主以为还挂着。
+		pa.officialQQNoticeContext().Notice(
+			officialQQBotLeftGroupNoticeText(
+				officialQQGroupNameForNotice(s, s.Parent.Parent, groupID),
+				groupID,
+				data.OpMemberOpenID,
+				exists,
+			),
+			NoticeTypeGroup,
+		)
 	}
 
 	return nil
@@ -1409,16 +1431,19 @@ func (pa *PlatformAdapterOfficialQQ) C2CFriendReceive(event *dto.WSPayload, data
 			Message:     "",
 			Sender: SenderBase{
 				UserID:   userID,
-				Nickname: "用户",
+				Nickname: officialQQOpenIDNickname(data.OpenID),
 			},
-		}
-		if len(data.OpenID) >= 4 {
-			msg.Sender.Nickname = "用户" + data.OpenID[len(data.OpenID)-4:]
 		}
 
 		ctx.Group, ctx.Player = GetPlayerInfoBySender(ctx, msg)
 		welcomeStr := DiceFormatTmpl(ctx, "核心:骰子成为好友")
 		log.Infof("official qq: 与%s 成为好友，发送好友致辞 %s", userID, welcomeStr)
+
+		// 通知骰主：好友事件没有 msg_id，这里用不带 $tEventID 的上下文发主动消息
+		pa.officialQQNoticeContext().Notice(
+			officialQQFriendAddNoticeText(data, parseOfficialQQFriendEventRaw(event), userID),
+			NoticeTypeInvite,
+		)
 
 		go func() {
 			time.Sleep(2 * time.Second)
@@ -1437,12 +1462,45 @@ func (pa *PlatformAdapterOfficialQQ) C2CFriendReceive(event *dto.WSPayload, data
 	case dto.EventC2CFriendDel:
 		userID := formatDiceIDOfficialQQUserOpenID(pa.UIN, data.OpenID)
 		log.Infof("official qq: 与 %s 解除好友关系", userID)
+
+		pa.officialQQNoticeContext().Notice(
+			officialQQFriendDelNoticeText(data, userID),
+			NoticeTypeInvite,
+		)
 	default:
 		// 忽略其他事件
 	}
 
 	return nil
 }
+
+// C2CMsgReceiveReceive 处理单聊「主动消息」推送开启事件（C2C_MSG_RECEIVE）。
+func (pa *PlatformAdapterOfficialQQ) C2CMsgReceiveReceive(event *dto.WSPayload, data *dto.WSC2CMsgReceiveData) error {
+	pa.c2cMsgSwitchReceive(event, data.OpenID, true)
+	return nil
+}
+
+// C2CMsgRejectReceive 处理单聊「主动消息」推送关闭事件（C2C_MSG_REJECT）。
+func (pa *PlatformAdapterOfficialQQ) C2CMsgRejectReceive(event *dto.WSPayload, data *dto.WSC2CMsgRejectData) error {
+	pa.c2cMsgSwitchReceive(event, data.OpenID, false)
+	return nil
+}
+
+// c2cMsgSwitchReceive 通报用户是否允许机器人发送主动消息：
+// 关掉之后骰主在这条会话上就收不到任何主动通知了，必须让他知道。
+func (pa *PlatformAdapterOfficialQQ) c2cMsgSwitchReceive(event *dto.WSPayload, openID string, enabled bool) {
+	s := pa.EndPoint.Session
+	log := s.Parent.Logger
+	log.Debugf("official qq: 收到单聊主动消息开关事件: %v, enabled=%t", event, enabled)
+
+	if strings.TrimSpace(openID) == "" {
+		return
+	}
+	diceID := formatDiceIDOfficialQQUserOpenID(pa.UIN, openID)
+	log.Infof("official qq: %s 的主动消息推送开关变为 %t", diceID, enabled)
+	pa.officialQQNoticeContext().Notice(officialQQC2CMsgSwitchNoticeText(enabled, diceID), NoticeTypeSystem)
+}
+
 func (pa *PlatformAdapterOfficialQQ) initPaginationCache() {
 	pa.paginationMu.Lock()
 	defer pa.paginationMu.Unlock()
